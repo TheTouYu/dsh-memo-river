@@ -1,0 +1,129 @@
+#!/usr/bin/env node
+/**
+ * import-dailynote.mjs — 把一篇日记语料导入某个工作区知识库（P1 验证素材）。
+ *
+ * 用法：
+ *   node scripts/import-dailynote.mjs \
+ *     --src /home/h/app/VCPToolBox/dailynote/教室建模归档 \
+ *     --cwd /home/h/app/dsh-memo-river/.selftest/classroom \
+ *     --bucket 教室建模归档
+ *
+ * 走**插件自己的**入库路径（src/store.ts 的 VCP schema + src/embed.ts 的 relayrouter 调用形状），
+ * 不复用参考库——这样嵌入与建表两条链都被真实验证。嵌入结果写入工作区 emb-cache.json，重跑免费。
+ */
+import { readdirSync, readFileSync } from 'node:fs'
+import { join, basename } from 'node:path'
+import { KnowledgeStore } from '../lib/store.js'
+import { EmbedClient } from '../lib/embed.js'
+import { Logger, ensureWorkspaceDirs, workspacePaths } from '../lib/runtime.js'
+import { resolveEmbed } from '../lib/workspace.js'
+import { Config as ConfigSchema } from '../lib/config.js'
+
+/** 参数解析：`--key value` 与裸布尔 `--force` 都要吃
+ * （早期版本按固定步长配对，布尔开关会把后面整串参数错位——实测曾把孤岛语料导进了河流库）。 */
+const args = new Map()
+const flags = new Set()
+for (let i = 2; i < process.argv.length; i++) {
+  const token = process.argv[i]
+  if (!token.startsWith('--')) continue
+  const key = token.replace(/^--/, '')
+  const next = process.argv[i + 1]
+  if (next === undefined || next.startsWith('--')) {
+    flags.add(key)
+    continue
+  }
+  args.set(key, next)
+  i += 1
+}
+
+const SRC = args.get('src') || '/home/h/app/VCPToolBox/dailynote/教室建模归档'
+const CWD = args.get('cwd') || '/home/h/app/dsh-memo-river/.selftest/classroom'
+const BUCKET = args.get('bucket') || basename(SRC)
+const FORCE = flags.has('force')
+
+/** 解析 schemastery Config 的默认值（与插件运行时同一份 schema）。 */
+const config = ConfigSchema({ bucket: BUCKET, native: { vcpRoot: '/home/h/app/VCPToolBox' } })
+
+const paths = workspacePaths(CWD, BUCKET)
+ensureWorkspaceDirs(paths)
+const logger = new Logger(paths.logPath)
+const resolved = resolveEmbed(config, paths)
+if (resolved.source === 'none') {
+  console.error('❌ 嵌入未配置：检查 /home/h/app/VCPToolBox/config.env 的 API_URL / API_Key')
+  process.exit(1)
+}
+console.log(`工作区: ${paths.root}`)
+console.log(`库文件: ${paths.dbPath}`)
+console.log(`桶    : ${BUCKET}`)
+console.log(`嵌入  : ${resolved.apiUrl} model=${resolved.model} dim=${resolved.dimension} source=${resolved.source}`)
+
+const store = new KnowledgeStore(paths.dbPath)
+const embed = new EmbedClient({
+  apiUrl: resolved.apiUrl,
+  apiKey: resolved.apiKey,
+  model: resolved.model,
+  dimension: resolved.dimension,
+  cachePath: paths.embCachePath,
+})
+
+const files = readdirSync(SRC)
+  .filter((f) => f.endsWith('.txt'))
+  .sort()
+
+if (!FORCE && store.files(BUCKET).length >= files.length) {
+  console.log(`已导入 ${store.files(BUCKET).length} 篇（--force 可重导）`)
+  store.close()
+  process.exit(0)
+}
+
+const TAG_LINE = /^Tag\s*[:：]\s*(.+)$/im
+
+async function main() {
+  const tagNames = new Set()
+  const parsed = files.map((f) => {
+    const content = readFileSync(join(SRC, f), 'utf8')
+    const m = content.match(TAG_LINE)
+    const tags = m ? m[1].split(/[,，、]/).map((t) => t.trim()).filter(Boolean) : []
+    for (const t of tags) tagNames.add(t)
+    return { file: f, content, tags }
+  })
+
+  console.log(`\n① 嵌入 ${parsed.length} 篇正文 + ${tagNames.size} 个 Tag（命中缓存则不重复消耗额度）`)
+  const contents = parsed.map((p) => p.content)
+  const tagList = [...tagNames]
+  const vectors = await embed.embed([...contents, ...tagList])
+  const chunkVectors = vectors.slice(0, contents.length)
+  const tagVectors = vectors.slice(contents.length)
+  console.log(`   缓存条数=${embed.cacheSize}`)
+
+  console.log('\n② 写入 VCP schema（files / chunks / tags / file_tags）')
+  const tagIds = new Map()
+  tagList.forEach((name, i) => tagIds.set(name, store.upsertTag(name, tagVectors[i])))
+
+  parsed.forEach((p, i) => {
+    const full = join(SRC, p.file)
+    const written = store.writeDiary({
+      path: full,
+      diaryName: BUCKET,
+      // VCP 约定（与参考库逐字对齐）：checksum = 文件名；size = 正文字符数（不是字节）。
+      // 这两项参与原生图的 content/provenance 代际哈希，写错会让 artifactSig 与生产库分叉。
+      checksum: p.file,
+      mtime: Date.now(),
+      size: p.content.length,
+      content: p.content,
+      chunkVector: chunkVectors[i],
+      tagIds: p.tags.map((t) => tagIds.get(t)),
+    })
+    console.log(`   D${written.chunkId} ← ${p.file} tags=[${p.tags.join(',')}]`)
+  })
+
+  const counts = store.counts()
+  console.log(`\n③ 结果：${JSON.stringify(counts)}`)
+  logger.info(`import-dailynote src=${SRC} counts=${JSON.stringify(counts)}`)
+  store.close()
+}
+
+main().catch((e) => {
+  console.error('FAILED:', e)
+  process.exit(1)
+})

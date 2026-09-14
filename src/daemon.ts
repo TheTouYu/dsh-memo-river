@@ -1,0 +1,241 @@
+/**
+ * src/daemon.ts — 守护循环（DESIGN.md §8）。
+ *
+ * ① 资产重建：比对 `artifactSig`，不一致或不存在 → `rebuildMemoArtifact`（失败保留上一代）
+ * ② 体检：跑 §7.3 四项，写日志到 `<workspace>/health.log`；超阈值告警
+ * ③ 草稿：把 `agent/turn-stopping` 收集的回合摘要写成 `pending/<date>-<slug>.md`（**等确认，不自动入库**）
+ * ④ 节流与退避：默认 15 分钟一轮；连续失败指数退避；每轮耗时与结果写日志
+ */
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import type { Config } from './config.js'
+import { formatHealth, healthReport } from './health.js'
+import { excerpt } from './render.js'
+import type { PendingDraft } from './session.js'
+import type { WorkspaceRuntime } from './workspace.js'
+
+export interface GuardianRound {
+  round: number
+  at: number
+  elapsedMs: number
+  ok: boolean
+  artifactSig: string | null
+  artifactRebuilt: boolean
+  health: { components: number; hubRatio: number | null; uncoveredRatio: number; warnings: string[] }
+  draftsWritten: number
+  error: string | null
+  nextDelayMs: number
+}
+
+export interface DaemonOptions {
+  config: Config
+  workspace: WorkspaceRuntime
+  log(level: 'info' | 'warn' | 'error', message: string): void
+  /** 注册周期任务；返回 disposer（调用方保证随 fiber 释放）。 */
+  setInterval(fn: () => void, ms: number): () => void
+  /** 取出并清空待落盘草稿（按工作区过滤由调用方负责）。 */
+  takeDrafts(): Array<{ state: { sessionId: string; cwd: string | null }; draft: PendingDraft }>
+}
+
+export class WorkspaceDaemon {
+  private round = 0
+  private consecutiveFailures = 0
+  private lastArtifactSig: string | null = null
+  private timer: (() => void) | null = null
+  private running = false
+
+  constructor(private readonly options: DaemonOptions) {}
+
+  get rounds(): number {
+    return this.round
+  }
+
+  get failures(): number {
+    return this.consecutiveFailures
+  }
+
+  /** 启动周期任务（幂等）。 */
+  start(): void {
+    if (this.timer || !this.options.config.maintenance.enabled) return
+    const delay = this.nextDelay()
+    this.timer = this.options.setInterval(() => {
+      void this.runOnce()
+    }, delay)
+    this.options.log(
+      'info',
+      `guardian-started bucket=${this.options.workspace.paths.bucket} intervalMs=${delay} healthLog=${this.options.workspace.paths.healthLogPath}`,
+    )
+  }
+
+  stop(): void {
+    this.timer?.()
+    this.timer = null
+  }
+
+  /** ④ 连续失败指数退避（上限 maxBackoff 倍）。 */
+  private nextDelay(): number {
+    const base = this.options.config.intervalMs
+    const factor = Math.min(this.options.config.maintenance.maxBackoff, Math.pow(2, this.consecutiveFailures))
+    return Math.round(base * factor)
+  }
+
+  /** 跑一轮守护。永不抛。 */
+  async runOnce(): Promise<GuardianRound> {
+    const t0 = Date.now()
+    const at = t0
+    this.round += 1
+    const { workspace, log } = this.options
+    let artifactSig: string | null = null
+    let artifactRebuilt = false
+    let error: string | null = null
+    let draftsWritten = 0
+
+    try {
+      /* ① 资产重建 */
+      const loaded = await workspace.ensureLoaded()
+      if (loaded) {
+        const before = workspace.engine.artifactState?.artifactSig ?? null
+        const state = await workspace.engine.ensureArtifact()
+        artifactSig = state.artifactSig
+        artifactRebuilt = before !== state.artifactSig
+        this.lastArtifactSig = state.artifactSig
+        if (artifactRebuilt) log('info', `guardian artifact-rebuilt sig=${state.artifactSig.slice(0, 24)}… elapsedMs=${state.elapsedMs}`)
+      }
+
+      /* ② 四项体检 → health.log */
+      const report = healthReport(workspace.store, workspace.paths.bucket)
+      const line = `[${new Date(at).toISOString()}] round=${this.round} components=${report.components} ` +
+        `hub=${report.hub ? `${report.hub.name}:${report.hub.count}/${report.counts.files}` : 'n/a'} ` +
+        `omegaMean=${report.omega.mean === null ? 'n/a' : report.omega.mean.toFixed(3)} omegaN=${report.omega.samples} ` +
+        `uncovered=${report.uncovered.neverRecalled}/${report.uncovered.files} ` +
+        `used=${report.usage ? `${report.usage.everUsed}/${report.usage.files}` : 'n/a'} ` +
+        `topUsed=${report.usage?.top[0] ? `D${report.usage.top[0].fileId}×${report.usage.top[0].total}` : 'n/a'} ` +
+        `warnings=${report.warnings.length}${report.warnings.length ? ` :: ${report.warnings.join(' | ')}` : ''}`
+      try {
+        mkdirSync(workspace.paths.root, { recursive: true })
+        appendFileSync(workspace.paths.healthLogPath, line + '\n')
+      } catch {
+        /* 体检日志写失败静默 */
+      }
+      for (const w of report.warnings) log('warn', `guardian-health: ${w}`)
+
+      /* ③ 草稿落盘（等确认，不自动入库） */
+      if (this.options.config.maintenance.drafts) {
+        draftsWritten = this.flushDrafts()
+      }
+
+      this.consecutiveFailures = 0
+      const round: GuardianRound = {
+        round: this.round,
+        at,
+        elapsedMs: Date.now() - t0,
+        ok: true,
+        artifactSig,
+        artifactRebuilt,
+        health: {
+          components: report.components,
+          hubRatio: report.hub?.ratio ?? null,
+          uncoveredRatio: report.uncovered.ratio,
+          warnings: report.warnings,
+        },
+        draftsWritten,
+        error: null,
+        nextDelayMs: this.nextDelay(),
+      }
+      log(
+        'info',
+        `guardian-round=${round.round} ok=1 components=${report.components} artifactRebuilt=${artifactRebuilt} ` +
+          `drafts=${draftsWritten} elapsedMs=${round.elapsedMs} nextDelayMs=${round.nextDelayMs}`,
+      )
+      return round
+    } catch (e) {
+      error = String((e as Error)?.message ?? e)
+      this.consecutiveFailures += 1
+      const round: GuardianRound = {
+        round: this.round,
+        at,
+        elapsedMs: Date.now() - t0,
+        ok: false,
+        artifactSig,
+        artifactRebuilt,
+        health: { components: -1, hubRatio: null, uncoveredRatio: 0, warnings: [] },
+        draftsWritten,
+        error,
+        nextDelayMs: this.nextDelay(),
+      }
+      log('error', `guardian-round=${round.round} ok=0 error=${error} failures=${this.consecutiveFailures} nextDelayMs=${round.nextDelayMs}`)
+      return round
+    }
+  }
+
+  /** 把收集到的回合草稿写成 pending/<date>-<slug>.md。返回写入篇数。 */
+  flushDrafts(): number {
+    const { workspace } = this.options
+    const drafts = this.options.takeDrafts()
+    let written = 0
+    for (const { state, draft } of drafts) {
+      if (state.cwd) {
+        // 只落盘属于本工作区的草稿
+        const expected = workspace.paths.cwd
+        if (expected && state.cwd !== expected) continue
+      }
+      try {
+        mkdirSync(workspace.paths.pendingDir, { recursive: true })
+        const date = new Date(draft.at).toISOString().slice(0, 10)
+        const slug = (draft.userText || 'turn').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'turn'
+        const file = join(workspace.paths.pendingDir, `${date}-${slug}-t${draft.turn}.md`)
+        const body = [
+          `# 候选草稿（等确认，未入库）`,
+          '',
+          `- 会话：${state.sessionId}`,
+          `- 回合：${draft.turn} @ ${new Date(draft.at).toISOString()}`,
+          `- 桶：${workspace.paths.bucket}`,
+          '',
+          `## 本轮用户`,
+          draft.userText ? excerpt(draft.userText, 600) : '(空)',
+          '',
+          `## 本轮助手`,
+          draft.assistantText ? excerpt(draft.assistantText, 900) : '(空)',
+          '',
+          `## 建议 Tag（来自本轮被动召回的 matchedTags，须经 memo_tags 复核后复用）`,
+          draft.suggestedTags.length > 0 ? draft.suggestedTags.join(', ') : '(无)',
+          '',
+          `## 相关旧日记`,
+          draft.relatedIds.length > 0 ? draft.relatedIds.map((id) => `D${id}`).join(' ') : '(无)',
+          '',
+          `> 本文件是**草稿**：确认后用 memo_write 显式入库（会走 Tag 校验与枢纽闸门）。`,
+        ].join('\n')
+        writeFileSync(file, body)
+        written += 1
+      } catch (e) {
+        this.options.log('warn', `draft-write-failed: ${String((e as Error)?.message ?? e)}`)
+      }
+    }
+    return written
+  }
+
+  /** 供 memo_stats / 测试查看最近一轮。 */
+  get lastArtifactSignature(): string | null {
+    return this.lastArtifactSig
+  }
+
+  get isRunning(): boolean {
+    return this.running
+  }
+
+  /** 手动触发一轮（测试用），带互斥。 */
+  async triggerManually(): Promise<GuardianRound | null> {
+    if (this.running) return null
+    this.running = true
+    try {
+      return await this.runOnce()
+    } finally {
+      this.running = false
+    }
+  }
+
+  /** 体检文本（日志/工具共用）。 */
+  healthText(): string {
+    return formatHealth(healthReport(this.options.workspace.store, this.options.workspace.paths.bucket))
+  }
+}
