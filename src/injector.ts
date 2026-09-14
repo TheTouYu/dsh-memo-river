@@ -107,10 +107,10 @@ function recallOptions(config: Config, queryId: string, gateText = ''): RecallOp
   }
 }
 /** 解析会话的 cwd：header.cwd 优先，其次用已记住的，最后退回进程 cwd。 */
-export function resolveCwd(agent: AgentLike, state: SessionState): string {
+export function resolveCwd(agent: AgentLike, state: SessionState | null | undefined): string {
   const fromHeader = agent.session?.header?.cwd
   if (typeof fromHeader === 'string' && fromHeader) return fromHeader
-  if (state.cwd) return state.cwd
+  if (state?.cwd) return state.cwd
   return process.cwd()
 }
 
@@ -220,7 +220,22 @@ export async function buildTailInjection(
   state.lastStep = step
 
   const msgs = [...history, ...claimedMsgs]
-  const recent = msgs.map(messageText)
+  // 票07：压缩事件触发时，查询锚取压缩消息之后的首段真实内容——压缩摘要概括整轮旧主题，
+  // 相似度会被摊平、把选材钉在旧热点上（2026-09-14 生产实锤：压缩联动注入了昨日 GUI 族
+  // 日记，漏掉 3 分钟前刚写的最相关篇）。压缩后无内容则退回全窗口。
+  let queryMsgs = msgs
+  if (compactionFired) {
+    let ci = -1
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const src = (msgs[i] as { source?: { plugin?: string } })?.source
+      if (src?.plugin === 'compact') {
+        ci = i
+        break
+      }
+    }
+    if (ci >= 0 && ci + 1 < msgs.length) queryMsgs = msgs.slice(ci + 1)
+  }
+  const recent = queryMsgs.map(messageText)
 
   /** 门控专用（与检索窗口解耦）：优先本轮 claimed 里最后一条 user，其次回落到历史。 */
   let currentUserText = ''
@@ -241,7 +256,7 @@ export async function buildTailInjection(
     // 带够诊断：这类“静默不注入”必须一次就能定位（§1 不变量 6）。
     logger.info(
       `${renderSkipNotice({ fallbackReason: 'empty-query-field' } as never, workspace.paths.bucket)} ` +
-        `turn=${turn} step=${step} history=${history.length} claimed=${claimedMsgs.length}`,
+        `turn=${turn} step=${step} history=${history.length} claimed=${claimedMsgs.length} session=${sessionId}`,
     )
     return null
   }
@@ -264,7 +279,7 @@ export async function buildTailInjection(
     // 门控不过 / 无候选 → 清空不注入，带 fallbackReason（§6.3），只记日志不进模型请求。
     state.lastFallbackReason = outcome.fallbackReason
     state.skippedCount += 1
-    logger.info(renderSkipNotice(outcome, workspace.paths.bucket))
+    logger.info(`${renderSkipNotice(outcome, workspace.paths.bucket)} session=${sessionId}`)
     return null
   }
 
@@ -295,7 +310,7 @@ export async function buildTailInjection(
     logger.info(
       `inject-skip bucket=${workspace.paths.bucket} reason=identical-selection ` +
         `ids=${outcome.selected.map((c) => `D${c.id}`).join(',')} chars=${text.length} ` +
-        `sinceLastInject=${turn - state.lastInjectTurn} turns injectMode=${isTurnStart ? 'interactive' : 'autonomous'}`,
+        `sinceLastInject=${turn - state.lastInjectTurn} turns injectMode=${isTurnStart ? 'interactive' : 'autonomous'} session=${sessionId}`,
     )
     return null
   }
@@ -322,6 +337,8 @@ export async function buildTailInjection(
       `omega=${outcome.omega === null ? 'n/a' : outcome.omega.toFixed(3)} regime=${outcome.regime ?? '-'} ` +
       `mode=${outcome.mode} chars=${text.length} candidates=${outcome.candidateCount} dropped=${outcome.dropped.length} ` +
       `injectMode=${isTurnStart ? 'interactive' : 'autonomous'}${compactionFired ? ' trigger=compaction' : ''} ` +
+      `session=${sessionId} gate={passed:${outcome.gate.passed},maxKnn:${outcome.gate.maxKnn.toFixed(4)},` +
+      `threshold:${outcome.gate.threshold},gateVector:${outcome.gate.gateVector},retrievalMaxKnn:${outcome.gate.retrievalMaxKnn.toFixed(4)}} ` +
       `elapsedMs=${outcome.elapsedMs}`,
   )
   return text
@@ -356,6 +373,40 @@ function hasMemoWriteCall(message: unknown): boolean {
   )
 }
 
+/* ── 票05：增量锚的工具输出封顶（用户拍板 2026-09-14）──────────────────────────
+ * 工具大输出（浏览器 DOM dump 等）不是概念进展，全额计入增量锚会在几分钟内攒满
+ * 50K 反复触发（生产实锤：11:04:48/11:06:36/11:08:48 三连拍）。封顶口径：
+ * 单次工具输出计入股 = min(实际长度, 本会话截尾均值)；均值 = 最近 ≤20 次工具输出
+ * 长度去掉最高 10% 与最低 10% 后取平均（适应会话形态）；样本 <8 次用保守默认上限。
+ * 助手产出与真实用户消息不封顶。 */
+export const DEFAULT_TOOL_CAP_CHARS = 4000
+export const WRITE_NUDGE_MIN_SPACING_MS = 5 * 60_000
+const TOOL_LEN_SAMPLE_MAX = 20
+const TOOL_LEN_WARMUP = 8
+
+function trimmedMean(nums: number[]): number {
+  const s = [...nums].sort((a, b) => a - b)
+  const drop = Math.max(1, Math.floor(s.length * 0.1))
+  const mid = s.slice(drop, s.length - drop)
+  if (mid.length === 0) return s[Math.floor(s.length / 2)] ?? DEFAULT_TOOL_CAP_CHARS
+  return mid.reduce((a, b) => a + b, 0) / mid.length
+}
+
+/** 单条工具输出计入增量锚的字符数（截尾均值封顶；导出供验收直接测）。 */
+export function cappedToolChars(toolLens: number[], len: number): number {
+  if (len <= DEFAULT_TOOL_CAP_CHARS) return len
+  if (toolLens.length < TOOL_LEN_WARMUP) return Math.min(len, DEFAULT_TOOL_CAP_CHARS)
+  return Math.min(len, Math.round(trimmedMean(toolLens)))
+}
+
+/** 工具结果消息（user 角色、source.kind='tool'）——增量锚只对这类文本封顶。 */
+function isToolResultMsg(m: unknown): boolean {
+  return (
+    (m as { role?: string }).role === 'user' &&
+    (m as { source?: { kind?: string } }).source?.kind === 'tool'
+  )
+}
+
 /**
  * 写入节律提醒（ACP nudge 移植）：工程触发 + 弹药 + 限流，让模型在正确的时机被提醒写日记。
  * 四锚触发（任一满足即提醒）：
@@ -381,6 +432,9 @@ export function evaluateWriteNudge(
   const everySteps = t.writeNudgeEverySteps
   const growthChars = t.writeNudgeGrowthChars
   if (everyMin <= 0 && everyTurns <= 0 && everySteps <= 0 && growthChars <= 0) return null
+  // 票05：最小重发间隔——任何锚都不豁免（issue #108 教训：正反馈连拍）。
+  // 上一发在 5 分钟内 → 无论步/增量/时间/轮锚是否到位都不再发。
+  if (state.lastWriteNudgeAt > 0 && now - state.lastWriteNudgeAt < WRITE_NUDGE_MIN_SPACING_MS) return null
   // 自主锚：不依赖 draft
   const anchorStep = Math.max(state.lastDiaryWriteStep, state.lastWriteNudgeStep)
   const stepsSince = step >= anchorStep ? step - anchorStep : step // 新回合步号回卷 → 从回合起计
@@ -411,7 +465,14 @@ export function evaluateWriteNudge(
       : turnsDue
         ? `已 ${turnsSince} 轮汇报未写入`
         : `已主动思考 ${Math.max(1, Math.round(activeSinceMs / 60_000))} 分钟未写`
-  const digest = draft?.digest ?? `自主任务进行中（step ${step}，上下文 +${Math.max(0, Math.round(growth / 1000))}K 字）`
+  state.lastWriteNudgeReason = reason
+  // 票05：digest 现取——自主态锚用观测循环里更新的最近助手实质文本首行（turn-stopping
+  // 的 draft 存货在长自主回合里是旧战况，2026-09-14 实测收到引用上回合摘要的提醒）；
+  // 交互态锚仍优先 draft（回合摘要含用户语境）。取不到各自的鲜货就互相兜底。
+  const autonomous = stepDue || growthDue
+  const digest = autonomous
+    ? state.lastAssistantDigest || draft?.digest || `自主任务进行中（step ${step}，上下文 +${Math.max(0, Math.round(growth / 1000))}K 字）`
+    : draft?.digest || state.lastAssistantDigest || `自主任务进行中（step ${step}）`
   return renderWriteNudge(reason, draft?.turn ?? turn, digest, draft?.suggestedTags ?? [])
 }
 
@@ -443,11 +504,26 @@ export function installInjection(
         let contextChars: number | null = null
         if (wstate) {
           const log = (payload.agent.session?.deriveMessages?.() ?? []) as unknown[]
+          // 票05：增量锚的量尺——工具输出按截尾均值封顶计入（大 dump ≠ 概念进展），
+          // 其余消息（助手正文/真实用户输入）全额计入。
           let chars = 0
-          for (let i = 0; i < log.length; i++) chars += messageText(log[i]).length
+          for (let i = 0; i < log.length; i++) {
+            const t = messageText(log[i]).length
+            chars += isToolResultMsg(log[i]) ? cappedToolChars(wstate.toolLens, t) : t
+          }
           contextChars = chars
           const from = Math.min(wstate.lastObservedLogLength, log.length)
           for (let i = from; i < log.length; i++) {
+            const txt = messageText(log[i])
+            if (isToolResultMsg(log[i]) && txt.length > 0) {
+              wstate.toolLens.push(txt.length)
+              if (wstate.toolLens.length > TOOL_LEN_SAMPLE_MAX) wstate.toolLens.shift()
+            }
+            // 票05：digest 现取——记最近一条 ≥150 字助手正文的首行（自主态 nudge 的鲜弹药）。
+            if ((log[i] as { role?: string }).role === 'assistant' && txt.length >= 150) {
+              const firstLine = txt.split('\n').map((x) => x.trim()).find((x) => x.length > 0) ?? ''
+              if (firstLine) wstate.lastAssistantDigest = firstLine.slice(0, 80)
+            }
             if (hasMemoWriteCall(log[i])) {
               wstate.lastDiaryWriteAt = Date.now()
               wstate.lastDiaryWriteTurn = payload.turn
@@ -474,14 +550,32 @@ export function installInjection(
         if (text) extra.push(createInjectionMessage(text))
         if (nudge) {
           extra.push(createWriteNudgeMessage(nudge))
-          deps.log('info', `write-nudge session=${wstate!.sessionId} turn=${payload.turn}`)
+          // 票01：遥测落桶日志（memo-river.log）——deps.log 是宿主 logger，生产实测两处都看不到
+          // （09-14 评估：composer 11 次投递、桶日志 0 行）。带触发理由与步号。
+          try {
+            const wsLog = deps.getWorkspace(resolveCwd(payload.agent, wstate)).logger
+            wsLog.info(
+              `write-nudge session=${wstate!.sessionId} turn=${payload.turn} step=${payload.step} reason=${wstate!.lastWriteNudgeReason}`,
+            )
+          } catch {
+            deps.log('info', `write-nudge session=${wstate!.sessionId} turn=${payload.turn} reason=${wstate!.lastWriteNudgeReason}`)
+          }
         }
         if (extra.length === 0) return decision
         // ② 追加到批次末尾 = 请求消息数组的尾部（在 assistant 回答之前）。
         return { ...decision, messages: [...decision.messages, ...extra] }
       } catch (e) {
         // ③ 失败降级为「不注入 + 记日志」，绝不阻塞主流程（§6.5）。
-        deps.log('error', `pre-step-inject-failed: ${String((e as Error)?.stack ?? e)}`)
+        const failMsg = `pre-step-inject-failed: ${String((e as Error)?.stack ?? e)}`
+        deps.log('error', failMsg)
+        // 票01/03：失败也要落桶日志——否则这类「静默不注入」在 memo-river.log 里无迹可寻
+        // （09-14 排查 f23d80 空桶时正是缺这条线）。best-effort，cwd 解析失败不二次抛。
+        try {
+          const st = peekSession(payload.agent.session?.id ?? '')
+          deps.getWorkspace(resolveCwd(payload.agent, st)).logger.error(failMsg)
+        } catch {
+          /* 双落失败则只剩 deps.log 一条腿 */
+        }
         return decision
       }
     },

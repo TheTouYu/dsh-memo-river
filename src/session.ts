@@ -97,6 +97,12 @@ export interface SessionState {
   lastWriteNudgeTurn: number
   /** 最近一次发出写入节律提醒的步号（自主态步锚之一）。 */
   lastWriteNudgeStep: number
+  /** 最近一次 write-nudge 的触发理由（遥测：落桶日志用，evaluateWriteNudge 写入）。 */
+  lastWriteNudgeReason: string
+  /** 最近观测到的工具输出长度环形样本（≤20 条；增量锚截尾均值的量尺，票05）。 */
+  toolLens: number[]
+  /** 最近一条 ≥150 字助手正文的首行摘要（票05：digest 触发时现取，不走 turn-stopping 存货）。 */
+  lastAssistantDigest: string
   /** 模型主动思考累计毫秒（llm/stream 实际流时长逐次累加；不含工具执行、不含空闲）。 */
   activeMs: number
   /** 最近一次提醒/写入时的 activeMs 基线（时间锚只量「思考时间」，2026-09-13 用户拍板）。 */
@@ -147,6 +153,9 @@ export function getSession(sessionId: string, cwd: string | null): SessionState 
     lastDiaryWriteTurn: 0,
     lastDiaryWriteStep: 0,
     lastWriteNudgeStep: 0,
+    lastWriteNudgeReason: '',
+    toolLens: [],
+    lastAssistantDigest: '',
     activeMs: 0,
     activeMsAnchor: 0,
     nudgeAnchorChars: 0,

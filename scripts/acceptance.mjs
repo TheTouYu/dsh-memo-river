@@ -1226,15 +1226,20 @@ hr('#24 时间锚思考口径：空闲/工具时间不计入，只有 llm/stream
   st24.lastDiaryWriteAt = Date.now() - 60_000
   const toolWaitQuiet = evaluateWriteNudge(cfg24, st24, 5, Date.now(), 1, 1000) === null
   st24.activeMs = 22 * 60_000 // 自上次提醒（11min 锚）再思考 11 分钟 ≥ 阈值 10
+  // 票05：最小重发间隔 5 分钟——上一发刚发过（activeFired 时已置 lastWriteNudgeAt=now），
+  // 先验证 2 分钟内不重发，再回拨到 6 分钟前验证可重发。
+  st24.activeMs = 22 * 60_000
+  const tooSoon = evaluateWriteNudge(cfg24, st24, 5, Date.now(), 1, 1000) === null
+  st24.lastWriteNudgeAt = Date.now() - 6 * 60_000
   const thinkAgainFires = !!evaluateWriteNudge(cfg24, st24, 6, Date.now(), 1, 1000)
   check(
     24,
     '时间锚思考口径：空闲墙钟不计入；llm/stream 思考累计达阈值才触发；锚随写入/提醒重置',
-    idleQuiet && activeFired && anchorReset && toolWaitQuiet && thinkAgainFires,
+    idleQuiet && activeFired && anchorReset && toolWaitQuiet && tooSoon && thinkAgainFires,
     [
       `① 空闲 8 小时（activeMs 无增量）：${idleQuiet ? '✅ 不触发' : '❌ 墙钟口径复发'}`,
       `② 思考累计 11 分钟：${activeFired ? '✅ 触发（文案「已主动思考」）' : '❌'}`,
-      `③ 锚重置：${anchorReset ? '✅ activeMsAnchor 跟进' : '❌'}；5 分钟无思考：${toolWaitQuiet ? '✅ 静默' : '❌'}；再思考 11 分钟：${thinkAgainFires ? '✅ 触发' : '❌'}`,
+      `③ 锚重置：${anchorReset ? '✅ activeMsAnchor 跟进' : '❌'}；5 分钟无思考：${toolWaitQuiet ? '✅ 静默' : '❌'}；2 分钟内重发：${tooSoon ? '✅ 被 5 分钟最小间隔压制' : '❌'}；再思考 11 分钟且过间隔：${thinkAgainFires ? '✅ 触发' : '❌'}`,
     ],
   )
   h24.dispose()
@@ -1312,6 +1317,204 @@ hr('#25 近因保底·写入时间戳：同日平局由写入时刻决胜（票0
     ],
   )
   wsTs.dispose?.()
+}
+
+hr('#27 空桶注入留痕：inject-skip reason=empty-corpus 落桶日志且带 session（票03——生产排查 f23d80 时疑缺此行）')
+{
+  const E_CWD = join(tmpdir(), `memo-river-empty-${process.pid}`)
+  const ePaths = workspacePaths(E_CWD, '空桶测试')
+  rmSync(E_CWD, { recursive: true, force: true })
+  rmSync(ePaths.root, { recursive: true, force: true })
+  mkdirSync(E_CWD, { recursive: true })
+  const h27 = createMockCtx()
+  apply(h27.ctx, makeConfig({ bucket: '空桶测试' }))
+  const agent27 = createAgent('sess-empty-27', E_CWD, [])
+  await runPreStep(h27, agent27, 1, [textMsg('user', '今天做点什么好？')], 1)
+  let log27 = ''
+  try {
+    log27 = readFileSync(join(ePaths.root, 'memo-river.log'), 'utf8')
+  } catch {
+    /* 日志文件不存在 = 留痕失败，断言自然红 */
+  }
+  const skipOk = log27.includes('inject-skip') && log27.includes('empty-corpus')
+  const sessionOk = log27.includes('session=sess-empty-27')
+  check(
+    27,
+    '空桶：注入评估留 empty-corpus 跳过行 + session 归因（票02/03）',
+    skipOk && sessionOk,
+    [`桶日志片段：${log27.split('\n').filter((l) => l.includes('empty-corpus') || l.includes('inject-skip')).slice(-2).join(' ⏎ ') || '（无）'}`],
+  )
+}
+
+hr('#28 注入日志可归因：inject 成功行带 session + gate 分数（票02——校准实验缺通过样本分布的补齐）')
+{
+  const h28 = createMockCtx()
+  apply(h28.ctx, makeConfig({ bucket: BUCKET_RIVER, inject: { autonomousInjectEverySteps: 2 } }))
+  const agent28 = createAgent('sess-log-28', WS_RIVER, [
+    textMsg('user', '我这边现在渲染又卡了，上次教室那个是怎么解决的？'),
+    textMsg('assistant', '上次是把阴影贴图降了一档。'),
+  ])
+  await runPreStep(h28, agent28, 1, [], 1)
+  await runPreStep(h28, agent28, 1, [], 3)
+  const riverLog = readFileSync(join(workspacePaths(WS_RIVER, BUCKET_RIVER).root, 'memo-river.log'), 'utf8')
+  const ours = riverLog.split('\n').filter((l) => l.includes('session=sess-log-28'))
+  const injectLine = ours.find((l) => l.includes('] [info] inject bucket='))
+  const gateOk = !!injectLine && injectLine.includes('gate={passed:true') && injectLine.includes('maxKnn:') && injectLine.includes('retrievalMaxKnn:')
+  check(
+    28,
+    '注入成功行带 session id 与 gate 分数块（maxKnn/threshold/gateVector/retrievalMaxKnn）',
+    ours.length >= 1 && gateOk,
+    [`本会话日志行数=${ours.length}；inject 行 gate 块：${injectLine?.slice(injectLine.indexOf('gate='), injectLine.indexOf('gate=') + 90) || '（无）'}`],
+  )
+}
+
+hr('#29 增量锚工具输出封顶（截尾均值）+ 最小重发间隔（票05 用户拍板口径）')
+{
+  const { cappedToolChars, evaluateWriteNudge } = await import('../lib/injector.js')
+  const { getSession } = await import('../lib/session.js')
+  // 截尾均值：8 样本 [1000..3000]，去最高 10%（3000）最低 10%（1000）→ 均值 2000
+  const warm = [1000, 2000, 3000, 2000, 1500, 2500, 1800, 2200]
+  const capWarm = cappedToolChars(warm, 60000) === 2000
+  const capCold = cappedToolChars([1000, 2000], 60000) === 4000 // 样本 <8 → 保守默认 4000
+  const capSmall = cappedToolChars(warm, 2500) === 2500 // 未超默认上限的小输出不折
+  const cfg29 = makeConfig({ bucket: BUCKET_RIVER, inject: { writeNudgeEverySteps: 10 } })
+  const st29 = getSession('sess-nudge-29', null)
+  st29.lastDiaryWriteStep = 0
+  st29.lastWriteNudgeStep = 0
+  st29.nudgeAnchorChars = 0
+  st29.lastWriteNudgeAt = Date.now() - 2 * 60_000
+  const blocked = evaluateWriteNudge(cfg29, st29, 1, Date.now(), 20, 1000) === null // stepDue 到位但 2 分钟内 → 压制
+  st29.lastWriteNudgeAt = Date.now() - 6 * 60_000
+  st29.lastWriteNudgeStep = 0
+  const fired = !!evaluateWriteNudge(cfg29, st29, 1, Date.now(), 20, 1000) // 过 5 分钟 → 放行
+  // 票01 handler 全路径：nudge 触发后 write-nudge 行必须落**桶日志**（deps.log 宿主面生产实测不可见）
+  const h29h = createMockCtx()
+  apply(
+    h29h.ctx,
+    makeConfig({
+      bucket: BUCKET_RIVER,
+      inject: { writeNudgeGrowthChars: 50, writeNudgeEverySteps: 0, writeNudgeEveryMinutes: 0, writeNudgeEveryTurns: 0 },
+    }),
+  )
+  const agent29h = createAgent('sess-nudge-29h', WS_RIVER, [textMsg('user', '做点教室建模的事')])
+  await runPreStep(h29h, agent29h, 1, [], 1) // step1：state 由召回路径惰性创建（本步 handler 看不到 wstate）
+  await runPreStep(h29h, agent29h, 1, [], 2) // step2：wstate 就位 → nudgeAnchorChars 打底（growth=0）
+  agent29h.log.push(textMsg('assistant', '第一段实质进展汇报：完成沙箱验证链路的布线与契约测试基线，接下来接线被动记账。'.repeat(3)))
+  await runPreStep(h29h, agent29h, 1, [], 3) // step3：增量 ≥50 → 触发 → handler 落桶日志
+  let nudgeLogLine = ''
+  try {
+    nudgeLogLine =
+      readFileSync(join(workspacePaths(WS_RIVER, BUCKET_RIVER).root, 'memo-river.log'), 'utf8')
+        .split('\n')
+        .filter((l) => l.includes('write-nudge session=sess-nudge-29h'))
+        .pop() ?? ''
+  } catch {
+    /* 读不到即断言红 */
+  }
+  const nudgeLogged = nudgeLogLine.includes('turn=') && nudgeLogLine.includes('reason=')
+  check(
+    29,
+    '截尾均值封顶 + 5 分钟最小重发间隔 + write-nudge 触发行落桶日志（票01+05）',
+    capWarm && capCold && capSmall && blocked && fired && nudgeLogged,
+    [
+      `封顶：warm=${capWarm ? '✅60000→2000' : `❌${cappedToolChars(warm, 60000)}`}；cold=${capCold ? '✅→4000' : '❌'}；small=${capSmall ? '✅25 不折' : '❌'}`,
+      `间隔：2分钟内=${blocked ? '✅压制' : '❌'}；6分钟后=${fired ? '✅触发' : '❌'}；桶日志 write-nudge 行=${nudgeLogged ? '✅ ' + nudgeLogLine.slice(nudgeLogLine.indexOf('write-nudge'), nudgeLogLine.indexOf('write-nudge') + 70) : '❌ 未落盘'}`,
+    ],
+  )
+}
+
+hr('#30 digest 现取：自主态锚用最近助手实质文本，交互态锚优先回合摘要（票05）')
+{
+  const { evaluateWriteNudge } = await import('../lib/injector.js')
+  const { getSession } = await import('../lib/session.js')
+  const cfg30 = makeConfig({ bucket: BUCKET_RIVER, inject: { writeNudgeEverySteps: 5 } })
+  const st30 = getSession('sess-nudge-30', null)
+  st30.lastAssistantDigest = '完成了沙箱验证链路与契约测试'
+  st30.lastDraftSummary = { turn: 2, at: Date.now(), suggestedTags: [], digest: '上一回合的旧战况', substantive: true }
+  st30.lastDiaryWriteStep = 0
+  st30.lastWriteNudgeStep = 0
+  st30.lastWriteNudgeAt = 0
+  st30.nudgeAnchorChars = 0
+  const r30 = evaluateWriteNudge(cfg30, st30, 1, Date.now(), 10, 1000) // stepDue=自主态 → 鲜 digest
+  const freshUsed = !!r30 && r30.includes('沙箱验证链路') && !r30.includes('旧战况')
+  const cfg30b = makeConfig({
+    bucket: BUCKET_RIVER,
+    inject: { writeNudgeEveryTurns: 2, writeNudgeEveryMinutes: 0, writeNudgeEverySteps: 0, writeNudgeGrowthChars: 0 },
+  })
+  const st30b = getSession('sess-nudge-30b', null)
+  st30b.lastAssistantDigest = '自主工作的助手文本'
+  st30b.lastDraftSummary = { turn: 9, at: Date.now(), suggestedTags: [], digest: '回合摘要优先', substantive: true }
+  st30b.lastDiaryWriteAt = Date.now() - 60_000
+  st30b.lastDiaryWriteTurn = 1
+  st30b.lastWriteNudgeTurn = 1
+  st30b.lastWriteNudgeAt = 0
+  st30b.activeMs = 0
+  st30b.activeMsAnchor = 0
+  const r30b = evaluateWriteNudge(cfg30b, st30b, 9, Date.now(), 1, 1000) // turnsDue=交互态 → draft 优先
+  const draftPreferred = !!r30b && r30b.includes('回合摘要优先')
+  check(
+    30,
+    '自主态 digest=最近助手实质文本（非陈旧 draft）；交互态 digest=回合摘要优先',
+    freshUsed && draftPreferred,
+    [
+      `自主态：${freshUsed ? '✅ 用鲜弹药' : `❌ ${String(r30).slice(0, 120)}`}`,
+      `交互态：${draftPreferred ? '✅ draft 优先' : `❌ ${String(r30b).slice(0, 120)}`}`,
+    ],
+  )
+}
+
+hr('#31 压缩后查询锚：注入选材取压缩后首段内容而非摘要摊平的旧热点（票07 生产场景复现）')
+{
+  const CA_CWD = join(tmpdir(), `memo-river-canchor-${process.pid}`)
+  const caPaths = workspacePaths(CA_CWD, '压缩锚测试')
+  rmSync(CA_CWD, { recursive: true, force: true })
+  rmSync(caPaths.root, { recursive: true, force: true })
+  mkdirSync(CA_CWD, { recursive: true })
+  acquireWorkspace(CA_CWD, makeConfig({ bucket: '压缩锚测试' }))
+  const wTool = h.registered.tools.find((t) => (t.name ?? t.definition?.name) === 'memo_write')
+  const execW = wTool.execute.bind(wTool)
+  const wCtx = { agent: createAgent('sess-ca-w', CA_CWD, []) }
+  const exec = (title, date, body, reason) => {
+    const args = { content: `# ${title}\n\n${body}\n\nTag: 压缩锚, 渲染管线, 热载方案` }
+    if (date !== undefined) args.date = date
+    if (reason !== undefined) args.newTagReason = reason
+    return execW(args, wCtx)
+  }
+  await exec('旧渲染卡顿复盘', '2026-01-05', '结论：渲染卡顿是阴影贴图分辨率过高，降到一半就流畅了。', '新开测试桶，三个 Tag 都是该桶首批词汇')
+  await exec('预设热载方案', undefined, '结论：会话级热载走注册到 agent.ctx 的路径，进程级路由一个进程只能挂一次。')
+  const compact31 = {
+    role: 'user',
+    content: [{ type: 'text', text: 'Compressed 2 block(s), ~9286 tokens reclaimed. 摘要：本轮之前在排查渲染卡顿，讨论了阴影贴图与分辨率。 (id=acc31-c1)' }],
+    source: { kind: 'plugin', plugin: 'compact', compactionId: 'acc31-c1' },
+  }
+  const h31 = createMockCtx()
+  apply(h31.ctx, makeConfig({ bucket: '压缩锚测试', inject: { k: 1, dynamicK: 1, autonomousInjectEverySteps: 99, dedupeRefreshTurns: 99, tokenBudget: 900 } }))
+  const agent31 = createAgent('sess-canchor-31', CA_CWD, [
+    textMsg('user', '渲染又卡了，上次怎么解决的来着？'),
+    compact31,
+    textMsg('assistant', '热载方案：先写契约测试，然后把会话级注册走 agent.ctx，进程级路由只能挂一次要绕开。'),
+  ])
+  const d31 = await runPreStep(h31, agent31, 1, [], 2) // 无新输入；压缩事件触发
+  const t31 = d31.messages.map(msgText).join('\n')
+  const titles31 = [...t31.matchAll(/D\d+「([^」]+)」/g)].map((m) => m[1])
+  const pickedHot = titles31.some((t) => t.includes('热载'))
+  const notOld = !titles31.some((t) => t.includes('渲染'))
+  let log31 = ''
+  try {
+    log31 = readFileSync(join(caPaths.root, 'memo-river.log'), 'utf8')
+  } catch {
+    /* 读不到日志不阻塞选材断言 */
+  }
+  const triggerOk = log31.includes('trigger=compaction') && log31.includes('session=sess-canchor-31')
+  check(
+    31,
+    '压缩联动注入选材=压缩后内容（热载篇）而非摘要旧热点（渲染篇）；日志带 trigger 与 session',
+    pickedHot && notOld && triggerOk,
+    [
+      `入选：[${titles31.join(' | ')}]（k=1 强制二选一；要求热载篇胜出）`,
+      `日志：trigger=compaction+session=${triggerOk ? '✅' : '❌'}`,
+    ],
+  )
 }
 
 /* ══════════════════════ 汇总 ══════════════════════ */
