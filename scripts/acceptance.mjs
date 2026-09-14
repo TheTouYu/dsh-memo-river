@@ -1266,10 +1266,10 @@ hr('#25 近因保底·写入时间戳：同日平局由写入时刻决胜（票0
   const lateTitle = '同日晚些的会议纪要'
   await write(lateTitle, today, '结论：今天开了个会，讨论了界面配色方案，定下暖色调基调。')
   const Q = [textMsg('user', '渲染又卡了，上次是怎么解决的来着？')]
-  const runTs = async (floorDays) => {
+  const runTs = async (floorDays, tag = String(floorDays)) => {
     const hf = createMockCtx()
     apply(hf.ctx, makeConfig({ bucket: '时间戳保底测试', inject: { k: 2, dynamicK: 1, recencyFloorDays: floorDays, tokenBudget: 2000 } }))
-    const agent = createAgent(`sess-ts-${floorDays}`, TS_CWD, [])
+    const agent = createAgent(`sess-ts-${tag}`, TS_CWD, [])
     const d = await runPreStep(hf, agent, 1, Q, 1)
     const text = d.messages.map(msgText).join('\n')
     return {
@@ -1300,7 +1300,7 @@ hr('#25 近因保底·写入时间戳：同日平局由写入时刻决胜（票0
   } catch {
     /* db 直接访问失败 → 断言前提不成立，按跳过处理（仍要求选集非空） */
   }
-  const fb = await runTs(7)
+  const fb = await runTs(7, 'fb')
   const fallbackOk = fb.selectedTitles.length > 0
   check(
     26,
