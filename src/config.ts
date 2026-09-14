@@ -39,6 +39,12 @@ export interface InjectConfig {
    * true（默认）= 门控有判别力；false = 退回旧行为（w≥2 时无关查询也通过，见 schema 注释实测）。
    */
   gateOnCurrentMessage: boolean
+  /**
+   * 票⑧ 锚拼接（2026-09-14 校准，composer 桶 73 事件）：门控判定从「只比用户锚」改为
+   * max(gU, gA)。助手锚 = 最近一条 >150 字助手消息前 1200 字（skip 集 gA 0.709-0.881，
+   * 短指令误杀 17/17 → 0/17，误放 0/8）。false = 回退旧行为（用户锚单选）。
+   */
+  gateAssistantAnchor: boolean
   /** 入选集合与上次相同则不重复注入（键是 chunk id 集合，不是块文本）。 */
   dedupeSelection: boolean
   /** 即使集合没变，隔了这么多 turn 也强制重注一次（0 = 不限制）。 */
@@ -178,6 +184,8 @@ export const Config: z<Config> = z.object({
        * 门控回答"这句话本身相不相关"，检索回答"这段对话在讲什么"。
        */
       gateOnCurrentMessage: z.boolean().default(true),
+      /** 票⑧ 锚拼接：门控取 max(用户锚, 助手锚)；助手锚口径与 probe-gate-calibration.mjs 一致。 */
+      gateAssistantAnchor: z.boolean().default(true),
       /**
        * 入选集合与上次相同时不重复注入。
        *

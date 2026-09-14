@@ -92,7 +92,7 @@ export interface InjectorDeps {
 }
 
 /** 组装工作区的召回选项。 */
-function recallOptions(config: Config, queryId: string, gateText = ''): RecallOptions {
+function recallOptions(config: Config, queryId: string, gateText = '', gateAssistantText = ''): RecallOptions {
   return {
     mode: config.inject.mode,
     k: config.inject.k,
@@ -104,6 +104,7 @@ function recallOptions(config: Config, queryId: string, gateText = ''): RecallOp
     minKnnForReward: config.inject.minKnnForReward,
     queryId,
     gateText,
+    gateAssistantText,
   }
 }
 /** 解析会话的 cwd：header.cwd 优先，其次用已记住的，最后退回进程 cwd。 */
@@ -249,6 +250,19 @@ export async function buildTailInjection(
     if (currentUserText) break
   }
 
+  /** 票⑧ 助手锚：最近一条 >150 字助手消息的前 1200 字（校准口径 = probe-gate-calibration.mjs 的 gA）。 */
+  let gateAssistantText = ''
+  if (deps.config.inject.gateAssistantAnchor) {
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if ((msgs[i] as { role?: string }).role !== 'assistant') continue
+      const t = messageText(msgs[i]).trim()
+      if (t.length > 150) {
+        gateAssistantText = t.slice(0, 1200)
+        break
+      }
+    }
+  }
+
   const queryField = buildQueryField(recent, deps.config.inject.queryLookback)
   if (!queryField) {
     state.skippedCount += 1
@@ -263,7 +277,12 @@ export async function buildTailInjection(
 
   const outcome = await workspace.recall(
     queryField,
-    recallOptions(deps.config, `${sessionId}#${turn}.${step}`, deps.config.inject.gateOnCurrentMessage ? currentUserText : ''),
+    recallOptions(
+      deps.config,
+      `${sessionId}#${turn}.${step}`,
+      deps.config.inject.gateOnCurrentMessage ? currentUserText : '',
+      gateAssistantText,
+    ),
   )
 
   // §7.3 ③④：把 Ω 与召回足迹记进 kv_store（体检素材），无论是否注入。

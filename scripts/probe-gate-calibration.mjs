@@ -149,6 +149,10 @@ method('B    gU@0.42（阈值下移死区下沿） ', (r) => (r.gU ?? 0) >= 0.42
 method('A    max(gU,gA)@0.55（锚拼接）  ', (r) => Math.max(r.gU ?? 0, r.gA ?? 0) >= 0.55)
 method('C    gU@0.55 ∨ retr−gU>0.25    ', (r) => (r.gU ?? 0) >= 0.55 || (r.retr ?? 0) - (r.gU ?? 0) > 0.25)
 method('A+C  max(gU,gA)@0.55 ∨ 分歧>0.25', (r) => Math.max(r.gU ?? 0, r.gA ?? 0) >= 0.55 || (r.retr ?? 0) - (r.gU ?? 0) > 0.25)
+// 生产语义（票⑧修订，2026-09-14）：分锚阈值。长文本向质心漂移——离题 150+ 字助手陈述
+// 的 gA 负例带 0.5384-0.5810（做饭/天气/英文/数学四样本）落在 0.55 之上，纯 max@0.55 会整带误放；
+// 在题带 0.709-0.881。gA 抬到 0.62（gateThreshold+0.07，GATE_ASSISTANT_MARGIN）落带间。
+method('生产 gU@0.55 ∨ gA@0.62（分锚阈值）', (r) => (r.gU ?? 0) >= 0.55 || (r.gA ?? 0) >= 0.62)
 console.log(`  负样本 gU 范围：${Math.min(...negStats.map((n) => n.gu)).toFixed(3)}~${Math.max(...negStats.map((n) => n.gu)).toFixed(3)}`)
 console.log('  skip 集 gA 范围：' + Math.min(...pos.map((r) => r.gA)).toFixed(3) + '~' + Math.max(...pos.map((r) => r.gA)).toFixed(3))
 

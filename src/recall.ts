@@ -11,6 +11,13 @@ import { estimateTokens, firstSentence } from './runtime.js'
 import type { MemoEngine } from './native.js'
 import type { KnowledgeStore } from './store.js'
 
+/**
+ * 票⑧ 分锚阈值余量：助手锚的及格线 = gateThreshold + 本值。
+ * 依据（2026-09-14 教室语料四负例实测）：离题 150+ 字助手陈述 gA 负例带 0.5384-0.5810，
+ * 在题带 0.709-0.881（校准 17 例）；+0.07 → 0.62 落带间（负例上界距 0.04，在题下界距 0.09）。
+ */
+export const GATE_ASSISTANT_MARGIN = 0.07
+
 export interface RecallCandidate {
   /** chunk id（VCP 里就是日记的 D<id>）。 */
   id: number
@@ -47,8 +54,8 @@ export interface RecallOutcome {
     maxKnn: number
     threshold: number
     enabled: boolean
-    /** 门控向量来源：current=当前消息 / window=检索窗口 / none=未算（门控关闭或未传 gateText）。 */
-    gateVector: 'current' | 'window' | 'none'
+    /** 门控向量来源：current=用户锚 / assistant=助手锚（票⑧）/ window=检索窗口 / none=未算（门控关闭或未传锚）。 */
+    gateVector: 'current' | 'assistant' | 'window' | 'none'
     /** 检索向量的 maxKnn（取证用；不参与门控判定）。 */
     retrievalMaxKnn: number
   }
@@ -95,6 +102,15 @@ export interface RecallOptions {
    * 不传则退回旧行为：门控拿检索向量比对（在 w≥2 时无判别力，见 config.ts 的实测注释）。
    */
   gateText?: string
+  /**
+   * 门控助手锚（票⑧ A 方案）：最近一条 ≥150 字助手消息的前 1200 字。
+   *
+   * 与 gateText 一样和检索窗口解耦；判定取 max(gU, gA)。
+   * 校准（scripts/probe-gate-calibration.mjs，2026-09-14，composer 桶 73 事件）：
+   * 纯用户锚 @0.55 对短指令类消息 17/17 误杀（gU 0.44-0.55 与无关负例重叠）；
+   * max(gU, gA)@0.55 → 误杀 0/17、误放 0/8。两个锚都拿不到才退回窗口向量。
+   */
+  gateAssistantText?: string
   coreTags?: string[]
   ghostTags?: string[]
 }
@@ -185,31 +201,65 @@ export async function recall(
    * 实测（config.ts inject.gateOnCurrentMessage 注释里有完整数据）：
    *   无关末轮 w1=0.45~0.51 全不过，w2 起 0.57~0.78 全部误通过；
    *   相关末轮 w1=0.6525 已过。
-   * 所以门控只拿当前这条用户消息的向量；拿不到就退回检索向量并记录（不阻塞主流程）。 */
+   * 所以门控只拿当前这条用户消息的向量；拿不到就退回检索向量并记录（不阻塞主流程）。
+   *
+   * 票⑧（2026-09-14 校准）：单用户锚对「继续吧/按你说的来」类短指令是死刑——
+   * gU 0.44-0.55 与无关负例重叠，17/17 误杀。判定改为 max(gU, gA)：
+   * gA = 最近 ≥150 字助手消息前 1200 字（工作陈述通常在题上，skip 集 gA 0.709-0.881）。
+   * 胜选锚进 gateVector，败选锚分值进 diagnostics 取证。 */
   const diagnostics: Record<string, unknown> = {}
-  let gateMaxKnn = retrievalMaxKnn
-  let gateVector: 'current' | 'window' = 'window'
-  const gateText = (options.gateText ?? '').trim()
-  if (options.gate && gateText && gateText !== queryText.trim()) {
+  const scoreAnchor = async (text: string): Promise<number | null> => {
+    if (!text || text === queryText.trim()) return null
     try {
-      const [gvec] = await embed.embed([gateText])
-      if (gvec) {
-        let m = 0
-        for (const c of chunks) {
-          const s = cosine(gvec, c.vector!.subarray(0, dimension))
-          if (s > m) m = s
-        }
-        gateMaxKnn = m
-        gateVector = 'current'
+      const [vec] = await embed.embed([text])
+      if (!vec) return null
+      let m = 0
+      for (const c of chunks) {
+        const s = cosine(vec, c.vector!.subarray(0, dimension))
+        if (s > m) m = s
       }
+      return m
     } catch (e) {
-      // 降级：门控退回检索向量判定（§6.5 失败降级为"不阻塞 + 记日志"）
+      // 降级：该锚不可用即弃（§6.5 失败降级为"不阻塞 + 记日志"）；两锚全弃则退回窗口判定
       diagnostics.gateEmbedFailed = str((e as Error)?.message, 'unknown')
+      return null
     }
   }
+  const gU = options.gate ? await scoreAnchor((options.gateText ?? '').trim()) : null
+  const gA = options.gate ? await scoreAnchor((options.gateAssistantText ?? '').trim()) : null
+  // 分锚阈值（票⑧修订）：长文本向语料质心漂移，离题 150+ 字助手陈述的 gA 负例带
+  // 0.5384-0.5810（做饭/天气/英文/数学四样本实测）与在题带 0.709-0.881 间隔 ~0.13，
+  // 单一 0.55 阈值会把负例整带放进（gA=0.5810 实锤）。助手锚抬到 gateThreshold+0.07。
+  const gAThreshold = options.gateThreshold + GATE_ASSISTANT_MARGIN
+  diagnostics.gateAssistantThreshold = gAThreshold
+  let gateMaxKnn = retrievalMaxKnn
+  let gateVector: 'current' | 'assistant' | 'window' = 'window'
+  const passUser = gU !== null && gU >= options.gateThreshold
+  const passAssistant = gA !== null && gA >= gAThreshold
+  if (passAssistant && (gU === null || gA >= gU)) {
+    gateMaxKnn = gA
+    gateVector = 'assistant'
+    diagnostics.gateUserKnn = gU // 败选锚留痕（校准复盘素材）
+  } else if (passUser) {
+    gateMaxKnn = gU
+    gateVector = 'current'
+    diagnostics.gateAssistantKnn = gA ?? undefined
+  } else if (gA !== null || gU !== null) {
+    // 双锚俱在但都不达标：报告较大者（取证），门控仍压制
+    if (gA !== null && (gU === null || gA > gU)) {
+      gateMaxKnn = gA
+      gateVector = 'assistant'
+    } else {
+      gateMaxKnn = gU!
+      gateVector = 'current'
+    }
+    diagnostics.gateAssistantKnn = gA ?? undefined
+    diagnostics.gateUserKnn = gU ?? undefined
+  }
 
-  /* ② 门控（§6.3：不达标 → 清空不注入） */
-  if (options.gate && gateMaxKnn < options.gateThreshold) {
+  /* ② 门控（§6.3：不达标 → 清空不注入；窗口向量只在双锚俱缺时兜底——旧语义不变） */
+  const windowPass = gU === null && gA === null && retrievalMaxKnn >= options.gateThreshold
+  if (options.gate && !(passUser || passAssistant || windowPass)) {
     return empty('gate-below-threshold', {
       gate: { passed: false, maxKnn: gateMaxKnn, threshold: options.gateThreshold, enabled: true, gateVector, retrievalMaxKnn },
       candidateCount: knn.length,

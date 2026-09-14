@@ -21,3 +21,15 @@
 - [ ] 生产标注集复跑：误杀 0/17、误放 0/8（探针直接出数）
 - [ ] 离线验收线：短指令回合（用户 7 字 + 助手在题正文）注入放行；任务外双锚压制
 - [ ] 日志 gateVector=spliced + gU/gA 分项可见（抽一个真实会话验证）
+
+---
+
+**Status: done (2026-09-14，commit 待填)。实施修订两处（相对本票原案）：**
+1. **分锚阈值取代统一 0.55**：落地时实测发现离题 150+ 字助手陈述的 gA 负例带 0.5384-0.5810（做饭/天气/英文/数学四样本，教室语料）落在 0.55 之上——纯 max@0.55 会整带误放。改为 `gU@0.55 ∨ gA@0.62`（`GATE_ASSISTANT_MARGIN=0.07`，src/recall.ts；0.62 落负例带上界 0.5810 与在题带下界 0.709 之间）。探针新增「生产」行复核：误杀 0/17、误放 0/8 不变。
+2. **gateVector 记 `assistant` 而非 `spliced`**：按胜选锚报（current/assistant/window），败选锚分值进 diagnostics（gateUserKnn/gateAssistantKnn/gateAssistantThreshold）——比 spliced 单值更可归因。
+
+开关：`inject.gateAssistantAnchor`（默认 true，false 回滚用户锚单选）。验收 #32 四腿：handler 放行 / 数学口径 / 回滚压制 / 离题长文仍压制。主套件 32/32。
+
+- [x] 生产标注集复跑：误杀 0/17、误放 0/8（探针「生产 gU@0.55 ∨ gA@0.62」行）
+- [x] 离线验收线：#32（短指令+在题助手正文放行；离题长助手陈述压制）
+- [x] 日志 gateVector=assistant + 败选锚 diagnostics（#32 断言 log 行；真实会话抽查待下次重启后自然积累）

@@ -800,9 +800,12 @@ hr('#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ a
     existsSync(join(ws.paths.pendingDir, '2026-09-12-turn-t9.md')) &&
     !existsSync(join(ws.paths.root, 'approved', '2026-09-12-turn-t9.md'))
 
-  // ⑤ 丢弃 B → rejected/（不入库、pending 清空）
+  // ⑤ 丢弃 B → rejected/（不入库、pending 清空）。
+  //    ids 子串按设计跨全部桶扫描 + 歧义保护（bucket 过滤只作用于 all=true 模式）——
+  //    2026-09-14 实锤：共享桶里并行会话的同名 turn-t9 真实草稿触发歧义保护。
+  //    测试必须用含日期的全唯一子串，绝不与真实桶撞名。
   const filesBeforeDiscard = ws.store.counts().files
-  const discardOut = await xExec({ ids: ['turn-t9'] }, ctx14)
+  const discardOut = await xExec({ ids: ['2026-09-12-turn-t9'] }, ctx14)
   const discardOk =
     discardOut.includes('rejected/') &&
     ws.store.counts().files === filesBeforeDiscard &&
@@ -1513,6 +1516,74 @@ hr('#31 压缩后查询锚：注入选材取压缩后首段内容而非摘要摊
     [
       `入选：[${titles31.join(' | ')}]（k=1 强制二选一；要求热载篇胜出）`,
       `日志：trigger=compaction+session=${triggerOk ? '✅' : '❌'}`,
+    ],
+  )
+}
+
+/* ══════════════════════ #32 票⑧ gate 锚拼接 ══════════════════════ */
+
+hr('#32 gate 锚拼接 max(gU,gA)：短指令误杀修复（校准 A 方案）+ 回滚开关 + 无误放')
+{
+  const ws32 = acquireWorkspace(WS_RIVER, config)
+  const LONG_ON =
+    '教室建模这边把课桌的阵列摆完了：每张桌子复制后要应用旋转和缩放，不应用会导致实例属性残留；' +
+    '材质统一给了木纹贴图，UV 要按 0.5 的比例缩放否则会重复平铺；渲染测试里阴影贴图分辨率开到 2048 会卡，' +
+    '降到 1024 帧率就稳了。接下来把讲台和黑板的模型补进场景，再连一次光照烘培，顺便把窗户的光斑效果调出来。'
+  const LONG_OFF =
+    '晚饭我打算做红烧肉：五花肉焯水后冰糖炒糖色，加生抽老抽和黄酒，小火炖四十分钟收汁；' +
+    '配一个番茄炒蛋，蛋要先煎到定型再出锅；汤用紫菜虾皮冲开水加点香油。周末还想试一次蛋糕，' +
+    '低筋面粉加玉米油牛奶，蛋白打发到硬性发泡再翻拌，烤箱预热一百六十度烤四十分钟。'
+
+  /* (a) handler 全路径：>150 字在题助手陈述被提取为锚 → 门控放行（gateVector=assistant） */
+  const logs32 = []
+  const off32 = ws32.logger.onLine((l) => logs32.push(l))
+  const agent32 = createAgent('sess-gate-32a', WS_RIVER, [
+    textMsg('user', '教室建模进行到哪了？'),
+    textMsg('assistant', LONG_ON),
+  ])
+  const d32 = await runPreStep(h, agent32, 2, [textMsg('user', '继续吧')], 1)
+  off32()
+  const t32 = d32.messages.map(msgText).join('\n')
+  const gateLine32 = logs32.find((l) => l.includes('inject ') && l.includes('sess-gate-32a')) ?? ''
+  const rescuedHandler = t32.includes(BLOCK_CLOSE) && gateLine32.includes('gateVector:assistant')
+
+  /* (a2) 直调 recall：数学口径——assistant 胜选 + 败选用户锚留痕 diagnostics
+   * 注意 queryText 必须与 gateText 不同（同文守卫：gateText===queryText 时 gU 不算）。 */
+  const opt32 = (qid, gateText, gateAssistantText) => ({
+    mode: 'topology_v3', k: 3, tokenBudget: 600, dynamicK: 1, gate: true,
+    gateThreshold: config.inject.gateThreshold, minKnnForReward: config.inject.minKnnForReward,
+    queryId: qid, gateText, gateAssistantText,
+  })
+  const qf32 = buildQueryField(['教室建模进行到哪了？', LONG_ON, '继续吧'], config.inject.queryLookback)
+  const outA = await ws32.recall(qf32, opt32('acc32a', '继续吧', LONG_ON))
+  const mathOk =
+    outA.injected && outA.gate.passed && outA.gate.gateVector === 'assistant' &&
+    typeof outA.diagnostics.gateUserKnn === 'number' && outA.diagnostics.gateUserKnn < outA.gate.threshold
+
+  /* (b) 回滚开关 gateAssistantAnchor=false → 同场景回到用户锚单选，压制如初 */
+  const h32b = createMockCtx()
+  apply(h32b.ctx, makeConfig({ bucket: BUCKET_RIVER, inject: { gateAssistantAnchor: false } }))
+  const agent32b = createAgent('sess-gate-32b', WS_RIVER, [
+    textMsg('user', '教室建模进行到哪了？'),
+    textMsg('assistant', LONG_ON),
+  ])
+  const d32b = await runPreStep(h32b, agent32b, 2, [textMsg('user', '继续吧')], 1)
+  const t32b = d32b.messages.map(msgText).join('\n')
+  const rolledBack = !t32b.includes(BLOCK_CLOSE)
+
+  /* (c) 无误放：长助手陈述离题（做饭）→ 双锚全低 → 仍压制 */
+  const outC = await ws32.recall('继续吧', opt32('acc32c', '继续吧', LONG_OFF))
+  const noFalsePass = !outC.injected && outC.fallbackReason === 'gate-below-threshold'
+
+  check(
+    32,
+    'gate 锚拼接：max(gU,gA)@0.55 短指令误杀 0/17 口径落地；开关可回滚；无误放',
+    rescuedHandler && mathOk && rolledBack && noFalsePass,
+    [
+      `(a) handler：注入=${t32.includes(BLOCK_CLOSE) ? '✅' : '❌'}  gateVector:assistant=${gateLine32.includes('gateVector:assistant') ? '✅' : '❌'}`,
+      `(a2) 数学：passed=${outA.gate.passed ? '✅' : '❌'}  vector=${outA.gate.gateVector}  gU(留痕)=${typeof outA.diagnostics.gateUserKnn === 'number' ? outA.diagnostics.gateUserKnn.toFixed(4) : 'n/a'}  gA(胜选)=${outA.gate.maxKnn.toFixed(4)}`,
+      `(b) 回滚开关(false)：压制=${rolledBack ? '✅' : '❌'}（回到用户锚单选）`,
+      `(c) 误放防线：离题长助手陈述 → ${noFalsePass ? '✅ 仍压制' : `❌ gateVector=${outC.gate.gateVector} maxKnn=${outC.gate.maxKnn.toFixed(4)}`}`,
     ],
   )
 }
