@@ -83,6 +83,16 @@ export interface MaintenanceConfig {
   maxBackoff: number
   /** turn-stopping 时产出候选草稿（不落库）。 */
   drafts: boolean
+  /** 合并候选检测（票 04，守护循环每轮跑；参数定标见 DESIGN §7.1.3）。 */
+  consolidation: {
+    enabled: boolean
+    /** 判定①：最小年龄（天，对齐 §7.3 陈旧口径 14）。 */
+    minAgeDays: number
+    /** 判定②：最大累计召回次数（被动+主动）。 */
+    maxRecalls: number
+    /** 判定③：与更新篇的最小余弦（合并带：dedupCosine=0.95 之下、一般续写之上）。 */
+    overlapCosine: number
+  }
 }
 
 export interface WriteConfig {
@@ -224,6 +234,14 @@ export const Config: z<Config> = z.object({
       enabled: z.boolean().default(true),
       maxBackoff: z.number().min(1).default(8),
       drafts: z.boolean().default(true),
+      consolidation: z
+        .object({
+          enabled: z.boolean().default(true),
+          minAgeDays: z.number().min(1).default(14),
+          maxRecalls: z.number().min(0).default(1),
+          overlapCosine: z.number().min(0).max(1).default(0.9),
+        })
+        .default({ enabled: true, minAgeDays: 14, maxRecalls: 1, overlapCosine: 0.9 }),
     })
     .default({} as MaintenanceConfig),
 })

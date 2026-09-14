@@ -31,7 +31,8 @@ export const OMEGA_WINDOW = 50
 
 const KV_OMEGA = 'memo_river.omega_samples'
 /** 遗留布尔集（2026-09-13 前的唯一召回足迹）。冻结只读：不再写入，读时与台账并集。 */
-const KV_RECALLED = 'memo_river.recalled_file_ids'
+/** 遗留布尔集键（票 01 冻结为只读种子；consolidation.ts 判定②读它，勿改名）。 */
+export const KV_RECALLED = 'memo_river.recalled_file_ids'
 /** 使用台账（票 01）：fileId → { p, a, lastP, lastA } 的 JSON 映射。 */
 /** 使用台账 kv 键（票 01；tools.ts 归档清扫复用，勿改名——线上库已有此键数据）。 */
 export const KV_USAGE = 'memo_river.usage_ledger'

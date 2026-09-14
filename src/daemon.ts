@@ -9,6 +9,7 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Config } from './config.js'
+import { candidateReportPath, writeCandidateReport } from './consolidation.js'
 import { formatHealth, healthReport } from './health.js'
 import { excerpt } from './render.js'
 import type { PendingDraft } from './session.js'
@@ -23,6 +24,8 @@ export interface GuardianRound {
   artifactRebuilt: boolean
   health: { components: number; hubRatio: number | null; uncoveredRatio: number; warnings: string[] }
   draftsWritten: number
+  /** 票 04：本轮合并候选数（null=检测关闭/空库无从判定；-1=空库）。 */
+  mergeCandidates: number | null
   error: string | null
   nextDelayMs: number
 }
@@ -102,7 +105,16 @@ export class WorkspaceDaemon {
         if (artifactRebuilt) log('info', `guardian artifact-rebuilt sig=${state.artifactSig.slice(0, 24)}… elapsedMs=${state.elapsedMs}`)
       }
 
-      /* ② 四项体检 → health.log */
+      /* ② 合并候选检测（票 04：冗余三判定 → 报告覆写 candidates/merge-candidates.md） */
+      const cons = this.options.config.maintenance.consolidation
+      const consOut = cons?.enabled === false
+        ? null
+        : writeCandidateReport(workspace.store, workspace.paths.bucket, cons!, workspace.paths.root, at)
+      if (consOut && consOut.candidates.length > 0) {
+        log('info', `guardian merge-candidates=${consOut.candidates.length}/${consOut.checked} 报告=${candidateReportPath(workspace.paths.root)}`)
+      }
+
+      /* ③ 四项体检 → health.log（含候选计数行） */
       const report = healthReport(workspace.store, workspace.paths.bucket)
       const line = `[${new Date(at).toISOString()}] round=${this.round} components=${report.components} ` +
         `hub=${report.hub ? `${report.hub.name}:${report.hub.count}/${report.counts.files}` : 'n/a'} ` +
@@ -110,6 +122,7 @@ export class WorkspaceDaemon {
         `uncovered=${report.uncovered.neverRecalled}/${report.uncovered.files} ` +
         `used=${report.usage ? `${report.usage.everUsed}/${report.usage.files}` : 'n/a'} ` +
         `topUsed=${report.usage?.top[0] ? `D${report.usage.top[0].fileId}×${report.usage.top[0].total}` : 'n/a'} ` +
+        `mergeCandidates=${consOut === null ? 'off' : consOut.status === 'empty' ? '无从判定（空库）' : consOut.candidates.length === 0 ? '无候选' : `${consOut.candidates.length}/${consOut.checked}`} ` +
         `warnings=${report.warnings.length}${report.warnings.length ? ` :: ${report.warnings.join(' | ')}` : ''}`
       try {
         mkdirSync(workspace.paths.root, { recursive: true })
@@ -139,6 +152,7 @@ export class WorkspaceDaemon {
           warnings: report.warnings,
         },
         draftsWritten,
+        mergeCandidates: consOut === null ? null : consOut.status === 'empty' ? -1 : consOut.candidates.length,
         error: null,
         nextDelayMs: this.nextDelay(),
       }
@@ -160,6 +174,7 @@ export class WorkspaceDaemon {
         artifactRebuilt,
         health: { components: -1, hubRatio: null, uncoveredRatio: 0, warnings: [] },
         draftsWritten,
+        mergeCandidates: null,
         error,
         nextDelayMs: this.nextDelay(),
       }

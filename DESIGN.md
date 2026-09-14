@@ -298,6 +298,22 @@ D6「终局报告：六轮盲测 0 误判」 role=thematic_neighbor  topology=+0
 - 闸门/回注/体检增量与 memo_write 同一份 `writeDiaryCore`；写后顺序（先刷原生日记索引再重建资产）同 §7.1 第 4 步。
 - 验收：`scripts/acceptance-merge.mjs`（M-1..M-6）。
 
+### 7.1.3 合并候选检测（票 04；压缩式遗忘的主引擎，守护循环每轮跑）
+
+**冗余三判定，全部满足才进候选**（按冗余退役，不按时间无差别衰减——老而独特的篇不进候选，天然绕开「永久设定不该被衰减」的分类难题）：
+
+| 判定 | 参数 | 默认 | 定标依据 |
+|---|---|---|---|
+| ① 年龄 | `maintenance.consolidation.minAgeDays` | **14** | 对齐 §7.3 ⑤ 使用台账的陈旧口径（USAGE_STALE_DAYS=14：14 天未被动用视为陈旧）——年龄与低使用同一把尺 |
+| ② 低使用 | `maxRecalls` | **1** | 台账计数（被动+主动，冻结遗留集 ≥1）≤1 = 近未被召回：强化信号缺席的篇才谈退役 |
+| ③ 语义覆盖 | `overlapCosine` | **0.90** | 合并带 = 写侧拦截线 dedupCosine=0.95 **之下**、一般同话题续写（实测 ~0.88）**之上**——专抓「没到拦截线但语义已被新篇覆盖」的篇；验收正例实测 0.9270 命中此带 |
+
+- 检测：`src/consolidation.ts` 纯函数 `consolidationCandidates`（守护循环与验收共用一份口径）；理由串带三项判定值（age=X ≥ N；recalls=R ≤ M；overlap=0.xxxx vs 更新篇 D-id ≥ T）。
+- 报告：覆写式落 `<workspace>/candidates/merge-candidates.md`（每轮重生成 → memo_merge 执行后**下一轮自动收敛**，不留陈旧报告）。**不落 pending/**：drafts 通道是 Tag 闸门日记专属，报告混入会被 memo_approve 误消费（报告头部已注明「候选建议，勿 approve，用 memo_merge 执行」）。
+- 守护接线：`daemon.ts` runOnce ② 步（体检前），health.log 行新增 `mergeCandidates=off|无从判定（空库）|无候选|K/checked`；`GuardianRound.mergeCandidates`（null=关闭，-1=空库）。
+- 闭环：票①台账（判定②数据）→ 票③ memo_merge（执行通道）→ 本票检测（建议生产）——「压缩式遗忘」从手动工具升级为守护循环的自动建议流。
+- 验收：`scripts/acceptance-consolidation.mjs`（C-1..C-5）。
+
 ### 7.2 `memo_recall`
 
 参数：`query`(必填)、`k`、`mode`(`tagmemo`|`rivermemo`|`dtsc`|`topology_v3`)、`rerank`、`truncate`、`timeRange`（`::Time` 语义，如 `2026-09-10~2026-09-11`）、`folder`
