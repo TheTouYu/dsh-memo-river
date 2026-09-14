@@ -45,6 +45,14 @@ export interface InjectConfig {
    * 短指令误杀 17/17 → 0/17，误放 0/8）。false = 回退旧行为（用户锚单选）。
    */
   gateAssistantAnchor: boolean
+  /** 票 05：有界 tie-breaker 开关（0=关默认；memo_tuning 可会话级开，回读只认主动使用信号）。 */
+  tieBreakerEnabled: number
+  /** 票 05：强化上界（默认 0.05 ≪ 锚 0.18）。 */
+  tieBreakerCap: number
+  /** 票 05：tanh 饱和常数（默认 2）。 */
+  tieBreakerTau: number
+  /** 票 05：最近主动召回半衰期（天，默认 30）。 */
+  tieBreakerRecencyHalfLifeDays: number
   /** 入选集合与上次相同则不重复注入（键是 chunk id 集合，不是块文本）。 */
   dedupeSelection: boolean
   /** 即使集合没变，隔了这么多 turn 也强制重注一次（0 = 不限制）。 */
@@ -186,6 +194,14 @@ export const Config: z<Config> = z.object({
       gateOnCurrentMessage: z.boolean().default(true),
       /** 票⑧ 锚拼接：门控取 max(用户锚, 助手锚)；助手锚口径与 probe-gate-calibration.mjs 一致。 */
       gateAssistantAnchor: z.boolean().default(true),
+      /** 票 05：有界 tie-breaker 开关（0=关，默认关；memo_tuning 可会话级开——回读只认主动使用信号）。 */
+      tieBreakerEnabled: z.number().min(0).max(1).default(0),
+      /** 票 05：强化上界（默认 0.05 ≪ 锚奖励 0.18，只够在近似并列处翻序）。 */
+      tieBreakerCap: z.number().min(0).max(0.2).default(0.05),
+      /** 票 05：tanh 饱和常数（约 3 次主动召回近饱和，防曝光积累）。 */
+      tieBreakerTau: z.number().min(0.1).max(10).default(2),
+      /** 票 05：最近主动召回半衰期（天；长期不用向基线收缩）。 */
+      tieBreakerRecencyHalfLifeDays: z.number().min(1).max(365).default(30),
       /**
        * 入选集合与上次相同时不重复注入。
        *

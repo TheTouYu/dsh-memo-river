@@ -57,6 +57,34 @@ export const TUNING_SPEC: readonly TuningSpecItem[] = [
     min: 0,
     max: 10_000_000,
   },
+  {
+    key: 'tieBreakerEnabled',
+    label: '有界 tie-breaker 开关',
+    hint: '票05 读侧强化：Rust 读出后对台账主动使用信号施加 ≤cap 的排序微调。1=开 0=关（默认关；分数逐位不变）',
+    min: 0,
+    max: 1,
+  },
+  {
+    key: 'tieBreakerCap',
+    label: 'tie-breaker 上界',
+    hint: '强化幅度上限（默认 0.05，远小于锚奖励 0.18——只在近似并列处翻序）',
+    min: 0,
+    max: 0.2,
+  },
+  {
+    key: 'tieBreakerTau',
+    label: 'tie-breaker 饱和常数',
+    hint: 'tanh(active/τ) 的 τ（默认 2：约 3 次主动召回近饱和，防曝光积累）',
+    min: 0.1,
+    max: 10,
+  },
+  {
+    key: 'tieBreakerRecencyHalfLifeDays',
+    label: 'tie-breaker 半衰期（天）',
+    hint: '最近主动召回的半衰期（默认 30 天：长期不被主动召回 → 强化向基线收缩）',
+    min: 1,
+    max: 365,
+  },
 ] as const
 
 const SPEC_KEYS = new Set(TUNING_SPEC.map((s) => s.key))

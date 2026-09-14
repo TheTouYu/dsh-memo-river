@@ -7,9 +7,11 @@
  */
 import type { ReadoutMode } from './config.js'
 import { cosine, type EmbedClient } from './embed.js'
+import { readUsageLedger } from './health.js'
 import { estimateTokens, firstSentence } from './runtime.js'
 import type { MemoEngine } from './native.js'
 import type { KnowledgeStore } from './store.js'
+import { applyUsageTieBreaker, type TieBreakerParams } from './tiebreaker.js'
 
 /**
  * 票⑧ 分锚阈值余量：助手锚的及格线 = gateThreshold + 本值。
@@ -92,6 +94,9 @@ export interface RecallOptions {
   minKnnForReward: number
   /** 近因保底天数：最近 N 天内的最新日记被 k-limit/预算挤出入选集时保留一席（0/缺省 = 关闭）。 */
   recencyFloorDays?: number
+  /** 票 05：有界 tie-breaker（缺省/关闭 = 逐位不变）。调用方从 memo_tuning 取值注入；
+   *  被动注入路径不传（预设默认关），主动 memo_recall 按会话 tuning 生效。 */
+  tieBreaker?: TieBreakerParams
   /** 查询 id（诊断/日志用；必须按会话/轮次唯一）。 */
   queryId: string
   /**
@@ -352,12 +357,17 @@ export async function recall(
 
     if (rows.length === 0) return empty('no-candidates', { candidateCount: knn.length })
 
+    /* ④.5 票 05：Rust 读出后的**有界 tie-breaker**（options.tieBreaker 缺省/关闭 → applyUsageTieBreaker
+       原样返回同一引用，分数与顺序逐位不变）。只认台账**主动**信号，上界 cap=0.05（≪ 锚 0.18），
+       只在近似并列处翻序——细节与风险声明见 DESIGN「边界与不承诺」。 */
+    const ranked = applyUsageTieBreaker(rows, readUsageLedger(store), options.tieBreaker, started)
+
     /* ⑤ 动态 K（倍率）+ 预算截断（::Truncate：保 role 与首句） */
     const kEff = Math.max(1, Math.round(options.k * Math.max(0, options.dynamicK)))
     const dropped: Array<{ id: number; title: string; reason: string }> = []
     const selected: RecallCandidate[] = []
     let used = 0
-    for (const row of rows) {
+    for (const row of ranked) {
       if (selected.length >= kEff) {
         dropped.push({ id: row.id, title: row.title, reason: 'k-limit' })
         continue

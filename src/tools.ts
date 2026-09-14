@@ -25,7 +25,8 @@ import {
 import { cosine } from './embed.js'
 import { formatHealth, healthReport, HUB_RATIO_LIMIT, KV_USAGE, readUsageLedger, recordUsage } from './health.js'
 import { excerpt } from './render.js'
-import { setTuning, tuningSnapshot, tuningDefaults } from './tuning.js'
+import { setTuning, tuningSnapshot, tuningDefaults, tuningValues } from './tuning.js'
+import { tieBreakerParamsFrom } from './tiebreaker.js'
 import { listSessions } from './session.js'
 import type { RecallOptions } from './recall.js'
 import type { Logger } from './runtime.js'
@@ -64,9 +65,9 @@ function registerMemoTuning(ctx: { tools: { register(tool: unknown): () => void 
     defineTool({
       name: 'memo_tuning',
       description:
-        '读取/修改写入节律调参（四锚：时间分钟/汇报轮/步数/上下文增量字符）。action=get 看当前值与来源；' +
-        'action=set 修改：scope=preset 预设级（落盘 tuning.json，全工作区持久生效）| scope=session 仅当前会话（进程内，实验用）。' +
-        '改完即时生效，无需重启。面板：GET /memo-river/tuning/panel',
+        '读取/修改调参（写侧四锚：时间分钟/汇报轮/步数/上下文增量字符；读侧 tie-breaker 四参：开关/上界/饱和/半衰期）。' +
+        'action=get 看当前值与来源；action=set 修改：scope=preset 预设级（落盘 tuning.json，全工作区持久生效）| ' +
+        'scope=session 仅当前会话（进程内，实验用——票⑤ tie-breaker 实验通道）。改完即时生效，无需重启。面板：GET /memo-river/tuning/panel',
       parameters: {
         action: { type: 'string', description: 'get=读取当前值与来源；set=修改' },
         scope: { type: 'string', description: "set 的生效范围：preset=预设级（落盘 tuning.json，全工作区持久）；session=仅当前会话（进程内实验）。缺省 preset" },
@@ -74,12 +75,16 @@ function registerMemoTuning(ctx: { tools: { register(tool: unknown): () => void 
         writeNudgeEveryTurns: { type: 'number', description: '汇报轮锚（小轮数），0=关' },
         writeNudgeEverySteps: { type: 'number', description: '步锚（步数），0=关' },
         writeNudgeGrowthChars: { type: 'number', description: '增量锚（字符），0=关' },
+        tieBreakerEnabled: { type: 'number', description: '票⑤ 有界 tie-breaker 开关：1=开 0=关（默认 0=关）' },
+        tieBreakerCap: { type: 'number', description: '强化上界（默认 0.05）' },
+        tieBreakerTau: { type: 'number', description: 'tanh 饱和常数（默认 2）' },
+        tieBreakerRecencyHalfLifeDays: { type: 'number', description: '主动召回半衰期天数（默认 30）' },
       },
       output: TEXT_OUTPUT,
       isConcurrencySafe: () => true,
       async execute(args: Record<string, unknown>, exec: unknown) {
         const viewer = viewerOf(exec)
-        const SPEC_KEYS = ['writeNudgeEveryMinutes', 'writeNudgeEveryTurns', 'writeNudgeEverySteps', 'writeNudgeGrowthChars']
+        const SPEC_KEYS = ['writeNudgeEveryMinutes', 'writeNudgeEveryTurns', 'writeNudgeEverySteps', 'writeNudgeGrowthChars', 'tieBreakerEnabled', 'tieBreakerCap', 'tieBreakerTau', 'tieBreakerRecencyHalfLifeDays']
         if (args.action === 'get') {
           const snap = tuningSnapshot(config, tuningDefaults(), listSessions)
           const mine = viewer.sessionId ? (snap.session[viewer.sessionId] ?? {}) : {}
@@ -520,6 +525,8 @@ export function installTools(
           gateThreshold: config.inject.gateThreshold,
           minKnnForReward: config.inject.minKnnForReward,
           queryId: `tool-recall-${Date.now()}`,
+          // 票 05：会话级 tuning 注入（默认关——memo_tuning scope=session tieBreakerEnabled=1 可实验）。
+          tieBreaker: tieBreakerParamsFrom(tuningValues(config, viewerOf(exec).sessionId)),
         }
         const outcome = await workspace.recall(query, options)
         // timeRange / folder 过滤（在结果集上做，避免改原生载荷）
