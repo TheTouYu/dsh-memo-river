@@ -42,3 +42,4 @@
 **执行状态（2026-09-14 更新）：**
 - **A 半（Rust 权重定序求和）done** — 由并行会话（prod-hardening）执行：memo_artifact_builder.rs build_transport 三处 HashMap 迭代序污染逐一定序修复；探针 probe-sig-determinism.mjs 12/12 跨进程逐位一致；主套件 #33 回归线已入。VCPToolBox 提交 e1f54b7d（repo-local identity）。
 - **B 半（artifact 行换代 GC）done** — daemon.ts runOnce ①b 挂钩：`pruneArtifactGenerations(workspace, keep=3)` 每 schema_version 按 updated_at DESC 保最新 3 代（活跃代永不删，调用时序=ensureArtifact 成功后），24h 节流（ARTIFACT_GC_INTERVAL_MS），表缺失安全返回 0。验收 #34 三腿（5→3 保最新/幂等/runOnce 日志行）全绿，主套件 **34/34**。生产存量（218/136 行）由首轮守护自动清理。
+- **B 半 done（2026-09-14）** — 并行会话 commit 046d38b：daemon.ts ①b pruneArtifactGenerations（每 schema 保最新 3 代/24h 节流，活跃代永不删）+ 验收 #34 三腿。**本票六票收官终验**：update 7/7 / usage 6/6 / merge 6/6 / consolidation 5/5 / tiebreaker 9/9 / 主套件 34/34 / P3 4/4（洁净 WAL 后连跑两轮确认；一次 33/34 为残留态抖动未复现）。
