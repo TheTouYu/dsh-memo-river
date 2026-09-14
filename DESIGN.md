@@ -334,7 +334,9 @@ D6「终局报告：六轮盲测 0 误判」 role=thematic_neighbor  topology=+0
 
 **⑤ 使用台账视图**（2026-09-14，票 01）：每次被动注入（`agent/pre-step`，recall 之后、入选集去重**之前**——去重跳过也算一次召回足迹）与每次 `memo_recall` 主动补证（**只记刻意呈现的 selected**，k 条，与被动同口径；不记 candidates 诊断列表）都按 fileId 记账：`{passive, active, lastPassiveAt, lastActiveAt}`，存 `kv_store` 键 `memo_river.usage_ledger`。视图随体检输出：常用 top5 / 从未使用 / 陈旧（>14 天无足迹）/ legacyOnly。**三条红线**：① 不进打分——召回排序至今不读台账（先跑数据再谈转向，票 05 的前置）；② 只写 kv_store，内容表与图资产零变更——原生内容摘要只吃 tags 向量（lib.rs `SELECT id, vector FROM tags`），kv_store 不是签名输入（验收 U-3：记账前后 tagmemo_artifacts 行逐字节不变）；③ 旧键 `memo_river.recalled_file_ids`（布尔集合）冻结为历史种子只读，「曾被召回」= 台账 ∪ 遗留集。空库时视图报「无从判定（空库）」而非全零假通过。验收：`scripts/acceptance-usage.mjs` 6/6。
 
-> 已知（与本票无关的既有行为）：引擎级 composite artifactSig 存在**漂移窗口**——漂移源是 `source_graph_generation`（图边权摘要，memo_artifact_builder.rs:666-679，摘要拼接本身已排序），实测漂移窗口内每次重建该分量都变，而 config_hash / database_generation / provenance_generation 三个分量始终稳定；根因指向权重推导路径的非确定性浮点求和序（生产库同一语料累计出现过 16/25 种 `node_count×edge_count` 图形状变体，说明噪声大到影响过阈值切边）。后果：① 漂移窗口内 `unchanged` 短路永不命中 → builders 每轮重跑（EPA 全量重算只是**症状**，非原因）；② `rivermemo_artifacts` 每次调用插一行死 payload（`ON CONFLICT` 不清旧行，生产实测 23 篇语料积 148 行/754KB、31 篇积 136 行/796KB）。派生缓存齐备后进入冻结态，重建停止（生产 83 守护轮 0 重建）。因此：任何学习态都不得依赖 sig 稳定性做键（票 05 红线重申：只在 JS 后排序层生效）；验收断言用 tagmemo_artifacts 行比对而非 sig（本票 U-3）。修复候选：Rust 权重定序求和 + artifact 行只保留最新一代（卫生票，不阻塞 02-05）。
+> 已知（本票无关的既有行为）：引擎级 composite artifactSig 存在**漂移窗口**——漂移源是 `source_graph_generation`（图边权摘要，memo_artifact_builder.rs:666-679，摘要拼接本身已排序），实测漂移窗口内每次重建该分量都变，而 config_hash / database_generation / provenance_generation 三个分量始终稳定；根因指向权重推导路径的非确定性浮点求和序（生产库同一语料累计出现过 16/25 种 `node_count×edge_count` 图形状变体，说明噪声大到影响过阈值切边）。后果：① 漂移窗口内 `unchanged` 短路永不命中 → builders 每轮重跑（EPA 全量重算只是**症状**，非原因）；② `rivermemo_artifacts` 每次调用插一行死 payload（`ON CONFLICT` 不清旧行，生产实测 23 篇语料积 148 行/754KB、31 篇积 136 行/796KB）。派生缓存齐备后进入冻结态，重建停止（生产 83 守护轮 0 重建）。
+>
+> **〔2026-09-14 票⑥ 已修复〕**根因=build_transport 三处 HashMap 迭代序 f64 累加（target_inflow 累加序 / raw_rows Vec 序 / total 归一化分母序）+ digest 站点 inbound 累加，全部排序化定序（只定序不改值，VCPToolBox 提交 e1f54b7d）；探针 12/12 跨调用跨进程逐位一致（#33 回归线）。死行由守护轮 ①b `pruneArtifactGenerations` 自动清理（#34）。防御性红线保留：学习态仍不得以 sig 稳定性为键；验收断言仍用 tagmemo_artifacts 行比对。
 
 ### 7.4 `memo_tags`
 
@@ -355,6 +357,7 @@ D6「终局报告：六轮盲测 0 误判」 role=thematic_neighbor  topology=+0
 ## 8. 守护循环职责（timer）
 
 1. **资产重建**：比对 `artifactSig`，不一致或不存在 → `rebuildMemoArtifact`（失败保留上一代）。
+1b. **artifact 行换代清理（票⑥B）**：重建成功后低频（24h 节流）执行 `pruneArtifactGenerations`——每 `schema_version` 按 `updated_at` 保最新 3 代，DELETE 其余；活跃代永不删（调用时序保证活跃代=最新行）；表缺失安全返回 0。漂移历史存量（票⑥A 修复前的死行）由首轮守护自动清空。
 2. **体检**：跑 §7.3 四项，写日志到 `~/.dsh/memo-river/<bucket>/health.log`；超阈值在返回值里告警。
 3. **草稿**：把 `agent/turn-stopping` 收集的回合摘要写成 `pending/<date>-<slug>.md`（含建议 Tag 与相关旧日记），**等确认，不自动入库**；消费通道见 §7.5（memo_approve 批准入 `approved/`、memo_discard 入 `rejected/`）。turn-stopping 同时记录 `lastDraftSummary`（回合进展摘要，不被消费）——它是**写入节律提醒**的弹药（§6.3 writeNudgeEveryMinutes）：提醒在下一回合 pre-step 注入，把「默默落草稿」升级为「在正确时机主动催促模型写正式日记」。
 4. **节流与退避**：默认 15 分钟一轮；连续失败指数退避；每轮耗时与结果写日志。
@@ -407,6 +410,8 @@ D6「终局报告：六轮盲测 0 误判」 role=thematic_neighbor  topology=+0
 | 30 | digest 现取（票05） | 自主态用最近助手实质文本、非陈旧 draft；交互态回合摘要优先 |
 | 31 | 压缩后查询锚（票07） | 压缩联动注入选材=压缩后内容而非摘要旧热点；日志带 trigger+session |
 | 32 | 门控锚拼接·分锚阈值（票⑧） | 短指令+在题助手陈述 → 放行（gateVector=assistant+败选锚留痕）；gateAssistantAnchor=false 回滚压制；离题长助手陈述仍压制（负例带 0.5384-0.5810 < 0.62） |
+| 33 | artifactSig 确定性（票⑥A） | 同库连打 3 次构建 sig 逐位一致 + nodes>0 防空洞；跨进程版=probe-sig-determinism.mjs（12/12，修复前基线 6/6 唯一见 D24） |
+| 34 | artifact 行换代清理（票⑥B） | 每 schema 保最新 3 代且留的是 updated_at 最新三行（活跃代永不删）；幂等（二次 0 删除）；runOnce 挂钩触发 guardian artifact-gc 日志行 |
 
 ---
 

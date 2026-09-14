@@ -38,3 +38,7 @@
 
 - 不改打分语义（A 只定序不改值，B 只清行不碰活跃 artifact）。
 - 学习态（票①台账）已在 DESIGN §7.3 声明不得依赖 sig 稳定性——本票修好后该红线仍保留（防御性）。
+
+**执行状态（2026-09-14 更新）：**
+- **A 半（Rust 权重定序求和）done** — 由并行会话（prod-hardening）执行：memo_artifact_builder.rs build_transport 三处 HashMap 迭代序污染逐一定序修复；探针 probe-sig-determinism.mjs 12/12 跨进程逐位一致；主套件 #33 回归线已入。VCPToolBox 提交 e1f54b7d（repo-local identity）。
+- **B 半（artifact 行换代 GC）done** — daemon.ts runOnce ①b 挂钩：`pruneArtifactGenerations(workspace, keep=3)` 每 schema_version 按 updated_at DESC 保最新 3 代（活跃代永不删，调用时序=ensureArtifact 成功后），24h 节流（ARTIFACT_GC_INTERVAL_MS），表缺失安全返回 0。验收 #34 三腿（5→3 保最新/幂等/runOnce 日志行）全绿，主套件 **34/34**。生产存量（218/136 行）由首轮守护自动清理。

@@ -44,6 +44,8 @@ export class WorkspaceDaemon {
   private round = 0
   private consecutiveFailures = 0
   private lastArtifactSig: string | null = null
+  /** 票⑥B：artifact 行换代清理的上次执行时刻（0=下轮即执行）。 */
+  private lastArtifactGcAt = 0
   private timer: (() => void) | null = null
   private running = false
 
@@ -103,6 +105,21 @@ export class WorkspaceDaemon {
         artifactRebuilt = before !== state.artifactSig
         this.lastArtifactSig = state.artifactSig
         if (artifactRebuilt) log('info', `guardian artifact-rebuilt sig=${state.artifactSig.slice(0, 24)}… elapsedMs=${state.elapsedMs}`)
+      }
+
+      /* ①b artifact 行换代清理（票⑥B：漂移历史行止血——每 schema 只留最新 K 代）。
+         注意：必须在 ensureArtifact 之后跑，保证「活跃代」是最新 updated_at 的一行，绝不误删活跃 artifact。 */
+      if (
+        ARTIFACT_GC_KEEP > 0 &&
+        at - this.lastArtifactGcAt >= ARTIFACT_GC_INTERVAL_MS
+      ) {
+        try {
+          const removed = pruneArtifactGenerations(workspace, ARTIFACT_GC_KEEP)
+          this.lastArtifactGcAt = at
+          if (removed > 0) log('info', `guardian artifact-gc removed=${removed} keep=${ARTIFACT_GC_KEEP}`)
+        } catch {
+          /* GC 失败静默：表缺失/锁竞争均可能，下轮再试 */
+        }
       }
 
       /* ② 合并候选检测（票 04：冗余三判定 → 报告覆写 candidates/merge-candidates.md） */
@@ -253,4 +270,44 @@ export class WorkspaceDaemon {
   healthText(): string {
     return formatHealth(healthReport(this.options.workspace.store, this.options.workspace.paths.bucket))
   }
+}
+
+/* ────────────── 票⑥B：rivermemo_artifacts 换代清理 ────────────── */
+
+/** 每 schema_version 保留的最新代数（防回滚窗口）。 */
+export const ARTIFACT_GC_KEEP = 3
+/** 清理最小间隔（低频：一天至多一次）。 */
+export const ARTIFACT_GC_INTERVAL_MS = 86_400_000
+
+/**
+ * 票⑥B：每 schema_version 只保留 updated_at 最新的 K 代（并列按 artifact_sig 定序保证幂等），
+ * 其余删除。漂移窗口期（票⑥A 修复前）每次 sig 变化 INSERT 一行且无清理，生产 23/31 篇语料
+ * 积 148/218 行；修复后新库不再堆积，此函数止血历史存量。表不存在（全新库）返回 0。
+ * 红线：不碰活跃 artifact（调用时序保证活跃代=最新 updated_at 行）。
+ */
+export function pruneArtifactGenerations(
+  workspace: WorkspaceRuntime,
+  keep: number = ARTIFACT_GC_KEEP,
+): number {
+  const db = workspace.store.db
+  const hasTable = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rivermemo_artifacts'")
+    .get()
+  if (!hasTable || keep <= 0) return 0
+  const schemas = db
+    .prepare('SELECT DISTINCT schema_version FROM rivermemo_artifacts')
+    .all() as Array<{ schema_version: string }>
+  let removed = 0
+  for (const { schema_version } of schemas) {
+    const res = db
+      .prepare(
+        `DELETE FROM rivermemo_artifacts WHERE schema_version = ? AND artifact_sig NOT IN (
+           SELECT artifact_sig FROM rivermemo_artifacts
+           WHERE schema_version = ? ORDER BY updated_at DESC, artifact_sig ASC LIMIT ?
+         )`,
+      )
+      .run(schema_version, schema_version, keep)
+    removed += Number(res.changes ?? 0)
+  }
+  return removed
 }

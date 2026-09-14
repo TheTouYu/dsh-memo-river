@@ -1588,6 +1588,114 @@ hr('#32 gate 锚拼接 max(gU,gA)：短指令误杀修复（校准 A 方案）+ 
   )
 }
 
+/* ══════════════════════ #33 票⑥A artifactSig 确定性 ══════════════════════ */
+
+hr('#33 artifactSig 确定性：同库连打 3 次构建 sig 逐位一致（票⑥A Rust 浮点定序回归线）')
+{
+  const ws33 = acquireWorkspace(WS_RIVER, config)
+  const loaded33 = await ws33.ensureLoaded()
+  const sigs33 = []
+  let nodes33 = 0
+  if (loaded33) {
+    for (let i = 0; i < 3; i++) {
+      const st = await ws33.engine.ensureArtifact()
+      sigs33.push(st.artifactSig)
+      nodes33 = st.nodeCount
+    }
+  }
+  const unique33 = [...new Set(sigs33)]
+  check(
+    33,
+    'artifactSig 确定性：HashMap 迭代序×f64 累加定序后，同库多次构建逐位一致（跨进程版见 scripts/probe-sig-determinism.mjs）',
+    loaded33 && sigs33.length === 3 && unique33.length === 1 && nodes33 > 0,
+    [
+      `构建器真跑=${sigs33.length === 3 ? '✅ 3 次' : '❌'}  nodes=${nodes33 > 0 ? nodes33 : '❌ 0（空构建？）'}`,
+      `sig 唯一数=${unique33.length === 1 ? '✅ 1' : `❌ ${unique33.length}`}  sig=${unique33[0]?.slice(0, 24) ?? 'n/a'}…`,
+      `修复前基线：全新副本库 6/6 唯一（D24）；Rust 修复=build_transport 三处排序化（memo_artifact_builder.rs）`,
+    ],
+  )
+}
+
+/* ══════════════════════ #34 票⑥B artifact 行换代清理 ══════════════════════ */
+
+hr('#34 artifact 行换代清理：每 schema 保最新 K 代；幂等；runOnce 挂钩触发（票⑥B）')
+{
+  const { WorkspaceDaemon, pruneArtifactGenerations } = await import('../lib/daemon.js')
+  const ws34 = acquireWorkspace(WS_RIVER, config)
+  const loaded34 = await ws34.ensureLoaded()
+  let unitOk = false
+  let removed34 = -1
+  let kept34 = []
+  let idempotent = false
+  let wiringOk = false
+  if (loaded34) {
+    const db34 = ws34.store.db
+    const now34 = Date.now()
+    const fake = [
+      ['gc-sig-a', now34 - 50_000],
+      ['gc-sig-b', now34 - 40_000],
+      ['gc-sig-c', now34 - 30_000],
+      ['gc-sig-d', now34 - 20_000],
+      ['gc-sig-e', now34 - 10_000],
+    ]
+    for (const [sig, ts] of fake) {
+      db34.prepare(
+        `INSERT OR REPLACE INTO rivermemo_artifacts
+         (artifact_sig, schema_version, algorithm_version, source_v9_artifact_sig, source_graph_generation,
+          model_sig, config_hash, database_generation, provenance_generation, payload,
+          status, node_count, edge_count, created_at, updated_at)
+         VALUES (?, 'test-gc-v1', 'probe', 'probe', 'probe', 'probe', 'probe', 'probe', 'probe', x'00', 'ready', 1, 1, ?, ?)`,
+      ).run(sig, ts, ts)
+    }
+    /* (a) 单元：5 代 → 保 3 代，留的是 updated_at 最新三行（removed 是跨 schema 总数——
+           real schema 的历史漂移行同轮被清属正确行为，断言只盯 test-gc-v1） */
+    removed34 = pruneArtifactGenerations(ws34, 3)
+    kept34 = (db34.prepare(
+      `SELECT artifact_sig FROM rivermemo_artifacts WHERE schema_version = 'test-gc-v1' ORDER BY updated_at DESC`,
+    ).all()).map((r) => r.artifact_sig)
+    unitOk = kept34.length === 3 && kept34[0] === 'gc-sig-e' && kept34[2] === 'gc-sig-c' && removed34 >= 2
+    /* (b) 幂等：再来一次零删除 */
+    idempotent = pruneArtifactGenerations(ws34, 3) === 0
+    /* (c) 接线：守护轮 runOnce 触发 GC 并落日志行（先补 2 行陈旧代供其清理） */
+    const now34c = Date.now()
+    for (const [sig, ts] of [
+      ['gc-sig-f', now34c - 80_000],
+      ['gc-sig-g', now34c - 70_000],
+    ]) {
+      db34.prepare(
+        `INSERT OR REPLACE INTO rivermemo_artifacts
+         (artifact_sig, schema_version, algorithm_version, source_v9_artifact_sig, source_graph_generation,
+          model_sig, config_hash, database_generation, provenance_generation, payload,
+          status, node_count, edge_count, created_at, updated_at)
+         VALUES (?, 'test-gc-v1', 'probe', 'probe', 'probe', 'probe', 'probe', 'probe', 'probe', x'00', 'ready', 1, 1, ?, ?)`,
+      ).run(sig, ts, ts)
+    }
+    const logs34 = []
+    const daemon34 = new WorkspaceDaemon({
+      config: { ...config, maintenance: { ...config.maintenance, drafts: false } },
+      workspace: ws34,
+      log: (_lv, msg) => logs34.push(msg),
+      setInterval: () => () => {},
+      takeDrafts: () => [],
+    })
+    await daemon34.runOnce()
+    wiringOk = logs34.some((l) => /artifact-gc removed=2 keep=3/.test(l))
+    /* 清理夹具 */
+    db34.prepare(`DELETE FROM rivermemo_artifacts WHERE schema_version = 'test-gc-v1'`).run()
+  }
+  check(
+    34,
+    'artifact 行换代清理：每 schema 保最新 K 代（活跃代永不删）；幂等；守护轮挂钩',
+    loaded34 && unitOk && idempotent && wiringOk,
+    [
+      `(a) 单元=${unitOk ? `✅ 5→3 代，留最新三行（本轮跨 schema 共清 ${removed34} 行，含 real schema 历史漂移残留）` : `❌ kept=${kept34.join(',')}`}`,
+      `(b) 幂等=${idempotent ? '✅ 二次调用 0 删除' : '❌'}`,
+      `(c) runOnce 接线=${wiringOk ? '✅ guardian artifact-gc 日志行出现' : '❌ 未触发'}`,
+      `生产存量对照：dsh-memo-river 桶 218 行 / preset-composer 桶 136 行（票⑥A 修复前漂移产物，首轮守护即清）`,
+    ],
+  )
+}
+
 /* ══════════════════════ 汇总 ══════════════════════ */
 
 h.dispose()
