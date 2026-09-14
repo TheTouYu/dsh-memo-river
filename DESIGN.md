@@ -276,6 +276,17 @@ D6「终局报告：六轮盲测 0 误判」 role=thematic_neighbor  topology=+0
 - **写后顺序**：沿用「先刷原生日记索引、再重建资产」（§7.1 第 4 步），改写后召回立即返回新内容（验收 A-4 实测）。
 - 审计：日志留 `memo_update` 行（D-id、路径、checksum 旧→新、新标题）。验收：`scripts/acceptance-update.mjs`。
 
+### 7.1.2 `memo_merge` —— 多篇归一与归档退役（票 03；压缩式遗忘的执行通道）
+
+参数：`sources`（D-id 列表，file/chunk 双口径，≥2）+ `content`（合并后新全文）+ `keep`(可选，D-id) + `tags`/`date`/`folder`/`newTagReason`。
+
+- **两种模式**：缺省 = **新篇模式**（全部源归档，合并篇走 memo_write 新文件路径，archive/ 留全部源文件）；`keep=D-id` = **并入模式**（保留篇走 §7.1.1 upsert，身份/路径/使用台账足迹延续，其余源归档）。
+- **归档语义**：源篇退役 = 磁盘 + 库两侧行级清除。磁盘：`.md/.txt` 移入 `archive/`（人可读、保留原 Tag 行）；**源路径在工作区根之外（导入语料带源库绝对路径）→ 原文复制归档、源文件不动**（与 §7.1.1 护栏同源）。库：`chunks`/`file_tags`/`files` 行删除——召回不再命中；使用台账（§7.3 ⑤）同步清扫源篇条目（强化足迹随篇消亡，不被继承）。
+- **溯源规范**：正文自动落 `> 合并自 D…, D…（日期 退役归档，原文见 archive/）`；调用方自带含「合并自」的正文则尊重原文。溯源行是历史文本：D 编号在后续库演进中可能因行删除而复用（SQLite rowid 无 AUTOINCREMENT），溯源以 archive/ 原文为准。
+- **去重豁免只对声明源**（`exemptFileIds`）：合并文与声明源近重复是合法用例；与未声明第三篇余弦 > dedupCosine 仍拒绝（验收 M-3 实测 0.9716 拦截）。
+- 闸门/回注/体检增量与 memo_write 同一份 `writeDiaryCore`；写后顺序（先刷原生日记索引再重建资产）同 §7.1 第 4 步。
+- 验收：`scripts/acceptance-merge.mjs`（M-1..M-6）。
+
 ### 7.2 `memo_recall`
 
 参数：`query`(必填)、`k`、`mode`(`tagmemo`|`rivermemo`|`dtsc`|`topology_v3`)、`rerank`、`truncate`、`timeRange`（`::Time` 语义，如 `2026-09-10~2026-09-11`）、`folder`

@@ -33,7 +33,8 @@ const KV_OMEGA = 'memo_river.omega_samples'
 /** 遗留布尔集（2026-09-13 前的唯一召回足迹）。冻结只读：不再写入，读时与台账并集。 */
 const KV_RECALLED = 'memo_river.recalled_file_ids'
 /** 使用台账（票 01）：fileId → { p, a, lastP, lastA } 的 JSON 映射。 */
-const KV_USAGE = 'memo_river.usage_ledger'
+/** 使用台账 kv 键（票 01；tools.ts 归档清扫复用，勿改名——线上库已有此键数据）。 */
+export const KV_USAGE = 'memo_river.usage_ledger'
 /** 陈旧线（天）：有使用足迹但最近 N 天未被动/主动的篇数，视图性指标，不告警。 */
 export const USAGE_STALE_DAYS = 14
 

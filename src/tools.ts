@@ -9,7 +9,7 @@
  * `memo_write` 的执行顺序**不可省略**：回注 → 校验 → 新 Tag 闸门 → 写入 → 返回体检增量。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { basename, join } from 'node:path'
 import type { Config } from './config.js'
@@ -23,7 +23,7 @@ import {
   type DraftRecord,
 } from './drafts.js'
 import { cosine } from './embed.js'
-import { formatHealth, healthReport, HUB_RATIO_LIMIT, recordUsage } from './health.js'
+import { formatHealth, healthReport, HUB_RATIO_LIMIT, KV_USAGE, readUsageLedger, recordUsage } from './health.js'
 import { excerpt } from './render.js'
 import { setTuning, tuningSnapshot, tuningDefaults } from './tuning.js'
 import { listSessions } from './session.js'
@@ -240,6 +240,9 @@ export interface WriteDiaryInput {
   /** 改写模式（票 02）：按 D-id 定位目标，原路径重写、库内同路径 upsert（fileId 不变，
    *  使用台账足迹随之保留——同一篇记忆的刷新而非新记忆）。去重闸门自动豁免目标自身 chunk。 */
   updateOf?: { fileId: number; path: string }
+  /** 去重闸门豁免集（票 03）：合并声明源的旧 chunk 不算孪生（豁免仅对声明源生效）。
+   *  缺省 = updateOf 自身；未声明的第三篇近重复仍会被拒。 */
+  exemptFileIds?: number[]
   /** 报告里的工具名（拒绝文案归属）。 */
   toolName: string
 }
@@ -344,11 +347,12 @@ export async function writeDiaryCore(
   if (dedupCosine > 0 && fullVector) {
     const bucketChunks = workspace.store.chunks(bucket)
     const fileById = new Map(workspace.store.files(bucket).map((f) => [f.id, f.path]))
+    /* 去重豁免（票 02/03）：改写目标与合并声明源自己的旧 chunk 不算孪生——
+     * 「自我改写/合并文与原文相近」是合法用例；未声明的第三篇近重复仍受闸门约束。 */
+    const exempt = new Set(input.exemptFileIds ?? (input.updateOf ? [input.updateOf.fileId] : []))
     let twin: { path: string; score: number } | null = null
     for (const c of bucketChunks) {
-      // 改写模式自排除（票 02）：改写目标自己的旧 chunk 不算孪生——
-      // 「自我改写与原文近乎相同」正是 memo_update 的合法用例（精简/修正/合并进旧篇）。
-      if (input.updateOf && c.file_id === input.updateOf.fileId) continue
+      if (exempt.has(c.file_id)) continue
       if (!c.vector) continue
       const score = cosine(fullVector, c.vector.subarray(0, workspace.resolved.dimension))
       if (!twin || score > twin.score) twin = { path: fileById.get(c.file_id) ?? `chunk#${c.id}`, score }
@@ -774,6 +778,140 @@ export function installTools(
           updateOf: { fileId: target.id, path: target.path },
         })
         return result.report
+      },
+    }),
+  )
+
+  /* ── memo_merge（票 03：多篇归一与归档退役——压缩式遗忘的执行通道） ── */
+  ctx.tools.register(
+    defineTool({
+      name: 'memo_merge',
+      description:
+        '把多篇旧日记合并成一篇：给 sources（D-id 列表）与合并后新全文；保留篇（keep，缺省第一篇）' +
+        '原路径 upsert 承载新全文（身份/路径/使用台账足迹保留），其余源篇归档退役——.md/.txt 移入 archive/ ' +
+        '（人可读、保留原 Tag 行），库内行级清除（chunks/file_tags/files）；正文自动落「合并自 D…」溯源行。' +
+        '去重豁免只对声明源生效；合并后召回只命中合并篇。600 token 注入预算下：语料变瘦、变响亮。',
+      parameters: {
+        sources: { type: 'array', items: { type: 'number' }, required: true, description: '源篇 D-id 列表（file 或 chunk 口径均可，≥2 篇）。' },
+        keep: { type: 'number', description: '并入哪一篇（D-id，缺省 = sources[0]）——该篇身份保留。' },
+        content: { type: 'string', required: true, description: '合并后新全文（整篇；末尾可含 Tag 行；自动追加溯源行）。' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Tag 列表（建议；缺省从正文 Tag 行解析）。' },
+        date: { type: 'string', description: '日期 YYYY-MM-DD（缺省今天）。' },
+        folder: { type: 'string', description: '工作区桶名（缺省 = 当前工作区桶）。' },
+        newTagReason: { type: 'string', description: '新 Tag 必须给理由（同 memo_write）。' },
+      },
+      output: TEXT_OUTPUT,
+      isConcurrencySafe: () => false,
+      async execute(args: Record<string, unknown>, exec: unknown) {
+        const { cwd } = viewerOf(exec)
+        const workspace = deps.getWorkspace(cwd)
+        const content = String(args.content ?? '').trim()
+        const bucket = typeof args.folder === 'string' && args.folder ? args.folder : workspace.paths.bucket
+        const date = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : new Date().toISOString().slice(0, 10)
+        const newTagReason = typeof args.newTagReason === 'string' ? args.newTagReason.trim() : ''
+
+        /* ⓪ 源解析：file-id 优先、chunk-id 兜底（与 memo_update 同口径）；去重为集合 */
+        const rawIds = (Array.isArray(args.sources) ? args.sources : []).map(Number).filter(Number.isFinite)
+        if (rawIds.length < 2) return '❌ memo_merge：sources 至少 2 篇（改写单篇用 memo_update）。'
+        const bucketFiles = workspace.store.files(bucket)
+        const bucketChunks = workspace.store.chunks(bucket)
+        const resolveFile = (id: number) => {
+          const byFile = bucketFiles.find((f) => f.id === id)
+          if (byFile) return byFile
+          const ch = bucketChunks.find((c) => Number(c.id) === id)
+          return ch ? (bucketFiles.find((f) => f.id === ch.file_id) ?? null) : null
+        }
+        const srcMap = new Map<number, (typeof bucketFiles)[number]>()
+        for (const id of rawIds) {
+          const f = resolveFile(id)
+          if (!f) return `❌ memo_merge：D${id} 不在桶 ${bucket}（已按 file/chunk 两种口径解析；用 memo_stats 查看清单）。`
+          srcMap.set(f.id, f)
+        }
+        const srcs = [...srcMap.values()]
+        if (srcs.length < 2) return '❌ memo_merge：解析后去重只剩 1 篇源，用 memo_update 即可。'
+        /* 两种模式（票 03 契约）：缺省 = 新篇模式（全部源归档，合并篇走新文件路径——archive 留全部源文件）；
+         * keep=D-id = 并入模式（保留篇 upsert 承载新全文，身份/台账足迹延续，其余源归档）。 */
+        const keepId = Number(args.keep)
+        const keepMode = Number.isFinite(keepId)
+        if (keepMode && !srcMap.has(keepId)) return `❌ memo_merge：keep=D${keepId} 不在 sources 声明集里。`
+        const keepRow = keepMode ? srcMap.get(keepId)! : null
+        const retired = keepRow ? srcs.filter((f) => f.id !== keepRow.id) : srcs
+        const titleOf = (f: (typeof bucketFiles)[number]) => {
+          const ch = bucketChunks.find((c) => c.file_id === f.id)
+          return (/^#\s+(.+)$/m.exec(String(ch?.content ?? '')) ?? [])[1] ?? basename(f.path)
+        }
+
+        /* 溯源行：正文已有「合并自」则尊重原文，否则插在 Tag 行前（无 Tag 行则追加） */
+        const prov = `> 合并自 ${srcs.map((f) => `D${f.id}`).join(', ')}（${date} 退役归档，原文见 archive/）`
+        let full2 = content
+        if (!content.includes('合并自')) {
+          full2 = /^Tag:/m.test(content) ? content.replace(/^(Tag:.*)$/m, `${prov}\n$1`) : `${content}\n\n${prov}`
+        }
+
+        /* ① 回注（与 memo_write 同构）+ 合并源明示 */
+        const freq = workspace.store.tagFrequency()
+        const total = workspace.store.files().length
+        const reinjectTop = freq.slice(0, 30).map((t) => `${t.name}×${t.count}`).join(', ') || '(空库)'
+        const related = await relatedDiaries(workspace, full2)
+        const pre = healthReport(workspace.store, bucket)
+        const hubWarn =
+          pre.hub && pre.hub.ratio >= HUB_RATIO_LIMIT
+            ? `⚠️ 枢纽警告：「${pre.hub.name}」已出现 ${pre.hub.count}/${total} 篇（≥1/3），再堆它会让直接锚泛化`
+            : `枢纽检查：当前最大 Tag 频次 ${pre.hub ? `${pre.hub.name}×${pre.hub.count}` : 'n/a'}（<1/3 ✅）`
+        const reinjection = [
+          keepRow
+            ? `【合并源】${srcs.map((f) => `D${f.id}《${titleOf(f)}》`).join(' + ')} → 并入 D${keepRow.id}《${titleOf(keepRow)}》（保留篇身份/台账足迹）`
+            : `【合并源】${srcs.map((f) => `D${f.id}《${titleOf(f)}》`).join(' + ')} → 新篇（全部源归档退役）`,
+          `【写前回注】旧 Tag 词汇表（top ${Math.min(30, freq.length)}）：${reinjectTop}`,
+          `【写前回注】语义相关旧日记：${related.length > 0 ? related.join(' / ') : '(无)'}`,
+          `【写前回注】${hubWarn}；当前连通分量 = ${pre.components}（判据 =1）`,
+        ].join('\n')
+
+        /* ②–⑤ 同一份核心；豁免集 = 全部声明源（未声明的第三篇近重复仍会被拒） */
+        const fromArg = Array.isArray(args.tags) ? (args.tags as unknown[]).map((t) => String(t).trim()).filter(Boolean) : []
+        const tags = fromArg.length > 0 ? fromArg : parseTagLine(full2)
+        const result = await writeDiaryCore(workspace, {
+          content: full2,
+          tags,
+          title: '',
+          date,
+          bucket,
+          dedupCosine: config.write.dedupCosine,
+          newTagReason,
+          preamble: reinjection,
+          toolName: 'memo_merge',
+          updateOf: keepRow ? { fileId: keepRow.id, path: keepRow.path } : undefined,
+          exemptFileIds: srcs.map((f) => f.id),
+        })
+        if (result.status === 'rejected') return result.report
+
+        /* ⑥ 归档退役：先取原文（chunk 将被清），再磁盘归档（根内 move / 根外 copy），最后库内行级清除 + 台账清扫 */
+        const archiveDir = join(workspace.paths.root, 'archive')
+        mkdirSync(archiveDir, { recursive: true })
+        const archived: string[] = []
+        for (const f of retired) {
+          const ch = workspace.store.chunks(bucket).find((c) => c.file_id === f.id)
+          const origText = String(ch?.content ?? '')
+          const dest = join(archiveDir, basename(f.path))
+          if (f.path.startsWith(workspace.paths.root)) {
+            try { renameSync(f.path, dest); archived.push(`${basename(f.path)}（移入）`) } catch { writeFileSync(dest, origText); archived.push(`${basename(f.path)}（复制兜底）`) }
+          } else {
+            writeFileSync(dest, origText || `(原文已不可得；源路径 ${f.path})`)
+            archived.push(`${basename(f.path)}（源在工作区根外，原文复制归档、源文件未动）`)
+          }
+          workspace.store.db.prepare('DELETE FROM chunks WHERE file_id = ?').run(f.id)
+          workspace.store.db.prepare('DELETE FROM file_tags WHERE file_id = ?').run(f.id)
+          workspace.store.db.prepare('DELETE FROM files WHERE id = ?').run(f.id)
+        }
+        if (retired.length > 0) {
+          const ledger = readUsageLedger(workspace.store)
+          for (const f of retired) ledger.delete(f.id)
+          workspace.store.kvSet(KV_USAGE, JSON.stringify(Object.fromEntries([...ledger.entries()].map(([k, v]) => [String(k), v]))))
+        }
+        workspace.logger.info(
+          `memo_merge bucket=${bucket} ${keepRow ? `keep=D${keepRow.id}` : 'keep=new-file'} retired=${retired.map((f) => `D${f.id}`).join(',')} archive=${archived.length} 篇`,
+        )
+        return `${result.report}\n\n【归档】${archived.join('；')}\n（源篇已退役：召回不再命中，原文 archive/ 可溯。）`
       },
     }),
   )

@@ -124,7 +124,6 @@ const assetRows = () =>
     .prepare("SELECT asset_type || '|' || artifact_sig FROM tagmemo_artifacts ORDER BY asset_type")
     .all()
     .map((r) => Object.values(r)[0])
-const assets0 = assetRows()
 const sigOf = async () => (await ws.engine.ensureArtifact(false)).artifactSig
 
 /* 基线 */
@@ -132,6 +131,9 @@ const report0 = healthReport(ws.store, BUCKET)
 const counts0 = report0.counts
 const sigCtlA = await sigOf()
 const sigCtlB = await sigOf() // 对照：无任何记账介入，连续两次
+/* 资产行基线必须在预热（上面的 ensureArtifact）**之后**拍：全新库首次构建前表是空的，
+   先拍会把「构建本身」误判成「记账致变」（脏库时代被掩盖的竞态，setup 隔离后暴露）。 */
+const assets0 = assetRows()
 line(`\n基线：files=${counts0.files} chunks=${counts0.chunks} fileTags=${counts0.fileTags}`)
 line(`      对照实验：无介入连续两次引擎 sig ${sigCtlA.slice(0, 8)}… → ${sigCtlB.slice(0, 8)}… ${sigCtlA === sigCtlB ? '稳定' : '漂移（EPA 每轮重算的既有行为，非记账所致）'}`)
 
@@ -195,20 +197,25 @@ const topRow = report1.usage?.top[0]
 const statsOk = usageLine.includes('使用台账') && report1.usage && report1.usage.top.some((t) => usageLine.includes(`D${t.fileId}×${t.total}`))
 
 // 遗留并集：合成一篇「无台账足迹」的篇（从台账临时摘除）→ 塞进遗留集 → legacyOnly≥1，随后全部还原
+// probeId 必须是**台账里真实有足迹**的篇（摘除才有语义）；基线取剥离前的新鲜值（report1 可能陈旧）。
 let unionOk = false
 let unionEvi = []
-const probeId = ws.store.files().map((f) => f.id)[0]
+const ledgerIds = [...readUsageLedger(ws.store).keys()]
+const probeId = ledgerIds[0]
 if (probeId !== undefined) {
+  const baseUsed = healthReport(ws.store, BUCKET).usage?.everUsed
   const strip = { ...Object.fromEntries([...readUsageLedger(ws.store)]) }
   delete strip[probeId]
   ws.store.kvSet('memo_river.usage_ledger', JSON.stringify(strip))
   ws.store.kvSet('memo_river.recalled_file_ids', JSON.stringify([probeId]))
   const rU = healthReport(ws.store, BUCKET)
-  unionOk = rU.usage.legacyOnly >= 1 && rU.usage.everUsed === report1.usage.everUsed
+  unionOk = rU.usage.legacyOnly >= 1 && rU.usage.everUsed === baseUsed
   unionEvi = [
-    `摘除 D${probeId} 台账再塞进遗留集 → legacyOnly=${rU.usage.legacyOnly}，everUsed 保持 ${rU.usage.everUsed}（台账∪遗留 不重不漏）`,
-    `⑤ 行渲染：${formatHealth(rU).split('\n').find((l) => l.includes('仅遗留集足迹')) ?? '（未渲染 legacyOnly，可忽略：probeId 本就有足迹时 everUsed 语义不变）'}`,
+    `摘除 D${probeId} 台账再塞进遗留集 → legacyOnly=${rU.usage.legacyOnly}，everUsed ${baseUsed}→${rU.usage.everUsed}（台账∪遗留 不重不漏）`,
+    `⑤ 行渲染：${formatHealth(rU).split('\n').find((l) => l.includes('仅遗留集足迹')) ?? '（未渲染 legacyOnly）'}`,
   ]
+} else {
+  unionEvi = ['（台账为空——U-1/U-2 未产生足迹，并集场景无法合成）']
 }
 check('U-6', 'memo_stats 渲染 ⑤ 视图 + 遗留集并集生效', statsOk && unionOk, [
   `memo_stats ⑤ 行：${usageLine || '（缺失）'}`,
