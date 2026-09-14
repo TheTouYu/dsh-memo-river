@@ -264,6 +264,18 @@ D6「终局报告：六轮盲测 0 误判」 role=thematic_neighbor  topology=+0
 
 **拒绝条件**（明确报错，不静默）：缺 Tag 行 / 未确认新 Tag / Tag 超过单篇 5 个 / 与既有 Tag 同义 / 与既有日记正文近重复。
 
+### 7.1.1 `memo_update` —— 单篇原地改写（票 02，2026-09-14；兑 3.5「或合并进旧篇」的承诺）
+
+参数：`id`（D 编号）或 `title`（标题子串）**二选一恰好一个** + `content`(必填，新全文) + `tags`/`date`/`folder`/`newTagReason`。
+
+- **目标解析**：`id` 直取；`title` 匹配 chunk `#` 首行或路径，0 命中→提示用 `memo_stats`，多命中→列 ≤8 候选要求用 `id` 重试。
+- **与 memo_write 完全同一份闸门**（`writeDiaryCore`，含新 Tag 闸门/同义漂移/枢纽警告/体检增量）——三个入口（write/update/approve）口径只此一份。回注前置段多一行【改写目标】。
+- **自排除**：内容去重闸门跳过改写目标自身的旧 chunk（自我改写与原文相近是合法用例）；与其他篇近重复（>dedupCosine）仍拒绝。
+- **身份不变**：磁盘**原路径重写**（文件名不换）、库内同路径 upsert → `fileId` 不变 → 票①使用台账足迹随篇保留（改写=同一篇记忆的刷新，不是新记忆）；chunks/file_tags 先删后插（chunkId 会换）。
+- **护栏**：目标路径在**工作区根之外**（导入语料常带源库绝对路径，如 VCP dailynote 参照库）→ 只更新库、不写磁盘，日志记 `path-outside-workspace`——工作区写路径永不触碰外部文件。
+- **写后顺序**：沿用「先刷原生日记索引、再重建资产」（§7.1 第 4 步），改写后召回立即返回新内容（验收 A-4 实测）。
+- 审计：日志留 `memo_update` 行（D-id、路径、checksum 旧→新、新标题）。验收：`scripts/acceptance-update.mjs`。
+
 ### 7.2 `memo_recall`
 
 参数：`query`(必填)、`k`、`mode`(`tagmemo`|`rivermemo`|`dtsc`|`topology_v3`)、`rerank`、`truncate`、`timeRange`（`::Time` 语义，如 `2026-09-10~2026-09-11`）、`folder`

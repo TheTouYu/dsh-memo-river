@@ -720,7 +720,13 @@ export function installTools(
         let target: (typeof bucketFiles)[number] | null = null
         if (hasId) {
           target = bucketFiles.find((f) => f.id === args.id) ?? null
-          if (!target) return `❌ memo_update：桶 ${bucket} 里没有 D${args.id}（用 memo_stats 查看现有编号）。`
+          if (!target) {
+            // memo_recall 输出的 D 编号是 **chunk id**（改写会换 chunk），memo_stats/台账是 file id：
+            // 按_chunk→file 兜底解析，两个口径都能定位。
+            const ch = workspace.store.chunks(bucket).find((c) => Number(c.id) === args.id)
+            if (ch) target = bucketFiles.find((f) => f.id === ch.file_id) ?? null
+          }
+          if (!target) return `❌ memo_update：桶 ${bucket} 里没有 D${args.id}（已按 file id 和 chunk id 两种口径解析；用 memo_stats 查看清单）。`
         } else {
           const hits = bucketFiles.filter(
             (f) => (chunkTitle.get(f.id) ?? '').includes(titleQuery) || f.path.includes(titleQuery),

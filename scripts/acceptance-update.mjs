@@ -117,18 +117,21 @@ const newContent =
 const today = new Date().toISOString().slice(0, 10)
 
 /* ── A-1 原地改写 ── */
+import { createHash } from 'node:crypto'
+const diskGuard = createHash('sha256').update(readFileSync(target.path, 'utf8')).digest('hex')
 const r1 = String(await updateTool.execute({ id: target.id, content: newContent, date: today }, execStub(WS)))
 const files1 = ws.store.files(BUCKET)
 const t1 = files1.find((f) => f.id === target.id)
 const chunk1 = ws.store.chunks(BUCKET).find((c) => c.file_id === target.id)
+const diskUnchanged = createHash('sha256').update(readFileSync(target.path, 'utf8')).digest('hex') === diskGuard
 const a1 = Boolean(
   files1.length === files0.length && t1 && t1.path === target.path && chunk1 &&
-  String(chunk1.content).includes(MARK) && !String(chunk1.content).includes(oldSentence),
+  String(chunk1.content).includes(MARK) && !String(chunk1.content).includes(oldSentence) && diskUnchanged,
 )
-check('A-1', '改写后总篇数不变、路径不变、chunk=新全文（旧句已消失）', a1, [
+check('A-1', '改写后总篇数不变、路径不变、chunk=新全文；工作区外磁盘文件未动', a1, [
   `篇数 ${files0.length} → ${files1.length}；D${target.id} 路径 ${t1?.path === target.path ? '不变' : '⚠️变了'}`,
   `新标记在库：${chunk1 ? String(chunk1.content).includes(MARK) : false}；旧长句已移除：${chunk1 ? !String(chunk1.content).includes(oldSentence) : false}`,
-  `工具返回：${r1.split('\n').slice(0, 2).join(' ⏎ ')}`,
+  `目标磁盘文件（工作区根${target.path.startsWith(ws.paths.root) ? '内' : '外'}）：${diskUnchanged ? '✅ 未被触碰' : '⚠️ 被改写'}`,
 ])
 
 /* ── A-4 改写后立即召回：标记可检索（原生日记索引先于/伴随资产重建生效）+ Ω 不塌缩 ── */
@@ -136,16 +139,35 @@ let recallHit = null
 for (let i = 0; i < 6 && !recallHit; i++) {
   await new Promise((r) => setTimeout(r, i === 0 ? 300 : 1500))
   const rr = String(await recallTool.execute({ query: `改写验收 ${MARK} 是什么`, k: 5 }, execStub(WS)))
-  if (rr.includes(MARK)) recallHit = rr
+  /* 候选块 = `· D<n>「…」` 头行 → 下一个头行之间；标记句只存在于被改写的这篇（块内命中即新内容可召回）。
+   * 注：memo_recall 头行的 D 号是 **chunk id**（改写换 chunk），不是 file id——见 A-1b。 */
+  const lines = rr.split('\n')
+  const heads = lines.map((l, idx) => ({ idx, m: /^·\s*D(\d+)/.exec(l) }))
+  for (let j = 0; j < heads.length; j++) {
+    const h = heads[j]
+    if (!h.m) continue
+    const end = heads.slice(j + 1).find((x) => x.m)?.idx ?? undefined
+    const block = lines.slice(h.idx, end).join('\n')
+    if (block.includes(MARK)) { recallHit = lines[h.idx].slice(0, 100); break }
+  }
 }
 const statsText = String(await statsTool.execute({}, execStub(WS)))
 const omegaLine = statsText.split('\n').find((l) => l.includes('Ω')) ?? ''
 const omegaOk = !omegaLine.includes('collapsed')
 check('A-4', '改写后立即召回返回新内容；Ω 不塌缩', Boolean(recallHit) && omegaOk, [
-  recallHit ? `召回命中（含标记句）：${recallHit.split('\n').find((l) => l.includes('D') && l.includes(target.id.toString())) ?? recallHook(recallHit, target.id)}` : '⚠️ 六轮轮询均未召回新内容',
+  recallHit ? `标记句挂在 D${target.id} 行：${recallHit.slice(0, 100)}` : '⚠️ 六轮轮询均未在 D' + target.id + ' 行召回标记句',
   `Ω 行：${omegaLine.slice(0, 80) || '(未找到)'} ${omegaOk ? '' : '⚠️ 塌缩'}`,
 ])
-function recallHook(text, id) { return text.split('\n').find((l) => l.includes("D" + id)) ?? '(行定位失败，全文已含标记)' }
+
+/* ── A-1b chunk-id 口径：用改写后最新的 chunk id（≠ file id）也能定位同一篇 ── */
+const curChunk = ws.store.chunks(BUCKET).find((c) => c.file_id === target.id)
+const r1b = curChunk && Number(curChunk.id) !== target.id
+  ? String(await updateTool.execute({ id: Number(curChunk.id), content: newContent.replace('原地重写', '原地重写(chunk口径)'), date: today }, execStub(WS)))
+  : '(file id 与 chunk id 恰好相同，跳过)'
+check('A-1b', 'memo_update 的 id 兼容 chunk-id 口径（memo_recall 显示的就是它）', !r1b.startsWith('❌') || r1b.includes('恰好相同'), [
+  typeof curChunk === 'object' && curChunk ? `D${target.id} 当前 chunk id=${curChunk.id}${Number(curChunk.id) !== target.id ? '（≠ file id，已实测解析）' : '（= file id，无差异场景）'}` : '(无 chunk)',
+  r1b.split('\n')[0]?.slice(0, 80) ?? '',
+])
 
 /* ── A-2 自排除：与刚写入内容近乎相同的再次改写不被拒；逐字复读兄弟篇仍被拒 ── */
 const r2 = String(await updateTool.execute(

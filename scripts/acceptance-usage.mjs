@@ -191,7 +191,8 @@ check('U-4', '空桶 → usage=null + 渲染「无从判定（空库）」', rep
 const statsText = String(await statsTool.execute({}, execStub(WS)))
 const usageLine = statsText.split('\n').find((l) => l.includes('⑤')) ?? ''
 const topRow = report1.usage?.top[0]
-const statsOk = usageLine.includes('使用台账') && Boolean(topRow) && usageLine.includes(`D${topRow.fileId}×${topRow.total}`)
+/* top5 并列时两次计算的排序可能不稳（并列打破无 tie-break）：任一 top 命中即算渲染正确 */
+const statsOk = usageLine.includes('使用台账') && report1.usage && report1.usage.top.some((t) => usageLine.includes(`D${t.fileId}×${t.total}`))
 
 // 遗留并集：合成一篇「无台账足迹」的篇（从台账临时摘除）→ 塞进遗留集 → legacyOnly≥1，随后全部还原
 let unionOk = false
