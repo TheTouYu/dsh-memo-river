@@ -75,6 +75,103 @@ function pickInterval(ctx: AppContext): (fn: () => void, ms: number) => () => vo
   }
 }
 
+/* ══════════ 进程级路由池（可重入） ══════════
+ *
+ * webserver 的路由表是**进程全局**的（没有 realm 概念，isolate 治不了），而本插件的
+ * apply() 会在**同一个进程里被调用多次**：
+ *   · 多条带记忆河流的预设行各挂一次（D55/D56：宿主层共享 vs 预设行独占）；
+ *   · 常驻（standing）挂载**不随会话结束释放**（D58 源码级结论）。
+ * 第二次 `ws.register` 必被 dsh-host-webserver/lib/index.js:178 拒绝：
+ *   throw new Error(`webserver: duplicate ${route.kind} route "${route.path}"`)
+ * 后果不是"少一个面板"，而是**整条组合挂载失败** → 会话 resume 每次失败 → 浏览器标签
+ * 无退避重试（2026-09-14 实测事故：~80 req/s，每请求重挂整套组合，实例空闲却烧满一核，
+ * 825.1 s CPU / 805 s 墙钟 = 102.5%，同 unit 基线 0.9–4.3%）。
+ *
+ * 故：同一进程内**同路径只登记一次**，后到者复用先到者的路由（引用计数），计数归零才
+ * 真正注销。注册语义从「挂载独占」降级为「进程共享」——与面板的实际语义一致
+ * （面板读的是进程内 tuning 状态 + tuning.json，不区分挂载者）。
+ */
+interface RouteLike {
+  kind: string
+  path: string
+  handler: (req: never, res: never) => unknown
+}
+interface WebServerLike {
+  register?: (route: RouteLike) => () => void
+}
+/**
+ * ⚠ 池必须挂在**进程全局**，不能用模块作用域变量（第一版就栽在这里，2026-09-14 实测）：
+ * 同一进程里本文件会被**两条 URL** 各加载一次 ——
+ *   · 预设写 `./memo-river.mjs`（wrapper）→ `import('…/lib/index.js?v=<mtime>')`（带 query）
+ *   · 预设写包名 `@dsh-external/dsh-memo-river` → `file:///…/lib/index.js`（无 query）
+ * Node 的 ESM 缓存按 **URL** 键 ⇒ 两个模块实例、两份模块级 Map ⇒ 谁也看不见对方，
+ * 第二次挂载照样撞上 webserver 的进程级路由表（实测：修复版已构建，同一请求仍报
+ * `duplicate exact route "/memo-river/tuning"`）。`Symbol.for` 是跨模块实例的同一张表。
+ */
+type RoutePool = Map<string, { refs: number; dispose: () => void }>
+type PoolMap = WeakMap<object, RoutePool>
+const POOL_KEY = Symbol.for('@dsh-external/dsh-memo-river/routePools')
+const globalRegistry = globalThis as unknown as Record<symbol, PoolMap | undefined>
+const routePools: PoolMap = globalRegistry[POOL_KEY] ?? (globalRegistry[POOL_KEY] = new WeakMap())
+
+/** 路由池按 **webserver 实例**分池：路由表属于某个 webserver，跨实例复用是错的
+ *  （webserver 服务被重建时，新实例的路由表是空的，旧池不得拦着它登记）。 */
+function poolFor(ws: WebServerLike): Map<string, { refs: number; dispose: () => void }> {
+  let pool = routePools.get(ws as object)
+  if (pool === undefined) {
+    pool = new Map()
+    routePools.set(ws as object, pool)
+  }
+  return pool
+}
+
+function releaseSharedRoute(ws: WebServerLike, path: string): void {
+  const pool = routePools.get(ws as object)
+  const held = pool?.get(path)
+  if (pool === undefined || held === undefined) return
+  held.refs -= 1
+  if (held.refs > 0) return
+  pool.delete(path)
+  try {
+    held.dispose()
+  } catch {
+    /* 注销失败不阻塞卸载 */
+  }
+}
+
+/** 登记一条进程级路由：同一 webserver 上已有同路径则复用，不再触达重复检查。
+ *
+ *  `onTolerated`（可选）：当注册被 webserver 以「重复路由」拒绝、且**重复的正是本路由**
+ *  时不再抛出，而是容忍（回调仅用于留痕）。为什么容忍是对的 —— 见下方 trap 说明：
+ *  `/memo-river/*` 是本插件独占的命名空间，"已登记"与本插件想要的结果完全一致，
+ *  唯一不能做的是**替别人注销**（那条路由不是我们登记的，返回 no-op 清理函数）。
+ */
+function registerSharedRoute(ws: WebServerLike, route: RouteLike, onTolerated?: (path: string, message: string) => void): () => void {
+  const pool = poolFor(ws)
+  const held = pool.get(route.path)
+  if (held !== undefined) {
+    held.refs += 1
+    return () => releaseSharedRoute(ws, route.path)
+  }
+  let dispose: () => void
+  try {
+    dispose = (ws.register as (r: RouteLike) => () => void)(route)
+  } catch (e) {
+    const message = String((e as { message?: unknown })?.message ?? e)
+    /* ⚠ TRAP（2026-09-14 实测两次才收敛）：
+     * 池看不见对方的三种情形都真实存在 —— 模块被两条 URL 加载成两个实例（wrapper 带
+     * `?v=` vs 包名裸 URL）；插件活在不同的 realm/context（各自的 globalThis）；宿主
+     * 层已经把同一条路由登记过。判据只有一条：**路由表是进程全局的，池不是**。 */
+    if (!message.includes('duplicate') || !message.includes(`"${route.path}"`)) throw e
+    onTolerated?.(route.path, message)
+    return () => {
+      /* 不是我登记的，注销权不归我 */
+    }
+  }
+  pool.set(route.path, { refs: 1, dispose })
+  return () => releaseSharedRoute(ws, route.path)
+}
+
 export function apply(ctx: AppContext, config: MemoRiverConfig): void {
   /* 插件级兜底日志（拿不到工作区时用；工作区日志在 WorkspaceRuntime 内，按 cwd 分桶） */
   const pluginLogPath = config.logFile || join(dshHome(), 'memo-river', 'plugin.log')
@@ -95,16 +192,19 @@ export function apply(ctx: AppContext, config: MemoRiverConfig): void {
   } catch {
     /* 默认值解析失败 → 面板显示 0；不阻塞主流程 */
   }
-  const ws = (ctx as unknown as { webServer?: { register?: (route: unknown) => () => void } }).webServer
+  const ws = (ctx as unknown as { webServer?: WebServerLike }).webServer
+  /** 路由被别处（另一模块实例 / 另一 realm / 宿主层）登记过 → 容忍并留痕，不静默。 */
+  const tolerate = (path: string, message: string): void =>
+    log('warn', `route-already-registered path=${path} tolerated=1（本插件的命名空间，复用既有登记）detail=${message}`)
   if (ws && typeof ws.register === 'function') {
-    const d1 = ws.register({
+    const d1 = registerSharedRoute(ws, {
       kind: 'exact',
       path: '/memo-river/tuning',
       handler: (req: never, res: never) => handleTuningApi(req, res, config, tuningDefaults, listSessions),
-    })
-    const d2 = ws.register({ kind: 'exact', path: '/memo-river/tuning/panel', handler: (_req: never, res: never) => serveTuningPanel(res) })
+    }, tolerate)
+    const d2 = registerSharedRoute(ws, { kind: 'exact', path: '/memo-river/tuning/panel', handler: (_req: never, res: never) => serveTuningPanel(res) }, tolerate)
     // GUI 卫星包（dsh-memo-tuner）显隐探针：当前会话是否挂载 memo-river
-    const d3 = ws.register({ kind: 'exact', path: '/memo-river/tuning/active', handler: (req: never, res: never) => handleActiveProbe(req, res, listSessions) })
+    const d3 = registerSharedRoute(ws, { kind: 'exact', path: '/memo-river/tuning/active', handler: (req: never, res: never) => handleActiveProbe(req, res, listSessions) }, tolerate)
     // 注意：ctx.effect 把「返回值」当清理函数——必须返回一个函数，
     // 而不是当场调用 d1/d2（首版就在这里把路由注册完立刻拆了，症状 404）。
     ctx.effect(() => () => {
