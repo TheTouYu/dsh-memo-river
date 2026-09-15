@@ -35,6 +35,14 @@ export interface InjectConfig {
   /** 构造查询场时回看的最近消息条数。 */
   queryLookback: number
   /**
+   * 票 01：注入路径嵌入短超时（ms，0 = 用 EmbedClient 宽松默认 60s）。
+   * 只罩被动注入的合批 embed 调用（查询向量 + 门控锚，一次请求）；超时/失败 →
+   * inject-skip（reason 可区分 embed-timeout）——每轮交互开头的注入等待有硬顶，
+   * 端点多慢都不卡会话。写侧（memo_write/approve）与主动 memo_recall 不经此配置，
+   * 仍走宽松默认。
+   */
+  embedTimeoutMs: number
+  /**
    * 门控拿当前消息的向量比阈值，而不是拿窗口拼接的检索向量。
    * true（默认）= 门控有判别力；false = 退回旧行为（w≥2 时无关查询也通过，见 schema 注释实测）。
    */
@@ -177,6 +185,12 @@ export const Config: z<Config> = z.object({
       minKnnForReward: z.number().default(0.6),
       gateThreshold: z.number().default(0.55),
       queryLookback: z.number().min(1).default(6),
+      /**
+       * 票 01：注入路径嵌入短超时（ms，0 = 用客户端默认 60s）。默认 3000 的定标：
+       * 端点单条 RTT 实测 1.19-1.45s（connect 0.4 + TLS 0.8），合批后单请求 ×1，
+       * 3s 容得下 p95 慢请求又不至于吞掉整轮交互预算（基线 p95 8.1-9.8s 之痛源）。
+       */
+      embedTimeoutMs: z.number().min(0).default(3000),
       /**
        * 门控拿哪个向量比阈值。
        *

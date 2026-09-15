@@ -106,6 +106,8 @@ function recallOptions(config: Config, queryId: string, gateText = '', gateAssis
     queryId,
     gateText,
     gateAssistantText,
+    // 票 01：注入路径嵌入短超时（只罩被动注入的合批 embed；写侧/主动 recall 不传 → 宽松默认）
+    embedTimeoutMs: config.inject.embedTimeoutMs,
   }
 }
 /** 解析会话的 cwd：header.cwd 优先，其次用已记住的，最后退回进程 cwd。 */
