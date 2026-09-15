@@ -18,7 +18,12 @@ import {
   curateTags,
   listPending,
   matchDrafts,
+  parseTagLine,
+  PRECHECK_LABELS,
+  readDraftStatus,
   resolveDraft,
+  stripTagLine,
+  TAG_MIN,
   workspaceFor,
   type DraftRecord,
 } from './drafts.js'
@@ -37,12 +42,16 @@ const TEXT_OUTPUT = {
   render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: String(value) }],
 }
 
-/** §7.1 校验常量。 */
-const TAG_MIN = 3
+/** §7.1 校验常量（TAG_MIN 已下沉 drafts.ts：票06 预审与写路径共用一份口径）。 */
 const TAG_MAX = 5
 const TAG_NAME_MAX = 20
 /** 与既有 Tag 余弦 > 0.92 视为同义漂移（§7.1 第 2 步）。 */
 export const SYNONYM_COSINE = 0.92
+
+/** 票 04：memo_approve 批量批准的有界并行度（模式同 embed.ts 的 TAG_VECTORIZE_CONCURRENCY）。
+ * 09-15 实测：批准 33 篇草稿 ~25s/篇量级的串行等待，瓶颈是每篇一次写侧嵌入 RTT（1.2–1.45s）
+ * ——逐篇串行改 worker-pool 并行后，N 篇 ≈ ⌈N/并行度⌉ × 单篇。 */
+const APPROVE_CONCURRENCY = Number(process.env.MEMO_APPROVE_CONCURRENCY) || 5
 
 export interface ToolDeps {
   config: Config
@@ -118,23 +127,9 @@ function registerMemoTuning(ctx: { tools: { register(tool: unknown): () => void 
   )
 }
 
-/* ────────────── Tag 行解析与规范化 ────────────── */
-
-const TAG_LINE = /^Tag\s*[:：]\s*(.+)$/im
-
-export function parseTagLine(content: string): string[] {
-  const m = content.match(TAG_LINE)
-  if (!m) return []
-  return m[1]!
-    .split(/[,，、]/)
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0)
-}
-
-/** 去掉正文里已有的 Tag 行（写盘时统一重排到末尾）。 */
-export function stripTagLine(content: string): string {
-  return content.replace(TAG_LINE, '').replace(/\n{3,}/g, '\n\n').trimEnd()
-}
+/* ────────────── Tag 行解析与规范化 ──────────────
+ * 票06：定义已下沉 src/drafts.ts（预审与写路径共用一份口径；此处转口导出保持 API 路径不变）。 */
+export { parseTagLine, stripTagLine } from './drafts.js'
 
 function titleFromContent(content: string, fallback: string): string {
   const first = content.split(/\r?\n/).find((l) => l.trim().length > 0)
@@ -964,6 +959,7 @@ export function installTools(
       name: 'memo_drafts',
       description:
         '草稿队列：列出待确认草稿（守护循环落的回合摘要，pending/*.md）。缺省只看本工作区，all=true 扫全部工作区。' +
+        '每篇带守护预审三态标记（可一键批/需人工/建议丢弃——只读预审，绝不代批；空用户+空助手的垃圾样本稳定标「建议丢弃」）。' +
         '批准入库用 memo_approve（一键、走 Tag 闸门）；丢弃用 memo_discard。',
       parameters: {
         all: { type: 'boolean', description: '扫全部工作区的 pending/（缺省只看本工作区）。' },
@@ -977,13 +973,25 @@ export function installTools(
         const all = args.all === true
         const limit = typeof args.limit === 'number' && args.limit > 0 ? args.limit : 30
         const list = listPending(workspace.paths.root, all)
+        /* 票06：预审三态分布（读伴随 .status.json；守护轮自动刷新）。 */
+        const dist = { ok: 0, manual: 0, discard: 0, unchecked: 0 }
+        const statusOf = new Map(list.map((r) => [r.path, readDraftStatus(r.path)]))
+        for (const st of statusOf.values()) {
+          if (st) dist[st.state] += 1
+          else dist.unchecked += 1
+        }
         const lines = [
           `【记忆河流·memo_drafts】待确认草稿 ${list.length} 篇（${all ? '全部工作区' : `桶=${workspace.paths.bucket}`}）`,
+          `· 预审分布：可一键批 ${dist.ok} / 需人工 ${dist.manual} / 建议丢弃 ${dist.discard}` +
+            (dist.unchecked > 0 ? ` / 未审 ${dist.unchecked}` : '') +
+            '（守护循环只读预审，绝不代批）',
         ]
         if (list.length === 0) lines.push('· 队列为空（守护循环每 intervalMs 落一批新草稿）')
         for (const r of list.slice(0, limit)) {
           const head = (r.userText || r.assistantText || '(空)').replace(/\s+/g, ' ').slice(0, 60)
-          lines.push(`· ${basename(r.path)}  桶=${r.bucket}  回合${r.turn}`)
+          const st = statusOf.get(r.path) ?? null
+          lines.push(`· ${basename(r.path)}  桶=${r.bucket}  回合${r.turn}  [${st ? PRECHECK_LABELS[st.state] : '未审'}]`)
+          if (st) lines.push(`    预审：${PRECHECK_LABELS[st.state]}——${st.reason}`)
           lines.push(`    用户/助手：${head}`)
           lines.push(`    建议 Tag：${r.suggestedTags.join(', ') || '(无)'}`)
         }
@@ -1000,7 +1008,8 @@ export function installTools(
       description:
         '一键批准草稿入库：每篇草稿走 memo_write 同一套 Tag 校验闸门（writeDiaryCore），Tag 只复用既有词汇' +
         '（建议 Tag ∩ 词汇表，3–5 个）——可复用 Tag 不足 3 个的草稿自动跳过（待人工 memo_write 撰写）。' +
-        '批准后草稿移入 approved/（可追溯）。写入会产生嵌入调用，大批量批准耗时按每篇 1–3 秒计。',
+        '批准后草稿移入 approved/（可追溯）。批量按有界并行执行（缺省 5 并发，MEMO_APPROVE_CONCURRENCY 可调，' +
+        '=1 即串行）：N 篇耗时 ≈ ⌈N/并发⌉ × 单篇；单篇失败/跳过不影响其余，结果逐篇回报。',
       parameters: {
         ids: { type: 'array', items: { type: 'string' }, description: '草稿文件名子串列表（memo_drafts 列出的文件名）。' },
         all: { type: 'boolean', description: '批准队列全部草稿（与 ids 二选一）。' },
@@ -1012,23 +1021,25 @@ export function installTools(
         const { targets, error } = selectDraftTargets(args, exec)
         if (error) return `❌ memo_approve：${error}`
         if (targets.length === 0) return '【记忆河流·memo_approve】队列为空，无可批准草稿。'
+        const startedAt = Date.now()
         const lines = [`【记忆河流·memo_approve】待处理 ${targets.length} 篇`]
-        let approved = 0
-        let skipped = 0
-        for (const record of targets) {
+
+        /* 票 04：逐篇串行 → 有界并行（worker-pool，模式同 embed.ts 的 TAG_VECTORIZE_CONCURRENCY）。
+         * 每篇仍走与串行版**同一份**闸门链：workspaceFor → curateTags（∩ 词汇表）→ TAG_MIN 跳过 →
+         * writeDiaryCore（Tag 闸门/去重/写入）→ resolveDraft——代码零复制，闸门语义不变。
+         * 单篇被拒不外溢（部分成功语义）；意外异常也只折算成该篇的失败行，绝不半途崩溃整批。
+         * outcomes 按原下标落位：完成顺序乱，汇报顺序不乱（与逐篇串行的输出序一致）。
+         * 并发安全性：同桶共享同一 WorkspaceRuntime（acquireWorkspace 按 cwd 缓存）——
+         * better-sqlite3 全同步调用天然串行、ensureLoaded 单飞、engine.runExclusive 串行化
+         * 资产重建；approve 路 newTags 恒空（curateTags 只复用既有词），无新 Tag 向量竞态。 */
+        const approveOne = async (record: DraftRecord): Promise<string> => {
           const workspace = workspaceFor(record, config)
           if (!workspace) {
-            skipped += 1
-            lines.push(`· ⏭ ${basename(record.path)}：工作区缺 workspace.json（cwd 未知），跳过`)
-            continue
+            return `· ⏭ ${basename(record.path)}：工作区缺 workspace.json（cwd 未知），跳过`
           }
           const tags = curateTags(record, workspace)
           if (tags.length < TAG_MIN) {
-            skipped += 1
-            lines.push(
-              `· ⏭ ${basename(record.path)}：可复用 Tag 仅 ${tags.length} 个（${tags.join(', ') || '无'}）< ${TAG_MIN}，待人工 memo_write 撰写后 memo_discard 本草稿`,
-            )
-            continue
+            return `· ⏭ ${basename(record.path)}：可复用 Tag 仅 ${tags.length} 个（${tags.join(', ') || '无'}）< ${TAG_MIN}，待人工 memo_write 撰写后 memo_discard 本草稿`
           }
           const { title, content } = composeDiary(record)
           const date = /^\d{4}-\d{2}-\d{2}/.test(record.at) ? record.at.slice(0, 10) : new Date().toISOString().slice(0, 10)
@@ -1044,24 +1055,48 @@ export function installTools(
             toolName: 'memo_approve',
           })
           if (result.status === 'written') {
-            approved += 1
             if (resolveDraft(record, 'approved')) {
               workspace.logger.info(
                 `draft-approved file=${basename(record.path)} chunk=D${result.chunkId} tags=${tags.join(',')}`,
               )
-              lines.push(`· ✅ ${basename(record.path)} → D${result.chunkId}「${result.title}」（Tag：${tags.join(', ')}）→ approved/`)
-            } else {
-              lines.push(
-                `· ✅ ${basename(record.path)} → D${result.chunkId}「${result.title}」（⚠️ 已入库但移入 approved/ 失败，请手动清理 pending）`,
-              )
+              return `· ✅ ${basename(record.path)} → D${result.chunkId}「${result.title}」（Tag：${tags.join(', ')}）→ approved/`
             }
-          } else {
-            skipped += 1
-            const reason = result.report.split('\n').find((l) => l.includes('被拒绝')) ?? '写入被拒'
-            lines.push(`· ❌ ${basename(record.path)}：${reason}`)
+            return `· ✅ ${basename(record.path)} → D${result.chunkId}「${result.title}」（⚠️ 已入库但移入 approved/ 失败，请手动清理 pending）`
           }
+          const reason = result.report.split('\n').find((l) => l.includes('被拒绝')) ?? '写入被拒'
+          return `· ❌ ${basename(record.path)}：${reason}`
         }
+
+        const outcomes: Array<string | undefined> = new Array(targets.length)
+        let approved = 0
+        let skipped = 0
+        let done = 0
+        let cursor = 0
+        const workers = Array.from({ length: Math.min(APPROVE_CONCURRENCY, targets.length) }, async () => {
+          while (cursor < targets.length) {
+            const index = cursor++
+            const record = targets[index]!
+            try {
+              outcomes[index] = await approveOne(record)
+              if (outcomes[index]!.startsWith('· ✅')) approved += 1
+              else skipped += 1
+            } catch (e) {
+              /* 意外异常兜底：只折算该篇失败（留 pending/ 可重试），整批继续——部分成功语义 */
+              outcomes[index] = `· ❌ ${basename(record.path)}：处理异常 ${String((e as Error)?.message ?? e)}（留在 pending/，可重试）`
+              skipped += 1
+            }
+            done += 1
+            deps.log('info', `memo_approve progress=${done}/${targets.length} file=${basename(record.path)}`)
+          }
+        })
+        await Promise.all(workers)
+
+        lines.push(...(outcomes.filter((l) => l !== undefined) as string[]))
         lines.push(`· 小计：批准 ${approved} / 跳过 ${skipped}（跳过项留在 pending/）`)
+        lines.push(
+          `· 耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s（并行度 ${Math.min(APPROVE_CONCURRENCY, targets.length)}，` +
+            `${APPROVE_CONCURRENCY > 1 ? '有界并行' : '串行模式（MEMO_APPROVE_CONCURRENCY=1）'}）`,
+        )
         return lines.join('\n')
       },
     }),
