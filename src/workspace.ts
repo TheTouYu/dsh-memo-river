@@ -6,7 +6,7 @@
  */
 import { existsSync } from 'node:fs'
 import type { Config } from './config.js'
-import { EmbedClient } from './embed.js'
+import { closeEmbedTransport, EmbedClient, embedTransportIntent } from './embed.js'
 import { MemoEngine, loadKnowledgeBaseManager } from './native.js'
 import { Logger, ensureWorkspaceDirs, loadEnvFile, workspaceHash, workspacePaths, type WorkspacePaths } from './runtime.js'
 import { KnowledgeStore } from './store.js'
@@ -62,7 +62,7 @@ export class WorkspaceRuntime {
     const store = new KnowledgeStore(paths.dbPath)
     const runtime = new WorkspaceRuntime(paths, store, resolved, config)
     runtime.logger.info(
-      `workspace-open cwd=${cwd} hash=${paths.hash} bucket=${paths.bucket} db=${paths.dbPath} embed=${resolved.source}`,
+      `workspace-open cwd=${cwd} hash=${paths.hash} bucket=${paths.bucket} db=${paths.dbPath} embed=${resolved.source} transport=${embedTransportIntent()}`,
     )
     return runtime
   }
@@ -180,6 +180,8 @@ export function acquireWorkspace(cwd: string, config: Config): WorkspaceRuntime 
 export function releaseAllWorkspaces(): void {
   for (const runtime of registry.values()) runtime.close()
   registry.clear()
+  // 票 02：共享 undici Agent 是进程级的，所有工作区都释放后才收掉传输层连接池。
+  closeEmbedTransport()
 }
 
 /** 读 VCP 的 KnowledgeBaseManager（体检报告里带上算法版本，便于溯源）。 */

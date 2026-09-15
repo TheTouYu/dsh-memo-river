@@ -50,6 +50,99 @@ export const WRITE_EMBED_OPTIONS: EmbedCallOptions = {
 const BATCH_SIZE = 32
 const CONCURRENCY = Number(process.env.TAG_VECTORIZE_CONCURRENCY) || 5
 
+/* ────────────── 传输层（票 02）：undici Agent 连接保活 ──────────────
+ *
+ * 默认 fetch（Node 内置 undici 全局 dispatcher）keepAliveTimeout 只有 4s——
+ * 「轮与轮之间」TLS 连接早已拆掉，每次注入重付 connect ~0.4s + TLS 握手 ~0.8s
+ * （09-15 实测：单条 RTT 1.19–1.45s 里的大头）。这里换成**进程级共享**的 undici
+ * Agent：keepAliveTimeout 提到 ~4 分钟（TAG_EMBED_KEEPALIVE_MS 可配），同端点
+ * 连续调用复用已建连接，第二次起省下整套握手。
+ *
+ * · 有效复用窗口 = min(客户端 keepAliveTimeout, 服务端 Keep-Alive hint − 1s)：
+ *   上游（relay/CDN）hint ~90s 时实际窗口 ~89s——仍远大于 4s 基线。
+ * · 空闲超窗后 undici 自行拆除连接，下一次请求自动重建、不报错（探针已验证）。
+ * · undici 不可解析的环境（依赖被裁/未装）→ 回退全局 fetch（现状 4s keepalive），
+ *   只 warn 一次，插件不崩。
+ * · TAG_EMBED_CONN_LOG=1 时输出 embed-transport connect/disconnect 调试日志
+ *   （票 02 验收取证通道：证明连续两次调用只建一次连接）。 */
+
+export const DEFAULT_KEEPALIVE_MS = 240_000
+export const DEFAULT_TRANSPORT_CONNECTIONS = 16
+
+const keepAliveMs = Number(process.env.TAG_EMBED_KEEPALIVE_MS) || DEFAULT_KEEPALIVE_MS
+const transportConnections = Number(process.env.TAG_EMBED_CONNECTIONS) || DEFAULT_TRANSPORT_CONNECTIONS
+
+/** undici 包的静态形状（仅类型；运行期动态导入，失败可回退全局 fetch）。 */
+type UndiciModule = typeof import('undici')
+
+interface TransportResponse {
+  ok: boolean
+  status: number
+  json(): Promise<unknown>
+  text(): Promise<string>
+}
+
+interface Transport {
+  fetch: (url: string, init: Record<string, unknown>) => Promise<TransportResponse>
+  /** undici Agent（回退路径为 null，init 不带 dispatcher）。 */
+  agent: unknown
+  /** 取证/日志用描述。 */
+  summary: string
+}
+
+let sharedAgent: import('undici').Agent | null = null
+let transportReady: Promise<Transport> | null = null
+
+type TransportLogger = { warn(msg: string): void; info(msg: string): void } | undefined
+
+function ensureTransport(logger: TransportLogger): Promise<Transport> {
+  if (!transportReady) {
+    transportReady = import('undici').then(
+      (m: UndiciModule) => {
+        sharedAgent = new m.Agent({
+          keepAliveTimeout: keepAliveMs,
+          keepAliveMaxTimeout: Math.max(600_000, keepAliveMs + 1_000),
+          connections: transportConnections,
+        })
+        if (process.env.TAG_EMBED_CONN_LOG === '1') {
+          // debug 级连接日志：本地无计数 server 时的取证通道。
+          sharedAgent.on('connect', (origin: unknown) => logger?.info(`embed-transport connect origin=${String(origin)}`))
+          sharedAgent.on('disconnect', (origin: unknown) =>
+            logger?.info(`embed-transport disconnect origin=${String(origin)}`),
+          )
+        }
+        return {
+          fetch: m.fetch as unknown as Transport['fetch'],
+          agent: sharedAgent,
+          summary: `undici(keepAlive=${keepAliveMs}ms,connections=${transportConnections})`,
+        }
+      },
+      (e: unknown) => {
+        logger?.warn(`undici 不可用，嵌入传输回退默认 fetch（keepAlive 4s）: ${String((e as Error)?.message ?? e)}`)
+        const fallback: Transport['fetch'] = (url, init) => {
+          const { dispatcher: _unused, ...rest } = init
+          return globalThis.fetch(url, rest as RequestInit) as Promise<TransportResponse>
+        }
+        return { fetch: fallback, agent: null, summary: 'default-fetch(keepAlive=4s)' }
+      },
+    )
+  }
+  return transportReady
+}
+
+/** 纯描述（不触发懒加载）：workspace-open 日志打点用。 */
+export function embedTransportIntent(): string {
+  return `undici(keepAlive=${keepAliveMs}ms,connections=${transportConnections})`
+}
+
+/** 释放共享 Agent（插件卸载/进程收尾用；fire-and-forget，不阻塞调用方）。 */
+export function closeEmbedTransport(): void {
+  const agent = sharedAgent
+  sharedAgent = null
+  transportReady = null
+  if (agent) void agent.close().catch(() => {})
+}
+
 type Cache = Record<string, number[]>
 
 export class EmbedClient {
@@ -144,23 +237,30 @@ export class EmbedClient {
 
   private async requestBatch(batch: string[], timeoutMs?: number): Promise<Float32Array[]> {
     const url = `${this.options.apiUrl}/v1/embeddings`
-    let response: Response
+    const transport = await ensureTransport(this.options.logger)
+    const init: Record<string, unknown> = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.options.apiKey}`,
+      },
+      body: JSON.stringify({ model: this.options.model, input: batch }),
+      signal: AbortSignal.timeout(timeoutMs ?? this.timeoutMs),
+    }
+    if (transport.agent) init.dispatcher = transport.agent
+    let response: TransportResponse
     try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.options.apiKey}`,
-        },
-        body: JSON.stringify({ model: this.options.model, input: batch }),
-        signal: AbortSignal.timeout(timeoutMs ?? this.timeoutMs),
-      })
+      response = await transport.fetch(url, init)
     } catch (e) {
       // 票 01：AbortSignal.timeout 触发的是 DOMException(name='TimeoutError')，一旦被包成
       // 普通 Error，name 就丢了——必须就地分类打标，调用方（recall）才能把 embed-timeout
       // 与普通网络失败区分开落日志（inject-skip reason=embed-timeout）。
-      const msg = String((e as Error)?.message ?? e)
-      const timedOut = (e as Error)?.name === 'TimeoutError' || /aborted due to timeout/i.test(msg)
+      // 票 02：undici fetch 把网络层错误包成 TypeError('fetch failed')，真因在 cause——
+      // 展开进日志，否则死端点/断网只看到一句 fetch failed。
+      const err = e as Error & { cause?: unknown }
+      const causeMsg = err?.cause ? ` (cause: ${String((err.cause as Error)?.message ?? err.cause)})` : ''
+      const msg = `${String(err?.message ?? e)}${causeMsg}`
+      const timedOut = err?.name === 'TimeoutError' || /aborted due to timeout/i.test(msg)
       this.lastError = `${timedOut ? 'embed-timeout' : 'embed-request-failed'}: ${msg}`
       throw new Error(this.lastError)
     }

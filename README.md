@@ -79,6 +79,18 @@ dev_install_package /home/h/app/dsh-memo-river
 | `inject.minKnnForReward` | `0.6` | 低基数候选不发结构奖励（§2.2 规则 4） |
 | `native.vcpRoot` | `/home/h/app/VCPToolBox` | 原生内核与 `rag_params.json` 的位置 |
 
+### 嵌入传输层（连接保活）
+
+嵌入客户端的 HTTP 传输不用默认 fetch（其 undici 全局 dispatcher `keepAliveTimeout` 仅 4s，轮与轮之间 TLS 连接必被拆掉，每次重付 connect ~0.4s + 握手 ~0.8s），改用**进程级共享 undici Agent**，同端点连续调用复用已建连接。参数走环境变量（进程级，非 `config:` 键）：
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `TAG_EMBED_KEEPALIVE_MS` | `240000`（4 分钟） | 客户端 keepAliveTimeout。有效复用窗口 = min(本值, 服务端 `Keep-Alive` hint − 1s)：上游 relay/CDN hint ~90s 时实际窗口 ~89s，仍远大于 4s 基线；空闲超窗自动重建连接、不报错 |
+| `TAG_EMBED_CONNECTIONS` | `16` | 每端点并发连接上限（≥ 写侧并行度 `TAG_VECTORIZE_CONCURRENCY` 即够用） |
+| `TAG_EMBED_CONN_LOG` | 关 | `=1` 时经工作区日志输出 `embed-transport connect/disconnect`（连接取证通道：证明连续调用只建一次连接） |
+
+`undici` 以 `package.json` `dependencies` 声明；不可解析的环境回退默认 fetch（warn 一次，插件不崩）。开发树下 `node_modules/undici` 为指向 DSH 安装内副本（8.10.2）的 junction，与 build.sh 对 cordis 的链接策略同构。
+
 ---
 
 ## 存储
