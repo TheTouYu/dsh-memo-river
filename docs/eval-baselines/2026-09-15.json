@@ -1,0 +1,3682 @@
+{
+ "since": "2026-09-13T17:42:37.176118+08:00",
+ "generated": "2026-09-15T17:42:39.588892+08:00",
+ "since_hours": 48,
+ "buckets": {
+  "genshin-ts": {
+   "injects": [],
+   "gate_block": 0,
+   "identical": 0,
+   "writes": 0,
+   "nudges": 0,
+   "ids_freq": {},
+   "ms_dist": {},
+   "per_session": {},
+   "health": {
+    "raw": "[2026-09-15T09:39:59.013Z] round=3 components=1 hub=rubik-game:2/2 omegaMean=0.010 omegaN=2 uncovered=0/2 used=2/2 topUsed=n/a mergeCandidates=无候选 warnings=1 :: 枢纽 Tag「rubik-game」出现 2/2 篇（≥1/3）：直接锚会被泛化，唯一锚的锐度消失",
+    "components": "1",
+    "hub": "rubik-game:2/2",
+    "uncovered": "0/2",
+    "used": "2/2"
+   },
+   "pending": 0
+  },
+  "dsh-memo-river": {
+   "injects": [
+    {
+     "ts": "2026-09-14T14:42:34.225000+08:00",
+     "ids": [
+      "D26",
+      "D23",
+      "D30"
+     ],
+     "candidates": 30,
+     "dropped": 28,
+     "injectMode": "interactive",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 6727
+    },
+    {
+     "ts": "2026-09-14T15:20:34.091000+08:00",
+     "ids": [
+      "D27",
+      "D19",
+      "D30"
+     ],
+     "candidates": 30,
+     "dropped": 28,
+     "injectMode": "interactive",
+     "session": "session-43b70186-845f-4",
+     "gate_pass": true,
+     "ms": 8838
+    },
+    {
+     "ts": "2026-09-14T15:21:36.548000+08:00",
+     "ids": [
+      "D10",
+      "D16",
+      "D31"
+     ],
+     "candidates": 31,
+     "dropped": 29,
+     "injectMode": "interactive",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 4105
+    },
+    {
+     "ts": "2026-09-14T15:22:03.860000+08:00",
+     "ids": [
+      "D10",
+      "D7",
+      "D31"
+     ],
+     "candidates": 31,
+     "dropped": 29,
+     "injectMode": "interactive",
+     "session": "session-43b70186-845f-4",
+     "gate_pass": true,
+     "ms": 3553
+    },
+    {
+     "ts": "2026-09-14T15:27:09.533000+08:00",
+     "ids": [
+      "D24",
+      "D19",
+      "D31"
+     ],
+     "candidates": 31,
+     "dropped": 29,
+     "injectMode": "autonomous",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 3047
+    },
+    {
+     "ts": "2026-09-14T15:29:38.435000+08:00",
+     "ids": [
+      "D10",
+      "D24",
+      "D31"
+     ],
+     "candidates": 31,
+     "dropped": 29,
+     "injectMode": "interactive",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 7202
+    },
+    {
+     "ts": "2026-09-14T15:37:57.937000+08:00",
+     "ids": [
+      "D32",
+      "D28",
+      "D3"
+     ],
+     "candidates": 32,
+     "dropped": 29,
+     "injectMode": "autonomous",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 3046
+    },
+    {
+     "ts": "2026-09-14T15:53:24.303000+08:00",
+     "ids": [
+      "D27",
+      "D33",
+      "D29"
+     ],
+     "candidates": 33,
+     "dropped": 30,
+     "injectMode": "interactive",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 5401
+    },
+    {
+     "ts": "2026-09-14T15:53:40.381000+08:00",
+     "ids": [
+      "D33",
+      "D27",
+      "D19"
+     ],
+     "candidates": 33,
+     "dropped": 30,
+     "injectMode": "interactive",
+     "session": "session-43b70186-845f-4",
+     "gate_pass": true,
+     "ms": 4830
+    },
+    {
+     "ts": "2026-09-14T15:56:20.809000+08:00",
+     "ids": [
+      "D10",
+      "D27",
+      "D33"
+     ],
+     "candidates": 33,
+     "dropped": 31,
+     "injectMode": "interactive",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 5558
+    },
+    {
+     "ts": "2026-09-14T16:03:38.742000+08:00",
+     "ids": [
+      "D27",
+      "D28",
+      "D33"
+     ],
+     "candidates": 33,
+     "dropped": 31,
+     "injectMode": "autonomous",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 4209
+    },
+    {
+     "ts": "2026-09-14T16:12:39.988000+08:00",
+     "ids": [
+      "D27",
+      "D25",
+      "D33"
+     ],
+     "candidates": 33,
+     "dropped": 31,
+     "injectMode": "autonomous",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 4952
+    },
+    {
+     "ts": "2026-09-14T16:17:59.274000+08:00",
+     "ids": [
+      "D27",
+      "D33",
+      "D29"
+     ],
+     "candidates": 33,
+     "dropped": 30,
+     "injectMode": "interactive",
+     "session": "session-43b70186-845f-4",
+     "gate_pass": true,
+     "ms": 7955
+    },
+    {
+     "ts": "2026-09-14T16:18:17.099000+08:00",
+     "ids": [
+      "D10",
+      "D34",
+      "D27"
+     ],
+     "candidates": 34,
+     "dropped": 31,
+     "injectMode": "interactive",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 8124
+    },
+    {
+     "ts": "2026-09-14T16:22:16.141000+08:00",
+     "ids": [
+      "D34",
+      "D32",
+      "D24"
+     ],
+     "candidates": 34,
+     "dropped": 31,
+     "injectMode": "interactive",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 4851
+    },
+    {
+     "ts": "2026-09-14T16:23:24.087000+08:00",
+     "ids": [
+      "D34",
+      "D33",
+      "D27"
+     ],
+     "candidates": 34,
+     "dropped": 31,
+     "injectMode": "interactive",
+     "session": "session-43b70186-845f-4",
+     "gate_pass": true,
+     "ms": 5170
+    },
+    {
+     "ts": "2026-09-14T16:31:50.038000+08:00",
+     "ids": [
+      "D35",
+      "D13",
+      "D7"
+     ],
+     "candidates": 35,
+     "dropped": 32,
+     "injectMode": "interactive",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 5923
+    },
+    {
+     "ts": "2026-09-14T16:37:30.436000+08:00",
+     "ids": [
+      "D19",
+      "D13",
+      "D35"
+     ],
+     "candidates": 35,
+     "dropped": 33,
+     "injectMode": "interactive",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 8902
+    },
+    {
+     "ts": "2026-09-14T16:39:05.940000+08:00",
+     "ids": [
+      "D19",
+      "D36",
+      "D37"
+     ],
+     "candidates": 37,
+     "dropped": 35,
+     "injectMode": "interactive",
+     "session": "session-43b70186-845f-4",
+     "gate_pass": true,
+     "ms": 6085
+    },
+    {
+     "ts": "2026-09-14T16:39:06.563000+08:00",
+     "ids": [
+      "D10",
+      "D13",
+      "D37"
+     ],
+     "candidates": 37,
+     "dropped": 35,
+     "injectMode": "interactive",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 6321
+    },
+    {
+     "ts": "2026-09-14T16:39:35.115000+08:00",
+     "ids": [
+      "D13",
+      "D37",
+      "D19"
+     ],
+     "candidates": 37,
+     "dropped": 34,
+     "injectMode": "interactive",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 6767
+    },
+    {
+     "ts": "2026-09-14T16:39:54.152000+08:00",
+     "ids": [
+      "D10",
+      "D37",
+      "D27"
+     ],
+     "candidates": 37,
+     "dropped": 34,
+     "injectMode": "interactive",
+     "session": "session-8cff709e-7da3-4",
+     "gate_pass": true,
+     "ms": 6971
+    },
+    {
+     "ts": "2026-09-14T16:40:27.257000+08:00",
+     "ids": [
+      "D36",
+      "D27",
+      "D37"
+     ],
+     "candidates": 37,
+     "dropped": 35,
+     "injectMode": "interactive",
+     "session": "session-43b70186-845f-4",
+     "gate_pass": true,
+     "ms": 5194
+    },
+    {
+     "ts": "2026-09-15T17:22:34.034000+08:00",
+     "ids": [
+      "D37",
+      "D13",
+      "D20"
+     ],
+     "candidates": 37,
+     "dropped": 34,
+     "injectMode": "interactive",
+     "session": "session-2125a4be-99f8-4",
+     "gate_pass": true,
+     "ms": 5363
+    },
+    {
+     "ts": "2026-09-15T17:26:56.435000+08:00",
+     "ids": [
+      "D19",
+      "D20",
+      "D37"
+     ],
+     "candidates": 37,
+     "dropped": 35,
+     "injectMode": "interactive",
+     "session": "session-2125a4be-99f8-4",
+     "gate_pass": true,
+     "ms": 4637
+    },
+    {
+     "ts": "2026-09-15T17:34:13.663000+08:00",
+     "ids": [
+      "D37",
+      "D38",
+      "D20"
+     ],
+     "candidates": 38,
+     "dropped": 35,
+     "injectMode": "autonomous",
+     "session": "session-2125a4be-99f8-4",
+     "gate_pass": true,
+     "ms": 9168
+    },
+    {
+     "ts": "2026-09-15T17:39:29.462000+08:00",
+     "ids": [
+      "D37",
+      "D38",
+      "D39"
+     ],
+     "candidates": 39,
+     "dropped": 36,
+     "injectMode": "interactive",
+     "session": "session-2125a4be-99f8-4",
+     "gate_pass": true,
+     "ms": 4690
+    }
+   ],
+   "gate_block": 22,
+   "identical": 14,
+   "writes": 68,
+   "nudges": 10,
+   "ids_freq": {
+    "D27": 11,
+    "D37": 9,
+    "D19": 7,
+    "D10": 7,
+    "D33": 7,
+    "D13": 5,
+    "D31": 4,
+    "D24": 3
+   },
+   "ms_dist": {
+    "n": 27,
+    "mean": 5836,
+    "p50": 5401,
+    "p95": 8838,
+    "max": 9168
+   },
+   "per_session": {
+    "session-8cff709": 16,
+    "session-43b7018": 7,
+    "session-2125a4b": 4
+   },
+   "health": {
+    "raw": "[2026-09-15T09:36:18.330Z] round=1 components=1 hub=上游对照:14/39 omegaMean=0.479 omegaN=41 uncovered=3/39 used=36/39 topUsed=D10×13 mergeCandidates=无候选 warnings=1 :: 枢纽 Tag「上游对照」出现 14/39 篇（≥1/3）：直接锚会被泛化，唯一锚的锐度消失",
+    "components": "1",
+    "hub": "上游对照:14/39",
+    "uncovered": "3/39",
+    "used": "36/39"
+   },
+   "pending": 7
+  },
+  "genshin-model-studio": {
+   "injects": [],
+   "gate_block": 0,
+   "identical": 0,
+   "writes": 0,
+   "nudges": 0,
+   "ids_freq": {},
+   "ms_dist": {},
+   "per_session": {},
+   "health": {
+    "raw": "[2026-09-15T09:36:14.464Z] round=3 components=1 hub=本地服务8787:13/19 omegaMean=0.345 omegaN=40 uncovered=8/19 used=11/19 topUsed=n/a mergeCandidates=无候选 warnings=1 :: 枢纽 Tag「本地服务8787」出现 13/19 篇（≥1/3）：直接锚会被泛化，唯一锚的锐度消失",
+    "components": "1",
+    "hub": "本地服务8787:13/19",
+    "uncovered": "8/19",
+    "used": "11/19"
+   },
+   "pending": 0
+  },
+  "dsh-preset-composer": {
+   "injects": [
+    {
+     "ts": "2026-09-14T14:39:48.299000+08:00",
+     "ids": [
+      "D12",
+      "D13",
+      "D37"
+     ],
+     "candidates": 32,
+     "dropped": 30,
+     "injectMode": "autonomous",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 2520
+    },
+    {
+     "ts": "2026-09-14T14:41:17.168000+08:00",
+     "ids": [
+      "D22",
+      "D38",
+      "D8"
+     ],
+     "candidates": 33,
+     "dropped": 30,
+     "injectMode": "autonomous",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 3205
+    },
+    {
+     "ts": "2026-09-14T14:43:15.094000+08:00",
+     "ids": [
+      "D13",
+      "D12",
+      "D38"
+     ],
+     "candidates": 33,
+     "dropped": 31,
+     "injectMode": "autonomous",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 4040
+    },
+    {
+     "ts": "2026-09-14T15:22:01.245000+08:00",
+     "ids": [
+      "D33",
+      "D25",
+      "D39"
+     ],
+     "candidates": 34,
+     "dropped": 32,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 4921
+    },
+    {
+     "ts": "2026-09-14T15:24:00.032000+08:00",
+     "ids": [
+      "D10",
+      "D22",
+      "D39"
+     ],
+     "candidates": 34,
+     "dropped": 32,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 3289
+    },
+    {
+     "ts": "2026-09-14T15:27:30.328000+08:00",
+     "ids": [
+      "D10",
+      "D33",
+      "D39"
+     ],
+     "candidates": 34,
+     "dropped": 32,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4670
+    },
+    {
+     "ts": "2026-09-14T15:27:54.210000+08:00",
+     "ids": [
+      "D10",
+      "D22",
+      "D39"
+     ],
+     "candidates": 34,
+     "dropped": 32,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5868
+    },
+    {
+     "ts": "2026-09-14T15:28:21.599000+08:00",
+     "ids": [
+      "D22",
+      "D10",
+      "D39"
+     ],
+     "candidates": 34,
+     "dropped": 32,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 8556
+    },
+    {
+     "ts": "2026-09-14T15:28:44.234000+08:00",
+     "ids": [
+      "D10",
+      "D33",
+      "D39"
+     ],
+     "candidates": 34,
+     "dropped": 32,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5638
+    },
+    {
+     "ts": "2026-09-14T15:31:13.109000+08:00",
+     "ids": [
+      "D8",
+      "D22",
+      "D39"
+     ],
+     "candidates": 34,
+     "dropped": 32,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4961
+    },
+    {
+     "ts": "2026-09-14T15:33:56.010000+08:00",
+     "ids": [
+      "D8",
+      "D41",
+      "D22"
+     ],
+     "candidates": 35,
+     "dropped": 32,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 3842
+    },
+    {
+     "ts": "2026-09-14T15:34:19.784000+08:00",
+     "ids": [
+      "D42",
+      "D41",
+      "D10"
+     ],
+     "candidates": 36,
+     "dropped": 33,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 3638
+    },
+    {
+     "ts": "2026-09-14T15:34:44.842000+08:00",
+     "ids": [
+      "D33",
+      "D41",
+      "D42"
+     ],
+     "candidates": 36,
+     "dropped": 34,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4192
+    },
+    {
+     "ts": "2026-09-14T15:35:38.872000+08:00",
+     "ids": [
+      "D41",
+      "D14",
+      "D42"
+     ],
+     "candidates": 36,
+     "dropped": 33,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5099
+    },
+    {
+     "ts": "2026-09-14T15:36:28.678000+08:00",
+     "ids": [
+      "D15",
+      "D33",
+      "D42"
+     ],
+     "candidates": 36,
+     "dropped": 34,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 4649
+    },
+    {
+     "ts": "2026-09-14T15:36:33.245000+08:00",
+     "ids": [
+      "D42",
+      "D14",
+      "D33"
+     ],
+     "candidates": 36,
+     "dropped": 33,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 3086
+    },
+    {
+     "ts": "2026-09-14T15:36:47.724000+08:00",
+     "ids": [
+      "D13",
+      "D25",
+      "D42"
+     ],
+     "candidates": 36,
+     "dropped": 34,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5886
+    },
+    {
+     "ts": "2026-09-14T15:37:13.937000+08:00",
+     "ids": [
+      "D10",
+      "D14",
+      "D42"
+     ],
+     "candidates": 36,
+     "dropped": 34,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4028
+    },
+    {
+     "ts": "2026-09-14T15:37:41.323000+08:00",
+     "ids": [
+      "D42",
+      "D33",
+      "D32"
+     ],
+     "candidates": 36,
+     "dropped": 33,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 3635
+    },
+    {
+     "ts": "2026-09-14T15:38:45.043000+08:00",
+     "ids": [
+      "D33",
+      "D14",
+      "D42"
+     ],
+     "candidates": 36,
+     "dropped": 33,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7027
+    },
+    {
+     "ts": "2026-09-14T15:39:02.872000+08:00",
+     "ids": [
+      "D42",
+      "D10",
+      "D41"
+     ],
+     "candidates": 36,
+     "dropped": 33,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 4703
+    },
+    {
+     "ts": "2026-09-14T15:39:27.264000+08:00",
+     "ids": [
+      "D14",
+      "D33",
+      "D43"
+     ],
+     "candidates": 37,
+     "dropped": 35,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 6572
+    },
+    {
+     "ts": "2026-09-14T15:47:07.104000+08:00",
+     "ids": [
+      "D33",
+      "D14",
+      "D43"
+     ],
+     "candidates": 37,
+     "dropped": 35,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 9443
+    },
+    {
+     "ts": "2026-09-14T15:47:37.681000+08:00",
+     "ids": [
+      "D6",
+      "D10",
+      "D43"
+     ],
+     "candidates": 37,
+     "dropped": 35,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6699
+    },
+    {
+     "ts": "2026-09-14T15:48:59.565000+08:00",
+     "ids": [
+      "D10",
+      "D14",
+      "D43"
+     ],
+     "candidates": 37,
+     "dropped": 35,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5021
+    },
+    {
+     "ts": "2026-09-14T15:49:37.900000+08:00",
+     "ids": [
+      "D22",
+      "D6",
+      "D43"
+     ],
+     "candidates": 37,
+     "dropped": 35,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6304
+    },
+    {
+     "ts": "2026-09-14T15:51:32.264000+08:00",
+     "ids": [
+      "D12",
+      "D14",
+      "D44"
+     ],
+     "candidates": 38,
+     "dropped": 36,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 3970
+    },
+    {
+     "ts": "2026-09-14T15:53:55.934000+08:00",
+     "ids": [
+      "D14",
+      "D18",
+      "D44"
+     ],
+     "candidates": 38,
+     "dropped": 36,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4304
+    },
+    {
+     "ts": "2026-09-14T15:54:38.159000+08:00",
+     "ids": [
+      "D10",
+      "D6",
+      "D44"
+     ],
+     "candidates": 38,
+     "dropped": 36,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5757
+    },
+    {
+     "ts": "2026-09-14T15:56:31.293000+08:00",
+     "ids": [
+      "D10",
+      "D14",
+      "D44"
+     ],
+     "candidates": 38,
+     "dropped": 36,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5180
+    },
+    {
+     "ts": "2026-09-14T15:56:55.250000+08:00",
+     "ids": [
+      "D45",
+      "D10",
+      "D22"
+     ],
+     "candidates": 39,
+     "dropped": 36,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5553
+    },
+    {
+     "ts": "2026-09-14T15:57:27.291000+08:00",
+     "ids": [
+      "D45",
+      "D44",
+      "D33"
+     ],
+     "candidates": 39,
+     "dropped": 36,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5274
+    },
+    {
+     "ts": "2026-09-14T15:57:42.304000+08:00",
+     "ids": [
+      "D45",
+      "D14",
+      "D33"
+     ],
+     "candidates": 39,
+     "dropped": 36,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 6596
+    },
+    {
+     "ts": "2026-09-14T15:59:40.705000+08:00",
+     "ids": [
+      "D45",
+      "D8",
+      "D38"
+     ],
+     "candidates": 39,
+     "dropped": 36,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7854
+    },
+    {
+     "ts": "2026-09-14T16:01:32.252000+08:00",
+     "ids": [
+      "D45",
+      "D10",
+      "D14"
+     ],
+     "candidates": 39,
+     "dropped": 36,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 11311
+    },
+    {
+     "ts": "2026-09-14T16:01:46.595000+08:00",
+     "ids": [
+      "D6",
+      "D22",
+      "D45"
+     ],
+     "candidates": 39,
+     "dropped": 37,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5326
+    },
+    {
+     "ts": "2026-09-14T16:02:43.889000+08:00",
+     "ids": [
+      "D45",
+      "D22",
+      "D46"
+     ],
+     "candidates": 40,
+     "dropped": 38,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5249
+    },
+    {
+     "ts": "2026-09-14T16:06:58.312000+08:00",
+     "ids": [
+      "D42",
+      "D45",
+      "D46"
+     ],
+     "candidates": 40,
+     "dropped": 38,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4366
+    },
+    {
+     "ts": "2026-09-14T16:10:34.958000+08:00",
+     "ids": [
+      "D46",
+      "D45",
+      "D6"
+     ],
+     "candidates": 40,
+     "dropped": 37,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6494
+    },
+    {
+     "ts": "2026-09-14T16:11:04.065000+08:00",
+     "ids": [
+      "D22",
+      "D45",
+      "D46"
+     ],
+     "candidates": 40,
+     "dropped": 38,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5400
+    },
+    {
+     "ts": "2026-09-14T16:11:04.092000+08:00",
+     "ids": [
+      "D45",
+      "D44",
+      "D46"
+     ],
+     "candidates": 40,
+     "dropped": 38,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5499
+    },
+    {
+     "ts": "2026-09-14T16:11:48.048000+08:00",
+     "ids": [
+      "D45",
+      "D6",
+      "D46"
+     ],
+     "candidates": 40,
+     "dropped": 37,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 8510
+    },
+    {
+     "ts": "2026-09-14T16:13:09.152000+08:00",
+     "ids": [
+      "D45",
+      "D33",
+      "D46"
+     ],
+     "candidates": 40,
+     "dropped": 38,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6246
+    },
+    {
+     "ts": "2026-09-14T16:13:38.474000+08:00",
+     "ids": [
+      "D45",
+      "D33",
+      "D46"
+     ],
+     "candidates": 40,
+     "dropped": 38,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 6801
+    },
+    {
+     "ts": "2026-09-14T16:13:39.906000+08:00",
+     "ids": [
+      "D10",
+      "D13",
+      "D46"
+     ],
+     "candidates": 40,
+     "dropped": 38,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7859
+    },
+    {
+     "ts": "2026-09-14T16:14:08.340000+08:00",
+     "ids": [
+      "D38",
+      "D8",
+      "D46"
+     ],
+     "candidates": 40,
+     "dropped": 38,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 8430
+    },
+    {
+     "ts": "2026-09-14T16:17:01.907000+08:00",
+     "ids": [
+      "D22",
+      "D45",
+      "D46"
+     ],
+     "candidates": 40,
+     "dropped": 38,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 8458
+    },
+    {
+     "ts": "2026-09-14T16:17:32.437000+08:00",
+     "ids": [
+      "D47",
+      "D8",
+      "D38"
+     ],
+     "candidates": 41,
+     "dropped": 38,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7713
+    },
+    {
+     "ts": "2026-09-14T16:17:50.836000+08:00",
+     "ids": [
+      "D47",
+      "D38",
+      "D22"
+     ],
+     "candidates": 41,
+     "dropped": 38,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 9403
+    },
+    {
+     "ts": "2026-09-14T16:19:53.879000+08:00",
+     "ids": [
+      "D12",
+      "D13",
+      "D47"
+     ],
+     "candidates": 41,
+     "dropped": 39,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4795
+    },
+    {
+     "ts": "2026-09-14T16:20:34.452000+08:00",
+     "ids": [
+      "D22",
+      "D13",
+      "D47"
+     ],
+     "candidates": 41,
+     "dropped": 39,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 6023
+    },
+    {
+     "ts": "2026-09-14T16:21:13.956000+08:00",
+     "ids": [
+      "D48",
+      "D22",
+      "D13"
+     ],
+     "candidates": 42,
+     "dropped": 39,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5097
+    },
+    {
+     "ts": "2026-09-14T16:21:20.796000+08:00",
+     "ids": [
+      "D22",
+      "D48",
+      "D45"
+     ],
+     "candidates": 42,
+     "dropped": 39,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 16319
+    },
+    {
+     "ts": "2026-09-14T16:21:42.027000+08:00",
+     "ids": [
+      "D22",
+      "D48",
+      "D13"
+     ],
+     "candidates": 42,
+     "dropped": 39,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7195
+    },
+    {
+     "ts": "2026-09-14T16:21:59.200000+08:00",
+     "ids": [
+      "D22",
+      "D48",
+      "D38"
+     ],
+     "candidates": 42,
+     "dropped": 39,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 6822
+    },
+    {
+     "ts": "2026-09-14T16:25:14.143000+08:00",
+     "ids": [
+      "D8",
+      "D22",
+      "D48"
+     ],
+     "candidates": 42,
+     "dropped": 40,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4335
+    },
+    {
+     "ts": "2026-09-14T16:29:11.858000+08:00",
+     "ids": [
+      "D8",
+      "D48",
+      "D10"
+     ],
+     "candidates": 42,
+     "dropped": 39,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5245
+    },
+    {
+     "ts": "2026-09-14T16:29:16.526000+08:00",
+     "ids": [
+      "D22",
+      "D48",
+      "D10"
+     ],
+     "candidates": 42,
+     "dropped": 39,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 9840
+    },
+    {
+     "ts": "2026-09-14T16:29:30.868000+08:00",
+     "ids": [
+      "D22",
+      "D45",
+      "D48"
+     ],
+     "candidates": 42,
+     "dropped": 39,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 14009
+    },
+    {
+     "ts": "2026-09-14T16:30:43.141000+08:00",
+     "ids": [
+      "D48",
+      "D22",
+      "D12"
+     ],
+     "candidates": 42,
+     "dropped": 39,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 6357
+    },
+    {
+     "ts": "2026-09-14T16:33:10.294000+08:00",
+     "ids": [
+      "D10",
+      "D33",
+      "D49"
+     ],
+     "candidates": 43,
+     "dropped": 41,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7065
+    },
+    {
+     "ts": "2026-09-14T16:33:16.170000+08:00",
+     "ids": [
+      "D10",
+      "D48",
+      "D49"
+     ],
+     "candidates": 43,
+     "dropped": 41,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 7648
+    },
+    {
+     "ts": "2026-09-14T16:33:34.722000+08:00",
+     "ids": [
+      "D10",
+      "D13",
+      "D50"
+     ],
+     "candidates": 44,
+     "dropped": 42,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 4623
+    },
+    {
+     "ts": "2026-09-14T16:34:00.946000+08:00",
+     "ids": [
+      "D22",
+      "D8",
+      "D50"
+     ],
+     "candidates": 44,
+     "dropped": 42,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7728
+    },
+    {
+     "ts": "2026-09-14T16:34:05.738000+08:00",
+     "ids": [
+      "D12",
+      "D10",
+      "D50"
+     ],
+     "candidates": 44,
+     "dropped": 42,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5742
+    },
+    {
+     "ts": "2026-09-14T16:36:15.459000+08:00",
+     "ids": [
+      "D12",
+      "D45",
+      "D50"
+     ],
+     "candidates": 44,
+     "dropped": 42,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5599
+    },
+    {
+     "ts": "2026-09-14T16:39:08.601000+08:00",
+     "ids": [
+      "D12",
+      "D10",
+      "D50"
+     ],
+     "candidates": 44,
+     "dropped": 42,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 3989
+    },
+    {
+     "ts": "2026-09-14T16:43:47.171000+08:00",
+     "ids": [
+      "D22",
+      "D10",
+      "D50"
+     ],
+     "candidates": 44,
+     "dropped": 42,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5535
+    },
+    {
+     "ts": "2026-09-14T16:45:43.990000+08:00",
+     "ids": [
+      "D8",
+      "D22",
+      "D50"
+     ],
+     "candidates": 44,
+     "dropped": 42,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4611
+    },
+    {
+     "ts": "2026-09-14T16:46:04.020000+08:00",
+     "ids": [
+      "D12",
+      "D51",
+      "D11"
+     ],
+     "candidates": 45,
+     "dropped": 42,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5088
+    },
+    {
+     "ts": "2026-09-14T16:46:26.674000+08:00",
+     "ids": [
+      "D33",
+      "D13",
+      "D51"
+     ],
+     "candidates": 45,
+     "dropped": 43,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6374
+    },
+    {
+     "ts": "2026-09-14T16:46:47.154000+08:00",
+     "ids": [
+      "D12",
+      "D33",
+      "D51"
+     ],
+     "candidates": 45,
+     "dropped": 43,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5568
+    },
+    {
+     "ts": "2026-09-14T16:47:15.390000+08:00",
+     "ids": [
+      "D12",
+      "D33",
+      "D52"
+     ],
+     "candidates": 46,
+     "dropped": 44,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5469
+    },
+    {
+     "ts": "2026-09-14T16:48:26.703000+08:00",
+     "ids": [
+      "D45",
+      "D46",
+      "D52"
+     ],
+     "candidates": 46,
+     "dropped": 44,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5551
+    },
+    {
+     "ts": "2026-09-14T16:48:46.395000+08:00",
+     "ids": [
+      "D22",
+      "D13",
+      "D52"
+     ],
+     "candidates": 46,
+     "dropped": 44,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6713
+    },
+    {
+     "ts": "2026-09-14T16:54:45.021000+08:00",
+     "ids": [
+      "D10",
+      "D18",
+      "D52"
+     ],
+     "candidates": 46,
+     "dropped": 44,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5982
+    },
+    {
+     "ts": "2026-09-14T16:57:56.550000+08:00",
+     "ids": [
+      "D12",
+      "D10",
+      "D52"
+     ],
+     "candidates": 46,
+     "dropped": 44,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6938
+    },
+    {
+     "ts": "2026-09-14T17:15:33.939000+08:00",
+     "ids": [
+      "D12",
+      "D13",
+      "D53"
+     ],
+     "candidates": 47,
+     "dropped": 45,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7757
+    },
+    {
+     "ts": "2026-09-14T17:17:56.933000+08:00",
+     "ids": [
+      "D12",
+      "D27",
+      "D53"
+     ],
+     "candidates": 47,
+     "dropped": 45,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5733
+    },
+    {
+     "ts": "2026-09-14T17:20:01.278000+08:00",
+     "ids": [
+      "D12",
+      "D13",
+      "D53"
+     ],
+     "candidates": 47,
+     "dropped": 45,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7173
+    },
+    {
+     "ts": "2026-09-14T17:24:30.031000+08:00",
+     "ids": [
+      "D55",
+      "D12",
+      "D25"
+     ],
+     "candidates": 48,
+     "dropped": 45,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6853
+    },
+    {
+     "ts": "2026-09-14T17:31:56.583000+08:00",
+     "ids": [
+      "D56",
+      "D55",
+      "D12"
+     ],
+     "candidates": 49,
+     "dropped": 46,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5548
+    },
+    {
+     "ts": "2026-09-14T17:55:09.189000+08:00",
+     "ids": [
+      "D56",
+      "D57",
+      "D55"
+     ],
+     "candidates": 50,
+     "dropped": 47,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 8421
+    },
+    {
+     "ts": "2026-09-14T17:59:24.912000+08:00",
+     "ids": [
+      "D58",
+      "D56",
+      "D55"
+     ],
+     "candidates": 51,
+     "dropped": 48,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6489
+    },
+    {
+     "ts": "2026-09-14T18:01:58.218000+08:00",
+     "ids": [
+      "D12",
+      "D57",
+      "D58"
+     ],
+     "candidates": 51,
+     "dropped": 48,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 15818
+    },
+    {
+     "ts": "2026-09-14T18:05:14.692000+08:00",
+     "ids": [
+      "D46",
+      "D22",
+      "D59"
+     ],
+     "candidates": 52,
+     "dropped": 49,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7191
+    },
+    {
+     "ts": "2026-09-14T18:07:03.004000+08:00",
+     "ids": [
+      "D15",
+      "D16",
+      "D60"
+     ],
+     "candidates": 53,
+     "dropped": 51,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5483
+    },
+    {
+     "ts": "2026-09-14T18:07:44.580000+08:00",
+     "ids": [
+      "D12",
+      "D57",
+      "D60"
+     ],
+     "candidates": 53,
+     "dropped": 51,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4074
+    },
+    {
+     "ts": "2026-09-14T18:09:12.207000+08:00",
+     "ids": [
+      "D22",
+      "D14",
+      "D61"
+     ],
+     "candidates": 54,
+     "dropped": 52,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 7069
+    },
+    {
+     "ts": "2026-09-14T18:11:20.476000+08:00",
+     "ids": [
+      "D58",
+      "D22",
+      "D61"
+     ],
+     "candidates": 54,
+     "dropped": 52,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 6333
+    },
+    {
+     "ts": "2026-09-14T18:15:02.718000+08:00",
+     "ids": [
+      "D36",
+      "D10",
+      "D61"
+     ],
+     "candidates": 54,
+     "dropped": 52,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4464
+    },
+    {
+     "ts": "2026-09-14T18:19:34.006000+08:00",
+     "ids": [
+      "D38",
+      "D22",
+      "D61"
+     ],
+     "candidates": 54,
+     "dropped": 52,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4764
+    },
+    {
+     "ts": "2026-09-14T18:22:28.268000+08:00",
+     "ids": [
+      "D13",
+      "D12",
+      "D62"
+     ],
+     "candidates": 55,
+     "dropped": 53,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5604
+    },
+    {
+     "ts": "2026-09-14T18:22:51.079000+08:00",
+     "ids": [
+      "D10",
+      "D30",
+      "D62"
+     ],
+     "candidates": 55,
+     "dropped": 52,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5515
+    },
+    {
+     "ts": "2026-09-14T18:23:46.181000+08:00",
+     "ids": [
+      "D62",
+      "D58",
+      "D10"
+     ],
+     "candidates": 55,
+     "dropped": 52,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 4920
+    },
+    {
+     "ts": "2026-09-14T18:55:36.738000+08:00",
+     "ids": [
+      "D10",
+      "D58",
+      "D62"
+     ],
+     "candidates": 55,
+     "dropped": 53,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6860
+    },
+    {
+     "ts": "2026-09-14T18:56:34.573000+08:00",
+     "ids": [
+      "D62",
+      "D10",
+      "D63"
+     ],
+     "candidates": 56,
+     "dropped": 54,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5806
+    },
+    {
+     "ts": "2026-09-14T18:58:54.881000+08:00",
+     "ids": [
+      "D58",
+      "D10",
+      "D64"
+     ],
+     "candidates": 57,
+     "dropped": 55,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6129
+    },
+    {
+     "ts": "2026-09-14T18:59:49.667000+08:00",
+     "ids": [
+      "D58",
+      "D62",
+      "D64"
+     ],
+     "candidates": 57,
+     "dropped": 55,
+     "injectMode": "interactive",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 5285
+    },
+    {
+     "ts": "2026-09-14T19:01:09.116000+08:00",
+     "ids": [
+      "D58",
+      "D62",
+      "D64"
+     ],
+     "candidates": 57,
+     "dropped": 55,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6303
+    },
+    {
+     "ts": "2026-09-14T19:03:46.697000+08:00",
+     "ids": [
+      "D10",
+      "D12",
+      "D64"
+     ],
+     "candidates": 57,
+     "dropped": 55,
+     "injectMode": "autonomous",
+     "session": "session-8a11cf44-1881-4",
+     "gate_pass": true,
+     "ms": 3792
+    },
+    {
+     "ts": "2026-09-14T19:04:31.291000+08:00",
+     "ids": [
+      "D62",
+      "D57",
+      "D65"
+     ],
+     "candidates": 58,
+     "dropped": 56,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5750
+    },
+    {
+     "ts": "2026-09-14T19:04:54.293000+08:00",
+     "ids": [
+      "D65",
+      "D13",
+      "D48"
+     ],
+     "candidates": 58,
+     "dropped": 55,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 8069
+    },
+    {
+     "ts": "2026-09-14T19:06:48.519000+08:00",
+     "ids": [
+      "D65",
+      "D53",
+      "D13"
+     ],
+     "candidates": 58,
+     "dropped": 55,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6252
+    },
+    {
+     "ts": "2026-09-14T19:14:50.818000+08:00",
+     "ids": [
+      "D46",
+      "D6",
+      "D65"
+     ],
+     "candidates": 58,
+     "dropped": 56,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 3250
+    },
+    {
+     "ts": "2026-09-14T19:15:47.258000+08:00",
+     "ids": [
+      "D22",
+      "D8",
+      "D65"
+     ],
+     "candidates": 58,
+     "dropped": 56,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 5874
+    },
+    {
+     "ts": "2026-09-14T19:16:23.705000+08:00",
+     "ids": [
+      "D46",
+      "D8",
+      "D65"
+     ],
+     "candidates": 58,
+     "dropped": 56,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 5953
+    },
+    {
+     "ts": "2026-09-14T19:19:38.468000+08:00",
+     "ids": [
+      "D8",
+      "D15",
+      "D65"
+     ],
+     "candidates": 58,
+     "dropped": 56,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 16171
+    },
+    {
+     "ts": "2026-09-14T19:21:23.713000+08:00",
+     "ids": [
+      "D46",
+      "D8",
+      "D65"
+     ],
+     "candidates": 58,
+     "dropped": 56,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 6244
+    },
+    {
+     "ts": "2026-09-14T19:27:35.131000+08:00",
+     "ids": [
+      "D22",
+      "D46",
+      "D65"
+     ],
+     "candidates": 58,
+     "dropped": 56,
+     "injectMode": "autonomous",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 4586
+    },
+    {
+     "ts": "2026-09-14T19:29:50.411000+08:00",
+     "ids": [
+      "D27",
+      "D55",
+      "D65"
+     ],
+     "candidates": 58,
+     "dropped": 56,
+     "injectMode": "autonomous",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 5879
+    },
+    {
+     "ts": "2026-09-14T19:32:00.934000+08:00",
+     "ids": [
+      "D27",
+      "D66",
+      "D10"
+     ],
+     "candidates": 59,
+     "dropped": 56,
+     "injectMode": "autonomous",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 6142
+    },
+    {
+     "ts": "2026-09-14T19:34:02.445000+08:00",
+     "ids": [
+      "D55",
+      "D27",
+      "D66"
+     ],
+     "candidates": 59,
+     "dropped": 57,
+     "injectMode": "autonomous",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 4659
+    },
+    {
+     "ts": "2026-09-14T20:00:35.271000+08:00",
+     "ids": [
+      "D66",
+      "D67",
+      "D58"
+     ],
+     "candidates": 60,
+     "dropped": 57,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 6305
+    },
+    {
+     "ts": "2026-09-14T20:03:34.941000+08:00",
+     "ids": [
+      "D8",
+      "D39",
+      "D67"
+     ],
+     "candidates": 60,
+     "dropped": 58,
+     "injectMode": "autonomous",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 4598
+    },
+    {
+     "ts": "2026-09-14T20:08:07.157000+08:00",
+     "ids": [
+      "D68",
+      "D67",
+      "D66"
+     ],
+     "candidates": 61,
+     "dropped": 58,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 6082
+    },
+    {
+     "ts": "2026-09-14T20:10:18.407000+08:00",
+     "ids": [
+      "D8",
+      "D68",
+      "D69"
+     ],
+     "candidates": 62,
+     "dropped": 60,
+     "injectMode": "autonomous",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 4886
+    },
+    {
+     "ts": "2026-09-14T20:14:05.774000+08:00",
+     "ids": [
+      "D27",
+      "D68",
+      "D69"
+     ],
+     "candidates": 62,
+     "dropped": 60,
+     "injectMode": "autonomous",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 5005
+    },
+    {
+     "ts": "2026-09-14T20:20:45.692000+08:00",
+     "ids": [
+      "D46",
+      "D70",
+      "D68"
+     ],
+     "candidates": 63,
+     "dropped": 60,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 5901
+    },
+    {
+     "ts": "2026-09-14T20:22:29.631000+08:00",
+     "ids": [
+      "D6",
+      "D46",
+      "D70"
+     ],
+     "candidates": 63,
+     "dropped": 61,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 8329
+    },
+    {
+     "ts": "2026-09-14T20:29:45.071000+08:00",
+     "ids": [
+      "D71",
+      "D6",
+      "D68"
+     ],
+     "candidates": 64,
+     "dropped": 61,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 6736
+    },
+    {
+     "ts": "2026-09-14T20:42:20.782000+08:00",
+     "ids": [
+      "D71",
+      "D72",
+      "D6"
+     ],
+     "candidates": 65,
+     "dropped": 62,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 7177
+    },
+    {
+     "ts": "2026-09-14T20:47:52.796000+08:00",
+     "ids": [
+      "D71",
+      "D6",
+      "D73"
+     ],
+     "candidates": 66,
+     "dropped": 64,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 5885
+    },
+    {
+     "ts": "2026-09-14T20:56:22.742000+08:00",
+     "ids": [
+      "D71",
+      "D6",
+      "D74"
+     ],
+     "candidates": 67,
+     "dropped": 64,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 7891
+    },
+    {
+     "ts": "2026-09-14T20:57:35.158000+08:00",
+     "ids": [
+      "D58",
+      "D22",
+      "D74"
+     ],
+     "candidates": 67,
+     "dropped": 65,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6106
+    },
+    {
+     "ts": "2026-09-14T20:59:20.490000+08:00",
+     "ids": [
+      "D71",
+      "D6",
+      "D75"
+     ],
+     "candidates": 68,
+     "dropped": 66,
+     "injectMode": "autonomous",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 8636
+    },
+    {
+     "ts": "2026-09-14T20:59:44.800000+08:00",
+     "ids": [
+      "D75",
+      "D15",
+      "D25"
+     ],
+     "candidates": 68,
+     "dropped": 65,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6505
+    },
+    {
+     "ts": "2026-09-14T21:01:33.032000+08:00",
+     "ids": [
+      "D77",
+      "D71",
+      "D6"
+     ],
+     "candidates": 69,
+     "dropped": 66,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 7679
+    },
+    {
+     "ts": "2026-09-14T21:03:17.361000+08:00",
+     "ids": [
+      "D22",
+      "D8",
+      "D77"
+     ],
+     "candidates": 69,
+     "dropped": 67,
+     "injectMode": "autonomous",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 6019
+    },
+    {
+     "ts": "2026-09-14T21:05:22.920000+08:00",
+     "ids": [
+      "D10",
+      "D36",
+      "D77"
+     ],
+     "candidates": 69,
+     "dropped": 67,
+     "injectMode": "autonomous",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 5107
+    },
+    {
+     "ts": "2026-09-14T21:08:29.707000+08:00",
+     "ids": [
+      "D6",
+      "D77",
+      "D78"
+     ],
+     "candidates": 70,
+     "dropped": 68,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 5910
+    },
+    {
+     "ts": "2026-09-14T21:10:06.656000+08:00",
+     "ids": [
+      "D62",
+      "D12",
+      "D79"
+     ],
+     "candidates": 71,
+     "dropped": 69,
+     "injectMode": "autonomous",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7230
+    },
+    {
+     "ts": "2026-09-14T21:11:52.007000+08:00",
+     "ids": [
+      "D65",
+      "D22",
+      "D80"
+     ],
+     "candidates": 72,
+     "dropped": 70,
+     "injectMode": "autonomous",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7823
+    },
+    {
+     "ts": "2026-09-14T21:12:39.483000+08:00",
+     "ids": [
+      "D79",
+      "D6",
+      "D80"
+     ],
+     "candidates": 72,
+     "dropped": 70,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 8002
+    },
+    {
+     "ts": "2026-09-14T21:13:32.602000+08:00",
+     "ids": [
+      "D62",
+      "D58",
+      "D80"
+     ],
+     "candidates": 72,
+     "dropped": 70,
+     "injectMode": "autonomous",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 11026
+    },
+    {
+     "ts": "2026-09-14T21:14:43.924000+08:00",
+     "ids": [
+      "D6",
+      "D71",
+      "D80"
+     ],
+     "candidates": 72,
+     "dropped": 70,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 9618
+    },
+    {
+     "ts": "2026-09-14T21:16:28.931000+08:00",
+     "ids": [
+      "D71",
+      "D79",
+      "D80"
+     ],
+     "candidates": 72,
+     "dropped": 70,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 7940
+    },
+    {
+     "ts": "2026-09-14T21:18:27.222000+08:00",
+     "ids": [
+      "D33",
+      "D10",
+      "D80"
+     ],
+     "candidates": 72,
+     "dropped": 70,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 9808
+    },
+    {
+     "ts": "2026-09-14T21:19:19.864000+08:00",
+     "ids": [
+      "D71",
+      "D6",
+      "D81"
+     ],
+     "candidates": 73,
+     "dropped": 71,
+     "injectMode": "autonomous",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 3872
+    },
+    {
+     "ts": "2026-09-14T21:19:57.131000+08:00",
+     "ids": [
+      "D12",
+      "D58",
+      "D81"
+     ],
+     "candidates": 73,
+     "dropped": 71,
+     "injectMode": "interactive",
+     "session": "session-712451cc-9b24-4",
+     "gate_pass": true,
+     "ms": 7805
+    },
+    {
+     "ts": "2026-09-14T22:15:08.734000+08:00",
+     "ids": [
+      "D85",
+      "D10",
+      "D58"
+     ],
+     "candidates": 75,
+     "dropped": 72,
+     "injectMode": "autonomous",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 7428
+    },
+    {
+     "ts": "2026-09-14T22:47:58.107000+08:00",
+     "ids": [
+      "D12",
+      "D60",
+      "D85"
+     ],
+     "candidates": 75,
+     "dropped": 73,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 13442
+    },
+    {
+     "ts": "2026-09-14T22:48:50.831000+08:00",
+     "ids": [
+      "D58",
+      "D56",
+      "D85"
+     ],
+     "candidates": 75,
+     "dropped": 73,
+     "injectMode": "interactive",
+     "session": "session-de3953d8-0ae4-4",
+     "gate_pass": true,
+     "ms": 8742
+    },
+    {
+     "ts": "2026-09-15T16:53:11.372000+08:00",
+     "ids": [
+      "D85",
+      "D22",
+      "D86"
+     ],
+     "candidates": 76,
+     "dropped": 74,
+     "injectMode": "interactive",
+     "session": "session-6f297f13-1921-4",
+     "gate_pass": true,
+     "ms": 6723
+    },
+    {
+     "ts": "2026-09-15T16:57:23.549000+08:00",
+     "ids": [
+      "D16",
+      "D17",
+      "D86"
+     ],
+     "candidates": 76,
+     "dropped": 74,
+     "injectMode": "autonomous",
+     "session": "session-6f297f13-1921-4",
+     "gate_pass": true,
+     "ms": 5593
+    },
+    {
+     "ts": "2026-09-15T16:59:35.611000+08:00",
+     "ids": [
+      "D57",
+      "D56",
+      "D86"
+     ],
+     "candidates": 76,
+     "dropped": 74,
+     "injectMode": "interactive",
+     "session": "session-6f297f13-1921-4",
+     "gate_pass": true,
+     "ms": 9389
+    },
+    {
+     "ts": "2026-09-15T17:03:27.748000+08:00",
+     "ids": [
+      "D12",
+      "D10",
+      "D86"
+     ],
+     "candidates": 76,
+     "dropped": 74,
+     "injectMode": "autonomous",
+     "session": "session-6f297f13-1921-4",
+     "gate_pass": true,
+     "ms": 14545
+    },
+    {
+     "ts": "2026-09-15T17:08:15.779000+08:00",
+     "ids": [
+      "D18",
+      "D60",
+      "D86"
+     ],
+     "candidates": 76,
+     "dropped": 74,
+     "injectMode": "interactive",
+     "session": "session-a20e4270-8564-4",
+     "gate_pass": true,
+     "ms": 4119
+    },
+    {
+     "ts": "2026-09-15T17:13:01.119000+08:00",
+     "ids": [
+      "D85",
+      "D71",
+      "D86"
+     ],
+     "candidates": 76,
+     "dropped": 74,
+     "injectMode": "interactive",
+     "session": "session-0ff8c384-c662-4",
+     "gate_pass": true,
+     "ms": 5600
+    },
+    {
+     "ts": "2026-09-15T17:17:51.546000+08:00",
+     "ids": [
+      "D85",
+      "D71",
+      "D86"
+     ],
+     "candidates": 76,
+     "dropped": 74,
+     "injectMode": "autonomous",
+     "session": "session-a20e4270-8564-4",
+     "gate_pass": true,
+     "ms": 4550
+    },
+    {
+     "ts": "2026-09-15T17:18:07.527000+08:00",
+     "ids": [
+      "D30",
+      "D50",
+      "D86"
+     ],
+     "candidates": 76,
+     "dropped": 74,
+     "injectMode": "interactive",
+     "session": "session-6f297f13-1921-4",
+     "gate_pass": true,
+     "ms": 6307
+    },
+    {
+     "ts": "2026-09-15T17:32:10.021000+08:00",
+     "ids": [
+      "D85",
+      "D58",
+      "D88"
+     ],
+     "candidates": 78,
+     "dropped": 76,
+     "injectMode": "autonomous",
+     "session": "session-0ff8c384-c662-4",
+     "gate_pass": true,
+     "ms": 4249
+    },
+    {
+     "ts": "2026-09-15T17:39:24.777000+08:00",
+     "ids": [
+      "D85",
+      "D71",
+      "D88"
+     ],
+     "candidates": 78,
+     "dropped": 77,
+     "injectMode": "autonomous",
+     "session": "session-a20e4270-8564-4",
+     "gate_pass": true,
+     "ms": 4822
+    }
+   ],
+   "gate_block": 21,
+   "identical": 20,
+   "writes": 172,
+   "nudges": 66,
+   "ids_freq": {
+    "D10": 37,
+    "D22": 36,
+    "D12": 25,
+    "D33": 19,
+    "D45": 19,
+    "D46": 19,
+    "D6": 18,
+    "D8": 17
+   },
+   "ms_dist": {
+    "n": 153,
+    "mean": 6437,
+    "p50": 5910,
+    "p95": 9840,
+    "max": 16319
+   },
+   "per_session": {
+    "session-712451c": 63,
+    "session-8a11cf4": 50,
+    "session-de3953d": 30,
+    "session-6f297f1": 5,
+    "session-a20e427": 3,
+    "session-0ff8c38": 2
+   },
+   "health": {
+    "raw": "[2026-09-15T09:36:14.200Z] round=3 components=1 hub=测量纪律:34/81 omegaMean=0.501 omegaN=45 uncovered=11/81 used=70/81 topUsed=D10×51 mergeCandidates=无候选 warnings=1 :: 枢纽 Tag「测量纪律」出现 34/81 篇（≥1/3）：直接锚会被泛化，唯一锚的锐度消失",
+    "components": "1",
+    "hub": "测量纪律:34/81",
+    "uncovered": "11/81",
+    "used": "70/81"
+   },
+   "pending": 34
+  },
+  "dsh-agent-messaging": {
+   "injects": [],
+   "gate_block": 0,
+   "identical": 0,
+   "writes": 0,
+   "nudges": 0,
+   "ids_freq": {},
+   "ms_dist": {},
+   "per_session": {},
+   "health": {
+    "raw": "[2026-09-15T02:52:48.936Z] round=1 components=0 hub=n/a omegaMean=n/a omegaN=0 uncovered=0/0 used=n/a topUsed=n/a mergeCandidates=无从判定（空库） warnings=1 :: 空库：本桶尚无日记，四项体检无从判定（先 memo_write 或导入语料）",
+    "components": "0",
+    "hub": "n/a",
+    "uncovered": "0/0",
+    "used": "n/a"
+   },
+   "pending": 1
+  }
+ },
+ "sessions": [
+  {
+   "sid": "session-69109da6-1a65-4",
+   "project": "--home-h-app-dsh-agent-messaging--",
+   "bucket": "dsh-agent-messaging",
+   "cwd": "/home/h/app/dsh-agent-messaging",
+   "agent_preset": "memo-river",
+   "user_msgs": 1,
+   "asst_texts": 1,
+   "turns": 1,
+   "turn_incomplete": 0,
+   "injections": 0,
+   "roles": {},
+   "k_limit": 0,
+   "nudges": 0,
+   "injected_ids": [],
+   "d_mentioned": [],
+   "tools": {},
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-a4806e5a-639b-4",
+   "project": "--home-h-app-dsh-agi-harness--",
+   "bucket": null,
+   "cwd": "/home/h/app/dsh-agi-harness",
+   "agent_preset": "standard",
+   "user_msgs": 17,
+   "asst_texts": 121,
+   "turns": 16,
+   "turn_incomplete": 1,
+   "injections": 0,
+   "roles": {},
+   "k_limit": 0,
+   "nudges": 0,
+   "injected_ids": [],
+   "d_mentioned": [],
+   "tools": {},
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-bec53ac7-b3ca-4",
+   "project": "--home-h-app-dsh-agi-harness--",
+   "bucket": null,
+   "cwd": "/home/h/app/dsh-agi-harness",
+   "agent_preset": "cordis",
+   "user_msgs": 17,
+   "asst_texts": 121,
+   "turns": 16,
+   "turn_incomplete": 1,
+   "injections": 0,
+   "roles": {},
+   "k_limit": 0,
+   "nudges": 0,
+   "injected_ids": [],
+   "d_mentioned": [],
+   "tools": {},
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-2125a4be-99f8-4",
+   "project": "--home-h-app-dsh-memo-river--",
+   "bucket": "dsh-memo-river",
+   "cwd": "/home/h/app/dsh-memo-river",
+   "agent_preset": "plugin-dev",
+   "user_msgs": 3,
+   "asst_texts": 18,
+   "turns": 2,
+   "turn_incomplete": 0,
+   "injections": 4,
+   "roles": {
+    "direct_answer": 3,
+    "atomic_concept": 9
+   },
+   "k_limit": 32,
+   "nudges": 1,
+   "injected_ids": [
+    "D6",
+    "D7",
+    "D9",
+    "D10",
+    "D13",
+    "D14",
+    "D18",
+    "D19",
+    "D20",
+    "D35",
+    "D37",
+    "D38",
+    "D39"
+   ],
+   "d_mentioned": [
+    "D13",
+    "D14",
+    "D19",
+    "D20",
+    "D22",
+    "D23",
+    "D35",
+    "D37",
+    "D38",
+    "D39"
+   ],
+   "tools": {
+    "memo_stats": 2,
+    "memo_tags": 1,
+    "memo_write": 2
+   },
+   "tool_errors": 0,
+   "overlap": 8
+  },
+  {
+   "sid": "session-43b70186-845f-4",
+   "project": "--home-h-app-dsh-memo-river--",
+   "bucket": "dsh-memo-river",
+   "cwd": "/home/h/app/dsh-memo-river",
+   "agent_preset": "standard",
+   "user_msgs": 9,
+   "asst_texts": 179,
+   "turns": 15,
+   "turn_incomplete": 1,
+   "injections": 29,
+   "roles": {
+    "atomic_concept": 87
+   },
+   "k_limit": 232,
+   "nudges": 20,
+   "injected_ids": [
+    "D1",
+    "D5",
+    "D6",
+    "D7",
+    "D9",
+    "D10",
+    "D13",
+    "D14",
+    "D15",
+    "D16",
+    "D17",
+    "D18",
+    "D19",
+    "D20",
+    "D21",
+    "D22",
+    "D23",
+    "D24",
+    "D25",
+    "D26",
+    "D27",
+    "D28",
+    "D29",
+    "D30",
+    "D31",
+    "D32",
+    "D33",
+    "D34",
+    "D35",
+    "D36",
+    "D37"
+   ],
+   "d_mentioned": [
+    "D1",
+    "D3",
+    "D4",
+    "D10",
+    "D13",
+    "D19",
+    "D20",
+    "D21",
+    "D22",
+    "D23",
+    "D24",
+    "D25",
+    "D27",
+    "D29",
+    "D32",
+    "D33",
+    "D36",
+    "D37"
+   ],
+   "tools": {
+    "memo_tags": 1,
+    "memo_write": 9,
+    "memo_drafts": 1,
+    "memo_discard": 1
+   },
+   "tool_errors": 0,
+   "overlap": 16
+  },
+  {
+   "sid": "session-7677602c-fcb5-4",
+   "project": "--home-h-app-dsh-memo-river--",
+   "bucket": "dsh-memo-river",
+   "cwd": "/home/h/app/dsh-memo-river",
+   "agent_preset": "standard",
+   "user_msgs": 1,
+   "asst_texts": 1,
+   "turns": 1,
+   "turn_incomplete": 0,
+   "injections": 0,
+   "roles": {},
+   "k_limit": 0,
+   "nudges": 0,
+   "injected_ids": [],
+   "d_mentioned": [],
+   "tools": {},
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-8cff709e-7da3-4",
+   "project": "--home-h-app-dsh-memo-river--",
+   "bucket": "dsh-memo-river",
+   "cwd": "/home/h/app/dsh-memo-river",
+   "agent_preset": "standard",
+   "user_msgs": 59,
+   "asst_texts": 570,
+   "turns": 55,
+   "turn_incomplete": 2,
+   "injections": 65,
+   "roles": {
+    "atomic_concept": 192,
+    "direct_answer": 1
+   },
+   "k_limit": 467,
+   "nudges": 21,
+   "injected_ids": [
+    "D1",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
+    "D6",
+    "D7",
+    "D8",
+    "D9",
+    "D10",
+    "D11",
+    "D13",
+    "D14",
+    "D15",
+    "D16",
+    "D17",
+    "D18",
+    "D19",
+    "D20",
+    "D21",
+    "D22",
+    "D23",
+    "D24",
+    "D25",
+    "D26",
+    "D27",
+    "D28",
+    "D29",
+    "D30",
+    "D31",
+    "D32",
+    "D33",
+    "D34",
+    "D35",
+    "D37"
+   ],
+   "d_mentioned": [
+    "D1",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
+    "D6",
+    "D7",
+    "D8",
+    "D9",
+    "D10",
+    "D11",
+    "D12",
+    "D13",
+    "D14",
+    "D15",
+    "D16",
+    "D17",
+    "D18",
+    "D19",
+    "D20",
+    "D22",
+    "D23",
+    "D24",
+    "D25",
+    "D26",
+    "D28",
+    "D30",
+    "D31",
+    "D32",
+    "D34",
+    "D35",
+    "D37"
+   ],
+   "tools": {
+    "memo_tags": 4,
+    "memo_write": 28,
+    "memo_recall": 2,
+    "memo_drafts": 1,
+    "memo_discard": 2
+   },
+   "tool_errors": 0,
+   "overlap": 31
+  },
+  {
+   "sid": "8f784e2a-0e25-4fbb-a46a",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": null,
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "memo-river",
+   "user_msgs": 23,
+   "asst_texts": 209,
+   "turns": 19,
+   "turn_incomplete": 1,
+   "injections": 3,
+   "roles": {
+    "atomic_concept": 7
+   },
+   "k_limit": 0,
+   "nudges": 0,
+   "injected_ids": [
+    "D1",
+    "D2",
+    "D3"
+   ],
+   "d_mentioned": [
+    "D4"
+   ],
+   "tools": {
+    "memo_tags": 2,
+    "memo_recall": 1,
+    "memo_stats": 1,
+    "memo_write": 3
+   },
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "9d78e09c-80e8-4734-a5a8",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": null,
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "memo-river",
+   "user_msgs": 1,
+   "asst_texts": 5,
+   "turns": 1,
+   "turn_incomplete": 0,
+   "injections": 3,
+   "roles": {
+    "atomic_concept": 9
+   },
+   "k_limit": 22,
+   "nudges": 1,
+   "injected_ids": [
+    "D6",
+    "D7",
+    "D8",
+    "D10",
+    "D12",
+    "D14",
+    "D16"
+   ],
+   "d_mentioned": [
+    "D16"
+   ],
+   "tools": {
+    "memo_tags": 1,
+    "memo_write": 1
+   },
+   "tool_errors": 0,
+   "overlap": 1
+  },
+  {
+   "sid": "f8179225-144e-4a18-a063",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": null,
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "memo-river",
+   "user_msgs": 1,
+   "asst_texts": 1,
+   "turns": 1,
+   "turn_incomplete": 0,
+   "injections": 2,
+   "roles": {
+    "atomic_concept": 6
+   },
+   "k_limit": 12,
+   "nudges": 0,
+   "injected_ids": [
+    "D6",
+    "D8",
+    "D12",
+    "D13"
+   ],
+   "d_mentioned": [],
+   "tools": {},
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "f9b85187-6d41-48fc-9e3d",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": null,
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "memo-river",
+   "user_msgs": 23,
+   "asst_texts": 138,
+   "turns": 19,
+   "turn_incomplete": 1,
+   "injections": 3,
+   "roles": {
+    "atomic_concept": 7
+   },
+   "k_limit": 1,
+   "nudges": 0,
+   "injected_ids": [
+    "D1",
+    "D2",
+    "D3",
+    "D4"
+   ],
+   "d_mentioned": [
+    "D5"
+   ],
+   "tools": {
+    "memo_tags": 2,
+    "memo_recall": 1,
+    "memo_stats": 1,
+    "memo_write": 3,
+    "memo_drafts": 1
+   },
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-0ff8c384-c662-4",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": "dsh-preset-composer",
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "plugin-dev",
+   "user_msgs": 1,
+   "asst_texts": 0,
+   "turns": 1,
+   "turn_incomplete": 0,
+   "injections": 2,
+   "roles": {
+    "atomic_concept": 6
+   },
+   "k_limit": 16,
+   "nudges": 5,
+   "injected_ids": [
+    "D57",
+    "D58",
+    "D71",
+    "D85",
+    "D86",
+    "D88"
+   ],
+   "d_mentioned": [],
+   "tools": {},
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-6f297f13-1921-4",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": "dsh-preset-composer",
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "plugin-dev",
+   "user_msgs": 3,
+   "asst_texts": 51,
+   "turns": 2,
+   "turn_incomplete": 0,
+   "injections": 6,
+   "roles": {
+    "atomic_concept": 18
+   },
+   "k_limit": 48,
+   "nudges": 4,
+   "injected_ids": [
+    "D7",
+    "D10",
+    "D12",
+    "D14",
+    "D16",
+    "D17",
+    "D22",
+    "D30",
+    "D50",
+    "D56",
+    "D57",
+    "D85",
+    "D86"
+   ],
+   "d_mentioned": [
+    "D88"
+   ],
+   "tools": {
+    "memo_tags": 1,
+    "memo_write": 2
+   },
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-70f0f000-2e02-4",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": null,
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "plugin-dev",
+   "user_msgs": 1,
+   "asst_texts": 1,
+   "turns": 1,
+   "turn_incomplete": 1,
+   "injections": 0,
+   "roles": {},
+   "k_limit": 0,
+   "nudges": 0,
+   "injected_ids": [],
+   "d_mentioned": [],
+   "tools": {},
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-712451cc-9b24-4",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": "dsh-preset-composer",
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "standard",
+   "user_msgs": 99,
+   "asst_texts": 862,
+   "turns": 102,
+   "turn_incomplete": 1,
+   "injections": 126,
+   "roles": {
+    "atomic_concept": 366,
+    "direct_answer": 9
+   },
+   "k_limit": 940,
+   "nudges": 39,
+   "injected_ids": [
+    "D1",
+    "D2",
+    "D5",
+    "D6",
+    "D7",
+    "D8",
+    "D9",
+    "D10",
+    "D11",
+    "D12",
+    "D13",
+    "D14",
+    "D15",
+    "D16",
+    "D17",
+    "D18",
+    "D19",
+    "D22",
+    "D24",
+    "D25",
+    "D26",
+    "D27",
+    "D30",
+    "D31",
+    "D32",
+    "D33",
+    "D34",
+    "D36",
+    "D37",
+    "D38",
+    "D39",
+    "D41",
+    "D42",
+    "D43",
+    "D44",
+    "D45",
+    "D46",
+    "D47",
+    "D48",
+    "D49",
+    "D50",
+    "D51",
+    "D52",
+    "D53",
+    "D55",
+    "D56",
+    "D57",
+    "D58",
+    "D59",
+    "D60",
+    "D62",
+    "D63",
+    "D64",
+    "D65",
+    "D73",
+    "D74",
+    "D75",
+    "D76",
+    "D77",
+    "D78",
+    "D79",
+    "D80",
+    "D81"
+   ],
+   "d_mentioned": [
+    "D1",
+    "D3",
+    "D4",
+    "D5",
+    "D6",
+    "D8",
+    "D9",
+    "D10",
+    "D11",
+    "D12",
+    "D13",
+    "D18",
+    "D19",
+    "D20",
+    "D21",
+    "D22",
+    "D27",
+    "D28",
+    "D29",
+    "D30",
+    "D31",
+    "D34",
+    "D41",
+    "D46",
+    "D50",
+    "D53",
+    "D55",
+    "D57",
+    "D58",
+    "D59",
+    "D60",
+    "D61",
+    "D63",
+    "D64",
+    "D65",
+    "D66",
+    "D75",
+    "D76",
+    "D78",
+    "D80"
+   ],
+   "tools": {
+    "memo_tags": 3,
+    "memo_recall": 4,
+    "memo_stats": 3,
+    "memo_write": 59,
+    "memo_drafts": 1,
+    "memo_update": 2
+   },
+   "tool_errors": 0,
+   "overlap": 32
+  },
+  {
+   "sid": "session-801226e1-6651-4",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": null,
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "standard",
+   "user_msgs": 1,
+   "asst_texts": 0,
+   "turns": 1,
+   "turn_incomplete": 1,
+   "injections": 0,
+   "roles": {},
+   "k_limit": 0,
+   "nudges": 0,
+   "injected_ids": [],
+   "d_mentioned": [],
+   "tools": {},
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-8a11cf44-1881-4",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": "dsh-preset-composer",
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "standard",
+   "user_msgs": 2,
+   "asst_texts": 324,
+   "turns": 18,
+   "turn_incomplete": 1,
+   "injections": 58,
+   "roles": {
+    "atomic_concept": 172,
+    "direct_answer": 2
+   },
+   "k_limit": 464,
+   "nudges": 17,
+   "injected_ids": [
+    "D6",
+    "D8",
+    "D10",
+    "D12",
+    "D13",
+    "D14",
+    "D15",
+    "D18",
+    "D22",
+    "D25",
+    "D32",
+    "D33",
+    "D36",
+    "D38",
+    "D39",
+    "D41",
+    "D42",
+    "D43",
+    "D44",
+    "D45",
+    "D46",
+    "D47",
+    "D48",
+    "D49",
+    "D50",
+    "D51",
+    "D52",
+    "D57",
+    "D58",
+    "D60",
+    "D61",
+    "D62",
+    "D64"
+   ],
+   "d_mentioned": [],
+   "tools": {
+    "memo_write": 8
+   },
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-a20e4270-8564-4",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": "dsh-preset-composer",
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "plugin-dev",
+   "user_msgs": 3,
+   "asst_texts": 14,
+   "turns": 1,
+   "turn_incomplete": 0,
+   "injections": 4,
+   "roles": {
+    "atomic_concept": 12
+   },
+   "k_limit": 32,
+   "nudges": 1,
+   "injected_ids": [
+    "D18",
+    "D22",
+    "D60",
+    "D71",
+    "D85",
+    "D86",
+    "D88"
+   ],
+   "d_mentioned": [],
+   "tools": {
+    "memo_tags": 1,
+    "memo_write": 1
+   },
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-ac637c29-32e9-4",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": null,
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "plugin-dev",
+   "user_msgs": 0,
+   "asst_texts": 0,
+   "turns": 0,
+   "turn_incomplete": 0,
+   "injections": 0,
+   "roles": {},
+   "k_limit": 0,
+   "nudges": 0,
+   "injected_ids": [],
+   "d_mentioned": [],
+   "tools": {},
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-c93535b4-bb1e-4",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": null,
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "standard",
+   "user_msgs": 1,
+   "asst_texts": 0,
+   "turns": 1,
+   "turn_incomplete": 1,
+   "injections": 0,
+   "roles": {},
+   "k_limit": 0,
+   "nudges": 0,
+   "injected_ids": [],
+   "d_mentioned": [],
+   "tools": {},
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-d418ade0-5adc-4",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": null,
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "plugin-dev",
+   "user_msgs": 3,
+   "asst_texts": 117,
+   "turns": 1,
+   "turn_incomplete": 0,
+   "injections": 0,
+   "roles": {},
+   "k_limit": 0,
+   "nudges": 0,
+   "injected_ids": [],
+   "d_mentioned": [],
+   "tools": {},
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-d957e230-3d39-4",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": null,
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "standard",
+   "user_msgs": 9,
+   "asst_texts": 34,
+   "turns": 8,
+   "turn_incomplete": 0,
+   "injections": 0,
+   "roles": {},
+   "k_limit": 0,
+   "nudges": 0,
+   "injected_ids": [],
+   "d_mentioned": [],
+   "tools": {},
+   "tool_errors": 0,
+   "overlap": 0
+  },
+  {
+   "sid": "session-de3953d8-0ae4-4",
+   "project": "--home-h-app-dsh-preset-composer--",
+   "bucket": "dsh-preset-composer",
+   "cwd": "/home/h/app/dsh-preset-composer",
+   "agent_preset": "memo-river",
+   "user_msgs": 22,
+   "asst_texts": 299,
+   "turns": 15,
+   "turn_incomplete": 0,
+   "injections": 34,
+   "roles": {
+    "atomic_concept": 102
+   },
+   "k_limit": 272,
+   "nudges": 16,
+   "injected_ids": [
+    "D6",
+    "D8",
+    "D10",
+    "D12",
+    "D15",
+    "D22",
+    "D24",
+    "D27",
+    "D39",
+    "D46",
+    "D55",
+    "D56",
+    "D57",
+    "D58",
+    "D60",
+    "D65",
+    "D66",
+    "D67",
+    "D68",
+    "D69",
+    "D70",
+    "D71",
+    "D72",
+    "D73",
+    "D74",
+    "D75",
+    "D77",
+    "D78",
+    "D79",
+    "D80",
+    "D81",
+    "D85",
+    "D86"
+   ],
+   "d_mentioned": [
+    "D27",
+    "D46",
+    "D55",
+    "D56",
+    "D58",
+    "D66",
+    "D67",
+    "D68",
+    "D69",
+    "D70",
+    "D71",
+    "D72",
+    "D73",
+    "D77",
+    "D79",
+    "D84",
+    "D85",
+    "D86"
+   ],
+   "tools": {
+    "memo_tags": 1,
+    "memo_recall": 1,
+    "memo_write": 15
+   },
+   "tool_errors": 0,
+   "overlap": 17
+  },
+  {
+   "sid": "session-2e8fca1f-8bc2-4",
+   "project": "--home-h-genshin-model-studio--",
+   "bucket": "genshin-model-studio",
+   "cwd": "/home/h/genshin-model-studio",
+   "agent_preset": "standard",
+   "user_msgs": 19,
+   "asst_texts": 55,
+   "turns": 15,
+   "turn_incomplete": 2,
+   "injections": 9,
+   "roles": {
+    "atomic_concept": 27
+   },
+   "k_limit": 72,
+   "nudges": 0,
+   "injected_ids": [
+    "D1",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
+    "D8",
+    "D9",
+    "D11",
+    "D13",
+    "D16",
+    "D18"
+   ],
+   "d_mentioned": [
+    "D5",
+    "D17",
+    "D18",
+    "D19"
+   ],
+   "tools": {
+    "memo_drafts": 1,
+    "memo_approve": 1,
+    "memo_discard": 1,
+    "memo_tags": 1,
+    "memo_write": 3
+   },
+   "tool_errors": 0,
+   "overlap": 2
+  },
+  {
+   "sid": "session-8a9607e7-f927-4",
+   "project": "--home-h-genshin-ts--",
+   "bucket": "genshin-ts",
+   "cwd": "/home/h/genshin-ts",
+   "agent_preset": "standard",
+   "user_msgs": 5,
+   "asst_texts": 38,
+   "turns": 4,
+   "turn_incomplete": 0,
+   "injections": 1,
+   "roles": {
+    "atomic_concept": 2
+   },
+   "k_limit": 0,
+   "nudges": 0,
+   "injected_ids": [
+    "D1",
+    "D2"
+   ],
+   "d_mentioned": [],
+   "tools": {
+    "memo_tags": 1,
+    "memo_write": 2
+   },
+   "tool_errors": 0,
+   "overlap": 0
+  }
+ ],
+ "tool_stats": {
+  "memo_write": {
+   "n": 136,
+   "mean": 7084,
+   "p50": 4717,
+   "p95": 10211,
+   "max": 120071
+  }
+ },
+ "plugin_funnel": {
+  "draft-collected": 178,
+  "write-nudge": 83
+ }
+}
