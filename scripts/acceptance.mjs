@@ -10,7 +10,7 @@
  *
  * 用法：node scripts/acceptance.mjs
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -1694,6 +1694,88 @@ hr('#34 artifact 行换代清理：每 schema 保最新 K 代；幂等；runOnce
       `生产存量对照：dsh-memo-river 桶 218 行 / preset-composer 桶 136 行（票⑥A 修复前漂移产物，首轮守护即清）`,
     ],
   )
+}
+
+/* ══════════════════════ #35 票05 草稿队列可见性 ══════════════════════ */
+
+hr('#35 草稿队列可见性：nudge 带队列数与最老年龄；面板常显各桶计数（票05）')
+{
+  const { tuningSnapshot, serveTuningPanel } = await import('../lib/tuning.js')
+  const H = 3_600_000
+  const NQ_CWD = join(tmpdir(), `memo-river-nudge-queue-${process.pid}`)
+  const nq = workspacePaths(NQ_CWD, '草稿队列可见性测试')
+  rmSync(NQ_CWD, { recursive: true, force: true })
+  rmSync(nq.root, { recursive: true, force: true })
+  mkdirSync(nq.pendingDir, { recursive: true })
+  const now35 = Date.now()
+  const mk35 = (name, ageH) => {
+    const p = join(nq.pendingDir, name)
+    writeFileSync(p, `# ${name}\n\n- 桶：草稿队列可见性测试\n- 回合：1 @ ${new Date(now35 - ageH * H).toISOString()}\n`)
+    utimesSync(p, new Date(now35 - ageH * H), new Date(now35 - ageH * H)) // mtime = 最老年龄的量尺
+  }
+  mk35('2026-09-15T10-turn3.md', 3)
+  mk35('2026-09-14T09-turn2.md', 27)
+  acquireWorkspace(NQ_CWD, makeConfig({ bucket: '草稿队列可见性测试' })) // 落 manifest，面板桶名可读
+
+  /* (a) 面板数据：计数 = pending/ 实际 .md 文件数；最老年龄 ≈ 27h */
+  const snapA = tuningSnapshot(config, {}, () => [])
+  const entryA = snapA.draftQueue.find((b) => b.hash === nq.hash)
+  const filesA = readdirSync(nq.pendingDir).filter((f) => f.endsWith('.md')).length
+  const panelDataOk = !!entryA && entryA.pending === filesA && entryA.pending === 2 && Math.abs(entryA.oldestAgeHours - 27) < 0.5
+
+  /* (b)(c) nudge：队列非空带「N 篇待批（最老 X 小时）」；空队列不显示误导数字 */
+  const h35 = createMockCtx()
+  apply(h35.ctx, makeConfig({ bucket: '草稿队列可见性测试', inject: { writeNudgeEveryMinutes: 30 } }))
+  const armNudge35 = async (sessId) => {
+    const ag = createAgent(sessId, NQ_CWD, [textMsg('user', '队列可见性测试'), textMsg('assistant', '好的。')])
+    await runPreStep(h35, ag, 2, [textMsg('user', '继续')], 1) // 惰性建 session state（此步无提醒条件）
+    const st = peekSession(sessId)
+    st.lastDiaryWriteAt = Date.now() - 35 * 60_000
+    st.activeMs = 35 * 60_000 // 时间锚只量模型思考时长（与 #20 同口径）
+    st.lastDraftSummary = { turn: 2, at: Date.now() - 60_000, suggestedTags: ['写入去重'], digest: '把积压的可见性做完' }
+    const d = await runPreStep(h35, ag, 3, [textMsg('user', '再看一步')], 1)
+    return d.messages.map(msgText).filter((t) => t.includes('[memo-river·写入节律]')).join('\n')
+  }
+  const nudgeA = await armNudge35('sess-nudge-queue-a')
+  const queueLine = nudgeA.split('\n').find((l) => l.includes('篇待批')) ?? ''
+  const nudgeOk =
+    nudgeA.includes('草稿队列 2 篇待批（最老 27 小时）') &&
+    nudgeA.includes('memo_write') &&
+    nudgeA.includes('现在正是写日记的时机') &&
+    queueLine.length > 0 &&
+    queueLine.length <= 80 &&
+    nudgeA.split('\n').length === 3
+  for (const f of readdirSync(nq.pendingDir)) rmSync(join(nq.pendingDir, f))
+  const nudgeB = await armNudge35('sess-nudge-queue-b')
+  const emptyOk =
+    nudgeB.includes('[memo-river·写入节律]') &&
+    nudgeB.includes('memo_write') &&
+    !nudgeB.includes('草稿队列') &&
+    !nudgeB.includes('待批') &&
+    nudgeB.split('\n').length === 2
+
+  /* (d) 面板数据（清空后）：空桶在列显示 0 而非消失；面板 HTML 常显队列区 */
+  const snapB = tuningSnapshot(config, {}, () => [])
+  const entryB = snapB.draftQueue.find((b) => b.hash === nq.hash)
+  const zeroOk = !!entryB && entryB.pending === 0 && entryB.oldestAgeHours === null
+  let html35 = ''
+  serveTuningPanel({ setHeader() {}, end(b) { html35 = String(b ?? '') } })
+  const htmlOk = html35.includes('id="queue"') && html35.includes('草稿队列')
+
+  check(
+    35,
+    '草稿队列可见性：nudge 带队列计数与最老年龄；面板常显各桶 pending（空=0）',
+    panelDataOk && nudgeOk && emptyOk && zeroOk && htmlOk,
+    [
+      `(a) 面板读数=${panelDataOk ? `✅ pending=${entryA?.pending}（目录实际 ${filesA} 篇）最老=${entryA?.oldestAgeHours?.toFixed(1)}h` : `❌ ${JSON.stringify(entryA)}`}`,
+      `(b) nudge 带队列=${nudgeOk ? `✅「${queueLine}」` : `❌ ${JSON.stringify(nudgeA)}`}`,
+      `(c) 空队列不显示数字=${emptyOk ? '✅ 无队列行，原两行提醒保留' : `❌ ${JSON.stringify(nudgeB)}`}`,
+      `(d) 空桶显示 0=${zeroOk ? '✅ pending=0 / oldest=null' : `❌ ${JSON.stringify(entryB)}`}；面板 HTML 队列区=${htmlOk ? '✅' : '❌'}；全局桶数=${snapB.draftQueue.length}`,
+    ],
+  )
+  h35.dispose()
+  rmSync(NQ_CWD, { recursive: true, force: true })
+  rmSync(nq.root, { recursive: true, force: true })
 }
 
 /* ══════════════════════ 汇总 ══════════════════════ */

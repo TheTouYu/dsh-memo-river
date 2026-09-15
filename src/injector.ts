@@ -37,7 +37,8 @@ import { BLOCK_CLOSE, renderInjection, renderSkipNotice, renderWriteNudge } from
 import { buildQueryField, type RecallOptions } from './recall.js'
 import { tuningValues } from './tuning.js'
 import { getSession, peekSession, type SessionState } from './session.js'
-import type { Logger } from './runtime.js'
+import { workspacePaths, type Logger } from './runtime.js'
+import { pendingQueueStats, type PendingQueueStats } from './drafts.js'
 import type { WorkspaceRuntime } from './workspace.js'
 
 /** 内容块 → 文本（只取带 text 的块；其它块类型忽略）。 */
@@ -444,6 +445,8 @@ export function evaluateWriteNudge(
   now = Date.now(),
   step = 1,
   contextChars: number | null = null,
+  /** 票05：草稿队列读数——懒取（只在确认要发提醒时求值一次，省每步目录 IO）。 */
+  queueProvider?: () => PendingQueueStats | null,
 ): string | null {
   const t = tuningValues(config, state.sessionId)
   const everyMin = t.writeNudgeEveryMinutes
@@ -492,7 +495,14 @@ export function evaluateWriteNudge(
   const digest = autonomous
     ? state.lastAssistantDigest || draft?.digest || `自主任务进行中（step ${step}，上下文 +${Math.max(0, Math.round(growth / 1000))}K 字）`
     : draft?.digest || state.lastAssistantDigest || `自主任务进行中（step ${step}）`
-  return renderWriteNudge(reason, draft?.turn ?? turn, digest, draft?.suggestedTags ?? [])
+  // 票05：队列读数只在真发提醒时取一次；读数失败（目录不可读等）不拖垮提醒本体。
+  let queue: PendingQueueStats | null = null
+  try {
+    queue = queueProvider ? queueProvider() : null
+  } catch {
+    queue = null
+  }
+  return renderWriteNudge(reason, draft?.turn ?? turn, digest, draft?.suggestedTags ?? [], queue)
 }
 
 /**
@@ -564,7 +574,16 @@ export function installInjection(
         // 读侧：注入时机（回合首发 / 自主态节律 / 压缩重注）由 buildTailInjection 全权裁定。
         const text = await buildTailInjection(deps, payload.agent, payload.turn, payload.step, payload.messages)
         // 写侧：写入节律提醒（独立于召回，可同拍并存；四锚：时间/汇报轮/步/增量）
-        const nudge = wstate ? evaluateWriteNudge(config, wstate, payload.turn, Date.now(), payload.step, contextChars) : null
+        // 票05：提醒文案带本工作区草稿队列读数（懒取——evaluateWriteNudge 确认要发才扫目录）。
+        const nudge = wstate
+          ? evaluateWriteNudge(config, wstate, payload.turn, Date.now(), payload.step, contextChars, () => {
+              try {
+                return pendingQueueStats(workspacePaths(resolveCwd(payload.agent, wstate)).pendingDir)
+              } catch {
+                return null // 路径解析失败 → 提醒不带队列行，不出数字
+              }
+            })
+          : null
         const extra: unknown[] = []
         if (text) extra.push(createInjectionMessage(text))
         if (nudge) {

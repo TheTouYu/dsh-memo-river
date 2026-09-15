@@ -9,6 +9,7 @@
  *
  * 本文件里出现的所有字面量都是**编译期常量**；动态值只从 RecallOutcome 来。
  */
+import type { PendingQueueStats } from './drafts.js'
 import type { RecallCandidate, RecallOutcome } from './recall.js'
 import { proseText } from './runtime.js'
 
@@ -90,14 +91,41 @@ export function renderSkipNotice(outcome: RecallOutcome, bucket: string): string
   return `inject-skip bucket=${bucket} reason=${outcome.fallbackReason ?? 'unknown'} gate=${JSON.stringify(outcome.gate)} elapsedMs=${outcome.elapsedMs}`
 }
 
+/** 草稿队列年龄的人类可读形态（<1h / 小时 / ≥72h 折天；nudge 与面板口径一致）。 */
+export function ageText(hours: number): string {
+  if (!Number.isFinite(hours) || hours < 0) return '未知'
+  if (hours < 1) return '不足 1 小时'
+  if (hours < 72) return `${Math.round(hours)} 小时`
+  return `${Math.round(hours / 24)} 天`
+}
+
 /**
  * 写入节律提醒文案（B6 瘦身原则：只带「该写了 + 写什么 + 怎么写」，
- * 写日记规范不复读——它住在系统提示固定契约里）。
+ * 写日记规范不复读——它住在固定契约段里）。
+ *
+ * ⚠️ 契约段的**落点随底座而变**（2026-09-15 实测）：标准底座下它经
+ * `systemPrompt.section` 进系统提示；极简底座（persona `complete:true`）会把它
+ * **整段丢弃**，同一段文本改由 preset-composer 的「首条消息之后」披露器补进对话流。
+ * 故此处只指**段名**，不断言"在系统提示里"——旧文案「规范见系统提示『写日记规范』」
+ * 在极简底座下是悬空引用（指向一个不存在的段落）。
+ * 票05：队列非空时追加一行「草稿队列 N 篇待批（最老 X 小时）」——把漏斗断裂
+ * 暴露到每次提醒；队列为空不追加（不显示误导数字，也不挤占原提醒信息）。
  */
-export function renderWriteNudge(reason: string, turn: number, digest: string, suggestedTags: string[]): string {
+export function renderWriteNudge(
+  reason: string,
+  turn: number,
+  digest: string,
+  suggestedTags: string[],
+  queue?: PendingQueueStats | null,
+): string {
   const tags = suggestedTags.length > 0 ? suggestedTags.join('、') : '（用 memo_tags 看词汇表后选）'
-  return [
+  const lines = [
     `[memo-river·写入节律] 记忆节律提醒，非新任务：${reason}，turn ${turn} 的进展尚未入河——「${digest}」`,
-    `现在正是写日记的时机：用 memo_write 落一篇，Tag 优先复用词汇表：${tags}。规范见系统提示「写日记规范」。`,
-  ].join('\n')
+    `现在正是写日记的时机：用 memo_write 落一篇，Tag 优先复用词汇表：${tags}。规范见「写日记规范」段。`,
+  ]
+  if (queue && queue.pending > 0) {
+    const age = queue.oldestAgeHours !== null ? `（最老 ${ageText(queue.oldestAgeHours)}）` : ''
+    lines.push(`草稿队列 ${queue.pending} 篇待批${age}——可提示用户处理（看草稿 / 批准 / 丢弃）。`)
+  }
+  return lines.join('\n')
 }

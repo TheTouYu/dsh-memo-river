@@ -18,6 +18,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Config as ConfigSchema } from './config.js'
 import type { Config } from './config.js'
+import { bucketQueueStats, type BucketQueueEntry } from './drafts.js'
 
 /** 可调键清单（面板按此渲染；扩键只加这里）。 */
 export interface TuningSpecItem {
@@ -149,9 +150,12 @@ export interface TuningSnapshot {
   preset: Record<string, number>
   session: Record<string, Record<string, number>>
   sessions: Array<{ sessionId: string; cwd: string | null }>
+  /** 票05：各桶草稿队列可见性（面板顶部常显，含 pending=0 的桶；只读 pending/ 实际文件）。
+   *  票06 扩展位：守护预审三态标记将作为每桶条目的额外字段挂进同一数组。 */
+  draftQueue: BucketQueueEntry[]
 }
 
-/** 面板读取：spec + 三层值 + 活跃会话清单。 */
+/** 面板读取：spec + 三层值 + 活跃会话清单 + 草稿队列读数。 */
 export function tuningSnapshot(
   config: Config,
   defaults: Record<string, number>,
@@ -165,6 +169,7 @@ export function tuningSnapshot(
     preset: { ...fileValues },
     session: Object.fromEntries(session),
     sessions: listSessions(),
+    draftQueue: bucketQueueStats(),
   }
 }
 
@@ -334,9 +339,22 @@ button:disabled{opacity:.5}
 .src.session{background:#3a2f2a;color:#f0b48f}
 #msg{margin-top:14px;font-size:13px;min-height:20px}
 .ok{color:#8fe3a1}.err{color:#f28f8f}
+h2{font-size:15px;margin:22px 0 6px}
+table.q{width:100%;border-collapse:collapse;margin:4px 0 10px;font-size:13px}
+table.q th{color:#8b93a1;font-weight:600;text-align:left;padding:5px 10px;border-bottom:1px solid #333845}
+table.q td{padding:5px 10px;border-bottom:1px solid #23262e}
+table.q td.n,table.q th.n{text-align:right;font-variant-numeric:tabular-nums}
+table.q tr.tot td{font-weight:700;border-bottom:2px solid #333845}
+.qb{display:inline-block;min-width:26px;text-align:center;border-radius:11px;padding:0 8px;font-weight:700}
+.qb.z{background:#23262e;color:#8b93a1}
+.qb.s{background:#4a3a20;color:#f0c48f}
+.qb.h{background:#4a2020;color:#f28f8f}
 </style></head><body>
 <h1>memo-river · 写入节律调参</h1>
 <div class="sub">改完即生效（无需重启）。预设级写入 tuning.json 对全工作区持久；会话级仅当前会话、随进程消亡——先在单会话试，好用了再固化。</div>
+<h2>草稿队列（各桶待批）</h2>
+<table class="q" id="queue"></table>
+<div class="hint">计数 = pending/ 目录实际 .md 文件数；队列空显示 0。可对模型说「看草稿 / 批准 / 丢弃」处理积压。</div>
 <div class="bar">
   <label>生效范围：
     <select id="scope"><option value="session">仅此会话</option><option value="preset">预设级（全工作区，落盘）</option></select>
@@ -349,6 +367,20 @@ button:disabled{opacity:.5}
 <script>
 const $=id=>document.getElementById(id);
 let SPEC=[],DEF={},PRE={},SESS={},SESSIONS=[];
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function ageTxt(h){if(h===null||h===undefined)return'—';if(h<1)return'&lt;1 小时';if(h<72)return Math.round(h)+' 小时';return Math.round(h/24)+' 天'}
+/* 票06 扩展位：守护预审三态标记将作为 b.state 挂在同一条目上——在这里给行尾加一列即可，计数列不动。 */
+function renderQueue(Q){
+  const tot=Q.reduce((a,b)=>a+(b.pending||0),0);
+  const rows=Q.length?Q.map(b=>{
+    const n=b.pending||0,cls=n===0?'z':(n<5?'s':'h');
+    return '<tr><td>'+esc(b.bucket)+' <span class="hint">'+esc(String(b.hash||'').slice(0,6))+'</span></td>'+
+      '<td class="n"><span class="qb '+cls+'">'+n+'</span></td>'+
+      '<td>'+ageTxt(b.oldestAgeHours)+'</td></tr>';
+  }).join(''):'<tr><td colspan="3" class="hint">（尚无工作区桶）</td></tr>';
+  $('queue').innerHTML='<tr><th>桶</th><th class="n">待批</th><th>最老年龄</th></tr>'+rows+
+    '<tr class="tot"><td>合计</td><td class="n">'+tot+'</td><td>—</td></tr>';
+}
 function srcOf(k){
   if(SESS[k]!==undefined)return['会话覆盖','session'];
   if(PRE[k]!==undefined)return['预设覆盖','preset'];
@@ -358,6 +390,7 @@ function valOf(k){return SESS[k]??PRE[k]??DEF[k]}
 async function load(){
   const d=await(await fetch('/memo-river/tuning',{cache:'no-store'})).json();
   SPEC=d.spec;DEF=d.defaults;PRE=d.preset;SESSIONS=d.sessions||[];
+  renderQueue(d.draftQueue||[]);
   SESS={};
   $('session').innerHTML='<option value="">（预设级，不选会话）</option>'+
     SESSIONS.map(s=>'<option value="'+s.sessionId+'">'+s.sessionId.slice(0,14)+'… '+(s.cwd||'').split('/').pop()+'</option>').join('');

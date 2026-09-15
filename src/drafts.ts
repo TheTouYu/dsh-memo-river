@@ -9,11 +9,87 @@
  *  · memo_discard 丢弃（移入 rejected/，不删文件，可追溯）
  * 批准/丢弃后文件分别移入 `approved/`、`rejected/`——队列即文件系统，天然可审计。
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import type { Config } from './config.js'
 import { memoRiverRoot, readJsonSafe } from './runtime.js'
 import { acquireWorkspace, type WorkspaceRuntime } from './workspace.js'
+
+/* ── 票05：草稿队列可见性（write-nudge 文案 + 调参面板共用的只读读数）──────────
+ * 「草稿漏斗断裂」（09-15 实测 preset-composer 33 篇 / memo-river 6 篇、批准 0）
+ * 的第一刀是把队列数字暴露到每天都看的地方。计数口径 = pending/ 目录实际 .md
+ * 文件数（解析成败不影响——坏文件躺在队列里同样是负担）；最老年龄按文件 mtime。 */
+
+/** 单桶待批队列的可见性数字。 */
+export interface PendingQueueStats {
+  /** pending/*.md 实际文件数。 */
+  pending: number
+  /** 最老草稿年龄（小时，按 mtime）；空队列为 null（消费方各自决定显示形态）。 */
+  oldestAgeHours: number | null
+}
+
+/** 数一个 pending 目录（只读、永不抛：读不到 = 空队列，不拖垮调用方）。 */
+export function pendingQueueStats(pendingDir: string, now = Date.now()): PendingQueueStats {
+  let names: string[]
+  try {
+    names = readdirSync(pendingDir)
+  } catch {
+    return { pending: 0, oldestAgeHours: null }
+  }
+  let count = 0
+  let oldest: number | null = null
+  for (const f of names) {
+    if (!f.endsWith('.md')) continue
+    count++
+    try {
+      const mtimeMs = statSync(join(pendingDir, f)).mtimeMs
+      if (oldest === null || mtimeMs < oldest) oldest = mtimeMs
+    } catch {
+      /* 文件竞态消失：计数仍算它，年龄取不到就跳过 */
+    }
+  }
+  return { pending: count, oldestAgeHours: oldest === null ? null : Math.max(0, (now - oldest) / 3_600_000) }
+}
+
+/**
+ * 面板行：一个桶的队列可见性。
+ * **票06 扩展形状**：守护预审三态标记（ok/warn/blocked 之类）将作为本对象的
+ * 额外字段挂在同一条目上，面板行按字段渲染新列——计数展示不写死形状。
+ */
+export interface BucketQueueEntry extends PendingQueueStats {
+  /** 工作区哈希（目录名）。 */
+  hash: string
+  /** 桶名（workspace.json 优先，缺省目录名）。 */
+  bucket: string
+  /** 工作区 cwd（manifest 缺失为 null）。 */
+  cwd: string | null
+}
+
+/** 全部桶的队列快照（面板顶部常显；含 pending=0 的桶；排序 pending 降序 → 桶名）。 */
+export function bucketQueueStats(now = Date.now()): BucketQueueEntry[] {
+  const out: BucketQueueEntry[] = []
+  let roots: string[]
+  try {
+    roots = readdirSync(memoRiverRoot(), { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => join(memoRiverRoot(), d.name))
+  } catch {
+    return out
+  }
+  for (const root of roots) {
+    // 工作区桶的判定：有 manifest / pending 目录 / 库文件任一即算（不漏空队列桶）。
+    if (!existsSync(join(root, 'workspace.json')) && !existsSync(join(root, 'pending')) && !existsSync(join(root, 'knowledge_base.sqlite'))) continue
+    const manifest = readJsonSafe<{ cwd?: string; bucket?: string }>(join(root, 'workspace.json'), {})
+    const stats = pendingQueueStats(join(root, 'pending'), now)
+    out.push({
+      hash: basename(root),
+      bucket: (typeof manifest.bucket === 'string' && manifest.bucket) || basename(root),
+      cwd: typeof manifest.cwd === 'string' ? manifest.cwd : null,
+      ...stats,
+    })
+  }
+  return out.sort((a, b) => b.pending - a.pending || a.bucket.localeCompare(b.bucket))
+}
 
 export interface DraftRecord {
   /** pending/*.md 绝对路径——批准/丢弃的句柄。 */
