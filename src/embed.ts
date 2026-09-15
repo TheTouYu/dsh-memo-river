@@ -23,6 +23,30 @@ export interface EmbedClientOptions {
   logger?: { warn(msg: string): void; info(msg: string): void }
 }
 
+/**
+ * 单次调用可覆盖项（票 01：注入路径短超时；票 03：写路径短超时 + 重试）。
+ * 同一客户端上按调用收紧预算——被动注入把查询向量 + 门控锚合批后用 ~3s 硬顶；
+ * 写路径（memo_write 族）传 WRITE_EMBED_OPTIONS（15s + 重试 1 次）。
+ */
+export interface EmbedCallOptions {
+  /** 覆盖构造时的 timeoutMs（缺省 = 用客户端默认）。 */
+  timeoutMs?: number
+  /** 失败重试次数（票 03；缺省 0 = 不重试）。立即重试、无退避——保住「超时×(1+retries)」的墙钟硬顶。 */
+  retries?: number
+}
+
+/**
+ * 票 03 写路径嵌入预算：单次尝试 15s + 失败重试 1 次 → 尾部硬顶 ~30s。
+ * 由头：09-15 实测 memo_write 离群 120s×2（60s 默认超时 × 串行两调用）——收紧到 15s
+ * 后最坏 15+15=30s 封顶，且仍失败时调用方（writeDiaryCore）明确报错返回、不悬挂。
+ */
+export const WRITE_EMBED_TIMEOUT_MS = 15_000
+export const WRITE_EMBED_RETRIES = 1
+export const WRITE_EMBED_OPTIONS: EmbedCallOptions = {
+  timeoutMs: WRITE_EMBED_TIMEOUT_MS,
+  retries: WRITE_EMBED_RETRIES,
+}
+
 const BATCH_SIZE = 32
 const CONCURRENCY = Number(process.env.TAG_VECTORIZE_CONCURRENCY) || 5
 
@@ -50,8 +74,9 @@ export class EmbedClient {
     return Boolean(this.options.apiUrl && this.options.apiKey)
   }
 
-  /** 文本 → 向量（含缓存）。任何失败都抛出，由调用方降级为「不注入 + 记日志」。 */
-  async embed(texts: readonly string[]): Promise<Float32Array[]> {
+  /** 文本 → 向量（含缓存）。任何失败都抛出，由调用方降级为「不注入 + 记日志」。
+   * callOpts：票 01 注入路径短超时 / 票 03 写路径短超时+重试；缺省保持原行为（60s、不重试）。 */
+  async embed(texts: readonly string[], callOpts?: EmbedCallOptions): Promise<Float32Array[]> {
     if (!this.configured) throw new Error('embed-not-configured (apiUrl/apiKey 为空)')
     const out: Array<Float32Array | undefined> = new Array(texts.length)
     const missing: string[] = []
@@ -80,7 +105,7 @@ export class EmbedClient {
       const workers = Array.from({ length: Math.min(CONCURRENCY, batches.length) }, async () => {
         while (cursor < batches.length) {
           const myIndex = cursor++
-          results[myIndex] = await this.requestBatch(batches[myIndex]!)
+          results[myIndex] = await this.requestWithRetry(batches[myIndex]!, callOpts)
         }
       })
       await Promise.all(workers)
@@ -103,7 +128,21 @@ export class EmbedClient {
     })
   }
 
-  private async requestBatch(batch: string[]): Promise<Float32Array[]> {
+  /** 票 03：按 callOpts.retries 立即重试（无退避，保住墙钟硬顶）；重试耗尽抛最后一次错误。 */
+  private async requestWithRetry(batch: string[], callOpts?: EmbedCallOptions): Promise<Float32Array[]> {
+    const retries = callOpts?.retries ?? 0
+    let lastErr: unknown
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        return await this.requestBatch(batch, callOpts?.timeoutMs)
+      } catch (e) {
+        lastErr = e
+      }
+    }
+    throw lastErr
+  }
+
+  private async requestBatch(batch: string[], timeoutMs?: number): Promise<Float32Array[]> {
     const url = `${this.options.apiUrl}/v1/embeddings`
     let response: Response
     try {
@@ -114,10 +153,15 @@ export class EmbedClient {
           Authorization: `Bearer ${this.options.apiKey}`,
         },
         body: JSON.stringify({ model: this.options.model, input: batch }),
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(timeoutMs ?? this.timeoutMs),
       })
     } catch (e) {
-      this.lastError = `embed-request-failed: ${String((e as Error)?.message ?? e)}`
+      // 票 01：AbortSignal.timeout 触发的是 DOMException(name='TimeoutError')，一旦被包成
+      // 普通 Error，name 就丢了——必须就地分类打标，调用方（recall）才能把 embed-timeout
+      // 与普通网络失败区分开落日志（inject-skip reason=embed-timeout）。
+      const msg = String((e as Error)?.message ?? e)
+      const timedOut = (e as Error)?.name === 'TimeoutError' || /aborted due to timeout/i.test(msg)
+      this.lastError = `${timedOut ? 'embed-timeout' : 'embed-request-failed'}: ${msg}`
       throw new Error(this.lastError)
     }
     if (!response.ok) {

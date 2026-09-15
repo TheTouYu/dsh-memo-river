@@ -22,7 +22,7 @@ import {
   workspaceFor,
   type DraftRecord,
 } from './drafts.js'
-import { cosine } from './embed.js'
+import { cosine, WRITE_EMBED_OPTIONS, WRITE_EMBED_RETRIES, WRITE_EMBED_TIMEOUT_MS } from './embed.js'
 import { formatHealth, healthReport, HUB_RATIO_LIMIT, KV_USAGE, readUsageLedger, recordUsage } from './health.js'
 import { excerpt } from './render.js'
 import { setTuning, tuningSnapshot, tuningDefaults, tuningValues } from './tuning.js'
@@ -154,7 +154,8 @@ function slugify(text: string): string {
 
 async function relatedDiaries(workspace: WorkspaceRuntime, content: string, limit = 3): Promise<string[]> {
   try {
-    const [vec] = await workspace.embed.embed([content.slice(0, 2000)])
+    // 票 03：写路径嵌入预算（15s + 重试 1 次）——回注查询不再共用注入路径的 60s 宽松超时。
+    const [vec] = await workspace.embed.embed([content.slice(0, 2000)], WRITE_EMBED_OPTIONS)
     if (!vec) return []
     const chunks = workspace.store.chunks().filter((c) => c.vector !== null)
     const owners = workspace.store.chunkOwners()
@@ -170,6 +171,33 @@ async function relatedDiaries(workspace: WorkspaceRuntime, content: string, limi
   } catch {
     return []
   }
+}
+
+/** ① 写前回注（票 03 抽公共）：旧 Tag 词汇表 + 语义相关旧日记 + 枢纽警告。
+ * write/update/merge 三入口此前各持一份复制拼装——口径漂移风险同 firstSentence/excerpt 同族教训，收敛为一份。
+ * 返回 Promise：调用方**不要 await**，直接作为 writeDiaryCore 的 preamble 传入——
+ * 回注嵌入（本函数内的 relatedDiaries）与 writeDiaryCore 启动的合批嵌入并行在飞。 */
+async function composeReinjection(
+  workspace: WorkspaceRuntime,
+  content: string,
+  lead: string[],
+  bucket: string,
+): Promise<string> {
+  const freq = workspace.store.tagFrequency()
+  const total = workspace.store.files().length
+  const reinjectTop = freq.slice(0, 30).map((t) => `${t.name}×${t.count}`).join(', ') || '(空库)'
+  const related = await relatedDiaries(workspace, content)
+  const pre = healthReport(workspace.store, bucket)
+  const hubWarn =
+    pre.hub && pre.hub.ratio >= HUB_RATIO_LIMIT
+      ? `⚠️ 枢纽警告：「${pre.hub.name}」已出现 ${pre.hub.count}/${total} 篇（≥1/3），再堆它会让直接锚泛化`
+      : `枢纽检查：当前最大 Tag 频次 ${pre.hub ? `${pre.hub.name}×${pre.hub.count}` : 'n/a'}（<1/3 ✅）`
+  return [
+    ...lead,
+    `【写前回注】旧 Tag 词汇表（top ${Math.min(30, freq.length)}）：${reinjectTop}`,
+    `【写前回注】语义相关旧日记：${related.length > 0 ? related.join(' / ') : '(无)'}`,
+    `【写前回注】${hubWarn}；当前连通分量 = ${pre.components}（判据 =1）`,
+  ].join('\n')
 }
 
 /* ────────────── memo_recall ────────────── */
@@ -240,8 +268,10 @@ export interface WriteDiaryInput {
   newTagReason: string
   /** 写入内容去重阈值（0=关；调用方从 config.write.dedupCosine 传入，核心默认 0.88）。 */
   dedupCosine?: number
-  /** 拒绝/成功报告的前置段（memo_write 传写前回注；memo_approve 传草稿出处；memo_update 传改写目标+回注）。 */
-  preamble: string
+  /** 拒绝/成功报告的前置段（memo_write 传写前回注；memo_approve 传草稿出处；memo_update 传改写目标+回注）。
+   * 票 03：允许传 Promise——write/update/merge 传 composeReinjection(...) 的**在飞** Promise，
+   * 让回注嵌入与 writeDiaryCore 的合批嵌入并行；memo_approve 仍传 string。 */
+  preamble: string | Promise<string>
   /** 改写模式（票 02）：按 D-id 定位目标，原路径重写、库内同路径 upsert（fileId 不变，
    *  使用台账足迹随之保留——同一篇记忆的刷新而非新记忆）。去重闸门自动豁免目标自身 chunk。 */
   updateOf?: { fileId: number; path: string }
@@ -266,9 +296,30 @@ export async function writeDiaryCore(
   input: WriteDiaryInput,
 ): Promise<WriteDiaryResult> {
   const logger: Logger = workspace.logger
-  const { content, preamble, toolName, date, bucket } = input
+  const { content, toolName, date, bucket } = input
   const tags = input.tags
   const healthLines: string[] = []
+
+  /* 票 03：前置纯计算提前（newTags / full 的归一化不依赖任何 I/O）——让写侧合批嵌入
+   * 立即启动，与调用方 preamble Promise 里的回注嵌入并行在飞。 */
+  const existing = workspace.store.tags()
+  const existingNames = new Set(existing.map((t) => t.name))
+  const newTags = tags.filter((t) => !existingNames.has(t))
+  const title = input.title || titleFromContent(content, `${date} 未命名`)
+  const body = stripTagLine(content)
+  const full = `# ${title}\n\n${body}\n\nTag: ${tags.join(', ')}\n`
+  const dedupCosine = input.dedupCosine ?? 0.95 // 定标见 config.ts WriteConfig 注释
+
+  /* 票 03 合批：原 newTags（同义漂移）/ full（去重+chunk 向量）/ tagVectors 三处串行单条 embed
+   * → 一次批量请求 [...newTags, full]，写路径预算 15s + 失败重试 1 次（尾部硬顶 ~30s）。
+   * 向量三用：③ 同义漂移检查 / ④.5 内容去重与 chunk 向量 / 新 Tag 向量（原 :396 调用点整个消掉）。 */
+  const writeEmbed = workspace.embed.configured
+    ? workspace.embed
+        .embed([...newTags, full], WRITE_EMBED_OPTIONS)
+        .then((v) => ({ ok: true as const, v }), (e: unknown) => ({ ok: false as const, e }))
+    : null
+
+  const preamble = await input.preamble // 回注嵌入此刻在飞；这里只是等前置段拼好
   const reject = (reason: string, extra = ''): WriteDiaryResult => ({
     status: 'rejected',
     report: `${preamble}\n\n❌ ${toolName} 被拒绝：${reason}${extra ? `\n${extra}` : ''}\n（拒绝即不落库；请修正后重试。）`,
@@ -291,10 +342,28 @@ export async function writeDiaryCore(
   const longTag = tags.find((t) => [...t].length > TAG_NAME_MAX)
   if (longTag) return reject(`tag-too-long：Tag 名 ≤${TAG_NAME_MAX} 字`, `「${longTag}」为 ${[...longTag].length} 字`)
 
-  /* ③ 新 Tag 闸门 + 同义漂移检查 */
-  const existing = workspace.store.tags()
-  const existingNames = new Set(existing.map((t) => t.name))
-  const newTags = tags.filter((t) => !existingNames.has(t))
+  /* 票 03 嵌入预算裁决：配置了嵌入但 15s×(1+重试) 后仍失败 → 整个写入以明确错误返回、不悬挂。
+   * 不落无向量日记：chunk 向量为空的篇永不可 KNN 召回，旧文案许诺的「守护循环补算」并无对应代码
+   * （grep daemon 无补算路径），且去重/同义闸门一旦空转就是复读机语料的污染入口（D10 教训）。
+   * 未配置嵌入的环境不受影响——仍走原「跳过检查、向量留空」的离线路径。 */
+  let writeVectors: Float32Array[] | null = null
+  if (writeEmbed) {
+    const r = await writeEmbed
+    if (r.ok) {
+      writeVectors = r.v
+    } else {
+      const err = String((r.e as Error)?.message ?? r.e)
+      logger.warn(`${toolName} bucket=${bucket} rejected=embed-unavailable err=${err}`)
+      return reject(
+        `embed-unavailable：写路径嵌入在 ${WRITE_EMBED_TIMEOUT_MS / 1000}s 预算内重试 ${WRITE_EMBED_RETRIES} 次后仍失败`,
+        `${err}\n本次写入已中止（未落库）；嵌入服务恢复后重试即可。`,
+      )
+    }
+  }
+  const fullVector: Float32Array | null = writeVectors ? (writeVectors[newTags.length] ?? null) : null
+  const tagVectors: Float32Array[] = writeVectors ? newTags.map((_, i) => writeVectors![i]!) : []
+
+  /* ③ 新 Tag 闸门 + 同义漂移检查（向量来自合批结果——同文本同端点，判定与串行版一致） */
   if (newTags.length > 0) {
     if (!input.newTagReason) {
       return reject(
@@ -304,25 +373,20 @@ export async function writeDiaryCore(
     }
     // 同义漂移：新 Tag 与既有 Tag 向量余弦 > 0.92 → 要求复用
     if (workspace.embed.configured) {
-      try {
-        const vectors = await workspace.embed.embed(newTags)
-        for (let i = 0; i < newTags.length; i++) {
-          const vec = vectors[i]!
-          let best: { name: string; score: number } | null = null
-          for (const tag of existing) {
-            if (!tag.vector) continue
-            const score = cosine(vec, tag.vector.subarray(0, workspace.resolved.dimension))
-            if (!best || score > best.score) best = { name: tag.name, score }
-          }
-          if (best && best.score > SYNONYM_COSINE) {
-            return reject(
-              `synonym-of-existing-tag：新 Tag「${newTags[i]}」与既有 Tag「${best.name}」余弦 ${best.score.toFixed(4)} > ${SYNONYM_COSINE}`,
-              '同义堆砌会造成 Tag 漂移——请复用既有 Tag（§1 语料治理）。',
-            )
-          }
+      for (let i = 0; i < newTags.length; i++) {
+        const vec = tagVectors[i]!
+        let best: { name: string; score: number } | null = null
+        for (const tag of existing) {
+          if (!tag.vector) continue
+          const score = cosine(vec, tag.vector.subarray(0, workspace.resolved.dimension))
+          if (!best || score > best.score) best = { name: tag.name, score }
         }
-      } catch (e) {
-        healthLines.push(`· 同义漂移检查跳过（嵌入不可用）：${String((e as Error)?.message ?? e)}`)
+        if (best && best.score > SYNONYM_COSINE) {
+          return reject(
+            `synonym-of-existing-tag：新 Tag「${newTags[i]}」与既有 Tag「${best.name}」余弦 ${best.score.toFixed(4)} > ${SYNONYM_COSINE}`,
+            '同义堆砌会造成 Tag 漂移——请复用既有 Tag（§1 语料治理）。',
+          )
+        }
       }
     } else {
       healthLines.push('· 同义漂移检查跳过（嵌入未配置）')
@@ -331,24 +395,11 @@ export async function writeDiaryCore(
 
   /* ④ 写入（pre 必须在写入前取——⑤ 的「体检增量」是前后对比） */
   const pre = healthReport(workspace.store, bucket)
-  const title = input.title || titleFromContent(content, `${date} 未命名`)
-  const body = stripTagLine(content)
-  const full = `# ${title}\n\n${body}\n\nTag: ${tags.join(', ')}\n`
   const slug = slugify(title)
 
   /* ④.5 内容去重闸门（DESIGN §7.1 步 3.5）：新日记 vs 本桶既有 chunk 的最大余弦。
    * 写侧对称物 of inject.dedupeSelection——读侧防重复注入，写侧防重复入库。
-   * 嵌入在此算一次，写入库时复用（不再二次 embed full）。 */
-  const dedupCosine = input.dedupCosine ?? 0.95 // 定标见 config.ts WriteConfig 注释
-  let fullVector: Float32Array | null = null
-  if (workspace.embed.configured) {
-    try {
-      const [vec] = await workspace.embed.embed([full])
-      fullVector = vec ?? null
-    } catch (e) {
-      healthLines.push(`· 内容去重跳过（嵌入不可用）：${String((e as Error)?.message ?? e)}`)
-    }
-  }
+   * 票 03：嵌入已在合批里算好（fullVector），此处不再二次 embed full。 */
   if (dedupCosine > 0 && fullVector) {
     const bucketChunks = workspace.store.chunks(bucket)
     const fileById = new Map(workspace.store.files(bucket).map((f) => [f.id, f.path]))
@@ -390,14 +441,7 @@ export async function writeDiaryCore(
   }
 
   const chunkVector: Float32Array | null = fullVector
-  let tagVectors: Float32Array[] = []
-  if (newTags.length > 0) {
-    try {
-      tagVectors = await workspace.embed.embed(newTags)
-    } catch (e) {
-      healthLines.push(`· 嵌入失败（已入库但向量为空，需守护循环补算）：${String((e as Error)?.message ?? e)}`)
-    }
-  }
+  /* 票 03：tagVectors 已在合批结果里（writeVectors 前段）——原 :396 二次 embed 调用点删除。 */
 
   const tagIds: number[] = []
   tags.forEach((name, i) => {
@@ -650,21 +694,9 @@ export function installTools(
         const date = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : new Date().toISOString().slice(0, 10)
         const newTagReason = typeof args.newTagReason === 'string' ? args.newTagReason.trim() : ''
 
-        /* ① 回注：旧 Tag 词汇表 + 相关旧日记 + 枢纽警告 */
-        const freq = workspace.store.tagFrequency()
-        const total = workspace.store.files().length
-        const reinjectTop = freq.slice(0, 30).map((t) => `${t.name}×${t.count}`).join(', ') || '(空库)'
-        const related = await relatedDiaries(workspace, content)
-        const pre = healthReport(workspace.store, bucket)
-        const hubWarn =
-          pre.hub && pre.hub.ratio >= HUB_RATIO_LIMIT
-            ? `⚠️ 枢纽警告：「${pre.hub.name}」已出现 ${pre.hub.count}/${total} 篇（≥1/3），再堆它会让直接锚泛化`
-            : `枢纽检查：当前最大 Tag 频次 ${pre.hub ? `${pre.hub.name}×${pre.hub.count}` : 'n/a'}（<1/3 ✅）`
-        const reinjection = [
-          `【写前回注】旧 Tag 词汇表（top ${Math.min(30, freq.length)}）：${reinjectTop}`,
-          `【写前回注】语义相关旧日记：${related.length > 0 ? related.join(' / ') : '(无)'}`,
-          `【写前回注】${hubWarn}；当前连通分量 = ${pre.components}（判据 =1）`,
-        ].join('\n')
+        /* ① 回注：旧 Tag 词汇表 + 相关旧日记 + 枢纽警告（票 03：传 Promise 不 await——
+         *    回注嵌入与 writeDiaryCore 的合批嵌入并行在飞，墙钟 ≈ 一次 RTT）。 */
+        const reinjection = composeReinjection(workspace, content, [], bucket)
 
         /* ②–⑤ 校验 + 闸门 + 写入 + 体检：与 memo_approve 共用同一份核心（writeDiaryCore），
          *    闸门口径只此一份——两个入口漂移 = 静默 bug（firstSentence/excerpt 同族教训）。 */
@@ -752,22 +784,13 @@ export function installTools(
           target = hits[0]!
         }
 
-        /* ① 回注（与 memo_write 同构）+ 改写目标明示 */
-        const freq = workspace.store.tagFrequency()
-        const total = workspace.store.files().length
-        const reinjectTop = freq.slice(0, 30).map((t) => `${t.name}×${t.count}`).join(', ') || '(空库)'
-        const related = await relatedDiaries(workspace, content)
-        const pre = healthReport(workspace.store, bucket)
-        const hubWarn =
-          pre.hub && pre.hub.ratio >= HUB_RATIO_LIMIT
-            ? `⚠️ 枢纽警告：「${pre.hub.name}」已出现 ${pre.hub.count}/${total} 篇（≥1/3），再堆它会让直接锚泛化`
-            : `枢纽检查：当前最大 Tag 频次 ${pre.hub ? `${pre.hub.name}×${pre.hub.count}` : 'n/a'}（<1/3 ✅）`
-        const reinjection = [
-          `【改写目标】D${target.id}《${chunkTitle.get(target.id) ?? target.path}》——原路径重写，台账足迹保留`,
-          `【写前回注】旧 Tag 词汇表（top ${Math.min(30, freq.length)}）：${reinjectTop}`,
-          `【写前回注】语义相关旧日记：${related.length > 0 ? related.join(' / ') : '(无)'}`,
-          `【写前回注】${hubWarn}；当前连通分量 = ${pre.components}（判据 =1）`,
-        ].join('\n')
+        /* ① 回注（与 memo_write 同构）+ 改写目标明示（票 03：Promise 传入，嵌入并行） */
+        const reinjection = composeReinjection(
+          workspace,
+          content,
+          [`【改写目标】D${target.id}《${chunkTitle.get(target.id) ?? target.path}》——原路径重写，台账足迹保留`],
+          bucket,
+        )
 
         /* ②–⑤ 与 memo_write/memo_approve 同一份核心（writeDiaryCore），闸门口径只此一份 */
         const fromArg = Array.isArray(args.tags) ? (args.tags as unknown[]).map((t) => String(t).trim()).filter(Boolean) : []
@@ -855,24 +878,17 @@ export function installTools(
           full2 = /^Tag:/m.test(content) ? content.replace(/^(Tag:.*)$/m, `${prov}\n$1`) : `${content}\n\n${prov}`
         }
 
-        /* ① 回注（与 memo_write 同构）+ 合并源明示 */
-        const freq = workspace.store.tagFrequency()
-        const total = workspace.store.files().length
-        const reinjectTop = freq.slice(0, 30).map((t) => `${t.name}×${t.count}`).join(', ') || '(空库)'
-        const related = await relatedDiaries(workspace, full2)
-        const pre = healthReport(workspace.store, bucket)
-        const hubWarn =
-          pre.hub && pre.hub.ratio >= HUB_RATIO_LIMIT
-            ? `⚠️ 枢纽警告：「${pre.hub.name}」已出现 ${pre.hub.count}/${total} 篇（≥1/3），再堆它会让直接锚泛化`
-            : `枢纽检查：当前最大 Tag 频次 ${pre.hub ? `${pre.hub.name}×${pre.hub.count}` : 'n/a'}（<1/3 ✅）`
-        const reinjection = [
-          keepRow
-            ? `【合并源】${srcs.map((f) => `D${f.id}《${titleOf(f)}》`).join(' + ')} → 并入 D${keepRow.id}《${titleOf(keepRow)}》（保留篇身份/台账足迹）`
-            : `【合并源】${srcs.map((f) => `D${f.id}《${titleOf(f)}》`).join(' + ')} → 新篇（全部源归档退役）`,
-          `【写前回注】旧 Tag 词汇表（top ${Math.min(30, freq.length)}）：${reinjectTop}`,
-          `【写前回注】语义相关旧日记：${related.length > 0 ? related.join(' / ') : '(无)'}`,
-          `【写前回注】${hubWarn}；当前连通分量 = ${pre.components}（判据 =1）`,
-        ].join('\n')
+        /* ① 回注（与 memo_write 同构）+ 合并源明示（票 03：Promise 传入，嵌入并行） */
+        const reinjection = composeReinjection(
+          workspace,
+          full2,
+          [
+            keepRow
+              ? `【合并源】${srcs.map((f) => `D${f.id}《${titleOf(f)}》`).join(' + ')} → 并入 D${keepRow.id}《${titleOf(keepRow)}》（保留篇身份/台账足迹）`
+              : `【合并源】${srcs.map((f) => `D${f.id}《${titleOf(f)}》`).join(' + ')} → 新篇（全部源归档退役）`,
+          ],
+          bucket,
+        )
 
         /* ②–⑤ 同一份核心；豁免集 = 全部声明源（未声明的第三篇近重复仍会被拒） */
         const fromArg = Array.isArray(args.tags) ? (args.tags as unknown[]).map((t) => String(t).trim()).filter(Boolean) : []
