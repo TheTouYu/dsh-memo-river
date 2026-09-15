@@ -10,7 +10,7 @@
  *
  * 用法：node scripts/acceptance.mjs
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -1776,6 +1776,164 @@ hr('#35 草稿队列可见性：nudge 带队列数与最老年龄；面板常显
   h35.dispose()
   rmSync(NQ_CWD, { recursive: true, force: true })
   rmSync(nq.root, { recursive: true, force: true })
+}
+
+/* ══════════════════════ #36 票06 守护循环草稿预审三态 ══════════════════════ */
+
+hr('#36 守护预审三态：垃圾稳定「建议丢弃」；Tag 边界「需人工」；可批「可一键批」；纯只读不代批（票06）')
+{
+  const { WorkspaceDaemon } = await import('../lib/daemon.js')
+  const { tuningSnapshot, serveTuningPanel } = await import('../lib/tuning.js')
+  const { readDraftStatus, draftStatusPath } = await import('../lib/drafts.js')
+  const PC_CWD = join(tmpdir(), `memo-river-precheck-${process.pid}`)
+  const pc = workspacePaths(PC_CWD, '预审测试')
+  rmSync(PC_CWD, { recursive: true, force: true })
+  rmSync(pc.root, { recursive: true, force: true })
+  mkdirSync(PC_CWD, { recursive: true })
+  const ws36 = acquireWorkspace(PC_CWD, makeConfig({ bucket: '预审测试' }))
+  const byName = (n) => h.registered.tools.find((t) => (t.name ?? t.definition?.name) === n)
+  const wTool = byName('memo_write')
+  const wExec = wTool.execute.bind(wTool)
+  const dTool = byName('memo_drafts')
+  const dExec = dTool.execute.bind(dTool)
+  const aTool = byName('memo_approve')
+  const aExec = aTool.execute.bind(aTool)
+  const ctx36 = { agent: createAgent('sess-precheck', PC_CWD, []) }
+
+  /* 嵌入桩（近重复路径专用）：正文含「孪生」→ 固定基向量；其余按 sha256 造近似正交向量。
+   * 种子日记正文带「孪生」→ 其 chunk 向量 = twinVec；孪生样本草稿合成全文含「孪生」→
+   * 余弦 1.0 > 0.95 踩响闸门；可批样本 → hashVec，与 twinVec 余弦 |cos| ≤ ~0.31，放行。 */
+  const dim36 = ws36.resolved.dimension
+  const twinVec = new Float32Array(dim36)
+  twinVec[0] = 1
+  const hashVec = (text) => {
+    const dg = createHash('sha256').update(text).digest()
+    const v = new Float32Array(dim36)
+    for (let i = 0; i < dg.length; i++) v[i] = dg[i] / 127.5 - 1
+    return v
+  }
+  let embedCalls = 0
+  ws36.embed.embed = async (texts) => {
+    embedCalls += 1
+    return texts.map((t) => (t.includes('孪生') ? twinVec : hashVec(t)))
+  }
+  Object.defineProperty(ws36.embed, 'configured', { get: () => true, configurable: true })
+
+  /* ① 种子词汇（3 个可复用 Tag）+ 近重复锚（chunk 向量 = twinVec） */
+  const seed36 = await wExec(
+    {
+      content: '# 种子：预审基线\n\n结论：近重复比对的孪生锚，正文提及孪生标记以命中桩向量。\n\nTag: 预审渲染, 预审卡顿, 预审复盘',
+      newTagReason: '预审测试空库，三概念首引',
+    },
+    ctx36,
+  )
+  const seedOk = seed36.includes('✅ 已写入')
+
+  /* ② 四类样本草稿（junk 是 D10 红线样本：空用户+空助手，但 Tag 够 3 个——机械批准时代它会入库污染） */
+  const draftBody36 = (turn, user, assistant, tags) =>
+    [
+      '# 候选草稿（等确认，未入库）',
+      '',
+      `- 会话：session-precheck-${turn}`,
+      `- 回合：${turn} @ 2026-09-15T0${turn}:00:00.000Z`,
+      `- 桶：${ws36.paths.bucket}`,
+      '',
+      '## 本轮用户',
+      user,
+      '',
+      '## 本轮助手',
+      assistant,
+      '',
+      '## 建议 Tag（来自本轮被动召回的 matchedTags，须经 memo_tags 复核后复用）',
+      tags,
+      '',
+      '## 相关旧日记',
+      '(无)',
+      '',
+      '> 本文件是**草稿**：确认后用 memo_write 显式入库（会走 Tag 校验与枢纽闸门）。',
+    ].join('\n')
+  mkdirSync(pc.pendingDir, { recursive: true })
+  const P = {
+    ok: join(pc.pendingDir, '2026-09-15-可批样本-t10.md'),
+    bnd: join(pc.pendingDir, '2026-09-15-边界样本-t11.md'),
+    junk: join(pc.pendingDir, '2026-09-15-垃圾样本-t12.md'),
+    twin: join(pc.pendingDir, '2026-09-15-孪生样本-t13.md'),
+  }
+  writeFileSync(P.ok, draftBody36(10, '预审怎么分级', '结论：垃圾丢、Tag 不足人工、其余看过近重复再放行。', '预审渲染, 预审卡顿, 预审复盘'))
+  writeFileSync(P.bnd, draftBody36(11, '边界样本问一句', '结论：恰好两个可复用 Tag。', '预审渲染, 预审卡顿'))
+  writeFileSync(P.junk, draftBody36(12, '', '', '预审渲染, 预审卡顿, 预审复盘'))
+  writeFileSync(P.twin, draftBody36(13, '孪生问题再问一遍', '结论：与种子同途的孪生复述，应当被指认。', '预审渲染, 预审卡顿, 预审复盘'))
+  writeFileSync(join(pc.pendingDir, '孤儿检验.md.status.json'), '{"state":"ok"}\n') // 孤儿状态文件：对应 .md 不存在 → 本轮被清扫
+
+  /* 守护轮前的读数：4 篇全部 unchecked；快照 .md 字节/mtime/库计数做只读对照基线 */
+  const snapPre = tuningSnapshot(config, {}, () => []).draftQueue.find((b) => b.hash === pc.hash)
+  const uncheckedOk = snapPre?.precheck.unchecked === 4 && snapPre?.precheck.ok === 0
+  const bytesBefore = Object.fromEntries(Object.entries(P).map(([k, p]) => [k, readFileSync(p, 'utf8')]))
+  const mtimesBefore = Object.fromEntries(Object.entries(P).map(([k, p]) => [k, statSync(p).mtimeMs]))
+  const countsBefore = JSON.stringify(ws36.store.counts())
+
+  /* ③ 守护轮 ×2：落伴随 .status.json、随轮刷新、判定稳定（垃圾两轮都建议丢弃） */
+  const logs36 = []
+  const daemon36 = new WorkspaceDaemon({
+    config: makeConfig({ bucket: '预审测试' }),
+    workspace: ws36,
+    log: (_lv, m) => logs36.push(m),
+    setInterval: () => () => {},
+    takeDrafts: () => [],
+  })
+  const round1 = await daemon36.runOnce()
+  const round2 = await daemon36.runOnce()
+  const st = Object.fromEntries(Object.entries(P).map(([k, p]) => [k, readDraftStatus(p)]))
+  const statesOk =
+    round1.ok && round2.ok && st.ok?.state === 'ok' && st.bnd?.state === 'manual' && st.junk?.state === 'discard' && st.twin?.state === 'manual'
+  const junkStable = st.junk?.state === 'discard' && st.junk.reason.includes('空用户+空助手')
+  const twinReason = st.twin?.nearDup && st.twin.nearDup.score > 0.95 && st.twin.reason.includes('近重复')
+  const roundFieldOk = JSON.stringify(round1.draftPrecheck) === JSON.stringify({ ok: 1, manual: 2, discard: 1, failures: 0 }) && JSON.stringify(round2.draftPrecheck) === JSON.stringify(round1.draftPrecheck)
+  const logLineOk = logs36.some((m) => m.includes('draft-precheck') && m.includes('ok=1') && m.includes('manual=2') && m.includes('discard=1'))
+  const sweepOk = !existsSync(join(pc.pendingDir, '孤儿检验.md.status.json'))
+
+  /* ④ 只读红线：.md 字节/mtime 不动、库计数不变（不写库/不改正文/不动体检资产） */
+  const readonlyOk =
+    Object.entries(P).every(([k, p]) => readFileSync(p, 'utf8') === bytesBefore[k] && statSync(p).mtimeMs === mtimesBefore[k]) &&
+    JSON.stringify(ws36.store.counts()) === countsBefore
+
+  /* ⑤ 面板/草稿列表的三态分布展示 */
+  const snapPost = tuningSnapshot(config, {}, () => []).draftQueue.find((b) => b.hash === pc.hash)
+  const entryOk = snapPost?.pending === 4 && JSON.stringify(snapPost?.precheck) === JSON.stringify({ ok: 1, manual: 2, discard: 1, unchecked: 0 })
+  let html36 = ''
+  serveTuningPanel({ setHeader() {}, end(b) { html36 = String(b ?? '') } })
+  const htmlOk = html36.includes('id="queue"') && html36.includes('预审三态')
+  const drafts36 = String(await dExec({ all: true, limit: 200 }, ctx36))
+  const draftsOk = drafts36.includes('预审分布') && drafts36.includes('[可一键批]') && drafts36.includes('[建议丢弃]') && drafts36.includes('[需人工]') && drafts36.includes('垃圾样本')
+
+  /* ⑥ 出队带走伴随状态文件：approve 可批样本 → approved/ 同进 .md + .status.json，队列读数联动 */
+  const appr36 = String(await aExec({ ids: ['可批样本'] }, ctx36))
+  const approvedDir = join(pc.root, 'approved')
+  const moveOk =
+    existsSync(join(approvedDir, '2026-09-15-可批样本-t10.md')) &&
+    existsSync(join(approvedDir, '2026-09-15-可批样本-t10.md.status.json')) &&
+    !existsSync(P.ok) &&
+    !existsSync(draftStatusPath(P.ok)) &&
+    !appr36.includes('全部跳过')
+  const snapAfter = tuningSnapshot(config, {}, () => []).draftQueue.find((b) => b.hash === pc.hash)
+  const afterOk = snapAfter?.pending === 3 && snapAfter?.precheck.ok === 0 && snapAfter?.precheck.manual === 2 && snapAfter?.precheck.discard === 1
+
+  check(
+    36,
+    '守护预审三态：discard 稳定/边界 manual/可批 ok/近重复 manual；纯只读；面板+列表+出队联动',
+    seedOk && statesOk && junkStable && !!twinReason && roundFieldOk && logLineOk && sweepOk && readonlyOk && uncheckedOk && entryOk && htmlOk && draftsOk && moveOk && afterOk,
+    [
+      `(a) 三态判定=${statesOk ? '✅ ok→ok、2Tag→manual、junk→discard、孪生→manual' : `❌ ${JSON.stringify(Object.fromEntries(Object.entries(st).map(([k, v]) => [k, v?.state ?? null])))}`}`,
+      `(b) D10 红线（垃圾稳定丢弃，Tag 够也拦）=${junkStable ? `✅ ${st.junk?.reason.slice(0, 40)}…` : `❌ ${JSON.stringify(st.junk)}`}`,
+      `(c) 近重复指认=${twinReason ? `✅ score=${st.twin?.nearDup?.score.toFixed(4)} twin=${st.twin?.nearDup?.path.slice(-40)}` : `❌ ${JSON.stringify(st.twin)}`}`,
+      `(d) GuardianRound/日志=${roundFieldOk && logLineOk ? `✅ ${JSON.stringify(round1.draftPrecheck)}` : `❌ ${JSON.stringify(round1.draftPrecheck)}`}（嵌入批调用=${embedCalls} 次）`,
+      `(e) 只读红线（.md 字节+mtime+库计数不变）=${readonlyOk ? '✅' : '❌'}；孤儿清扫=${sweepOk ? '✅' : '❌'}；守护前 unchecked=${uncheckedOk ? '✅ 4/4' : `❌ ${JSON.stringify(snapPre?.precheck)}`}`,
+      `(f) 队列读数=${entryOk ? '✅ {ok:1,manual:2,discard:1,unchecked:0}' : `❌ ${JSON.stringify(snapPost?.precheck)}`}；面板三态列=${htmlOk ? '✅' : '❌'}；memo_drafts 三态=${draftsOk ? '✅' : '❌'}`,
+      `(g) 出队联动=${moveOk && afterOk ? `✅ approved/ 同进 .md+.status.json；队列余 pending=${snapAfter?.pending}（ok=0/manual=2/discard=1）` : `❌ move=${moveOk} after=${JSON.stringify(snapAfter?.precheck)}`}；批准回报头：${appr36.split('\n')[0]?.slice(0, 60)}`,
+    ],
+  )
+  rmSync(PC_CWD, { recursive: true, force: true })
+  rmSync(pc.root, { recursive: true, force: true })
 }
 
 /* ══════════════════════ 汇总 ══════════════════════ */

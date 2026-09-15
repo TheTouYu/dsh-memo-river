@@ -349,12 +349,18 @@ table.q tr.tot td{font-weight:700;border-bottom:2px solid #333845}
 .qb.z{background:#23262e;color:#8b93a1}
 .qb.s{background:#4a3a20;color:#f0c48f}
 .qb.h{background:#4a2020;color:#f28f8f}
+.pk{display:inline-block;min-width:22px;text-align:center;border-radius:10px;padding:0 7px;margin-left:4px;font-weight:700;font-size:12px}
+.pk.ok{background:#2a3a2f;color:#8fe3a1}
+.pk.manual{background:#4a3a20;color:#f0c48f}
+.pk.discard{background:#4a2020;color:#f28f8f}
+.pk.unchecked{background:#23262e;color:#8b93a1}
 </style></head><body>
 <h1>memo-river · 写入节律调参</h1>
 <div class="sub">改完即生效（无需重启）。预设级写入 tuning.json 对全工作区持久；会话级仅当前会话、随进程消亡——先在单会话试，好用了再固化。</div>
 <h2>草稿队列（各桶待批）</h2>
 <table class="q" id="queue"></table>
 <div class="hint">计数 = pending/ 目录实际 .md 文件数；队列空显示 0。可对模型说「看草稿 / 批准 / 丢弃」处理积压。</div>
+<div class="hint">预审三态（票06）：绿 <b>批</b>=可一键批 / 黄 <b>人</b>=需人工 / 红 <b>丢</b>=建议丢弃——守护循环只读预审（伴随 .status.json，随守护轮刷新），绝不代批；灰 <b>?</b>=尚未审到。</div>
 <div class="bar">
   <label>生效范围：
     <select id="scope"><option value="session">仅此会话</option><option value="preset">预设级（全工作区，落盘）</option></select>
@@ -369,17 +375,29 @@ const $=id=>document.getElementById(id);
 let SPEC=[],DEF={},PRE={},SESS={},SESSIONS=[];
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function ageTxt(h){if(h===null||h===undefined)return'—';if(h<1)return'&lt;1 小时';if(h<72)return Math.round(h)+' 小时';return Math.round(h/24)+' 天'}
-/* 票06 扩展位：守护预审三态标记将作为 b.state 挂在同一条目上——在这里给行尾加一列即可，计数列不动。 */
+/* 票06：预审三态列（ok/manual/discard/unchecked，读快照里的 precheck 计数）。 */
+function pcBadges(p){
+  if(!p)return'<span class="hint">—</span>';
+  const out=[];
+  if(p.ok)out.push('<span class="pk ok" title="可一键批">批'+p.ok+'</span>');
+  if(p.manual)out.push('<span class="pk manual" title="需人工">人'+p.manual+'</span>');
+  if(p.discard)out.push('<span class="pk discard" title="建议丢弃">丢'+p.discard+'</span>');
+  if(p.unchecked)out.push('<span class="pk unchecked" title="尚未审到">?'+p.unchecked+'</span>');
+  return out.join('')||'<span class="hint">—</span>';
+}
 function renderQueue(Q){
   const tot=Q.reduce((a,b)=>a+(b.pending||0),0);
+  const pcTot={ok:0,manual:0,discard:0,unchecked:0};
+  Q.forEach(b=>{const p=b.precheck||{};['ok','manual','discard','unchecked'].forEach(k=>pcTot[k]+=p[k]||0)});
   const rows=Q.length?Q.map(b=>{
     const n=b.pending||0,cls=n===0?'z':(n<5?'s':'h');
     return '<tr><td>'+esc(b.bucket)+' <span class="hint">'+esc(String(b.hash||'').slice(0,6))+'</span></td>'+
       '<td class="n"><span class="qb '+cls+'">'+n+'</span></td>'+
-      '<td>'+ageTxt(b.oldestAgeHours)+'</td></tr>';
-  }).join(''):'<tr><td colspan="3" class="hint">（尚无工作区桶）</td></tr>';
-  $('queue').innerHTML='<tr><th>桶</th><th class="n">待批</th><th>最老年龄</th></tr>'+rows+
-    '<tr class="tot"><td>合计</td><td class="n">'+tot+'</td><td>—</td></tr>';
+      '<td>'+ageTxt(b.oldestAgeHours)+'</td>'+
+      '<td class="n">'+((b.pending||0)>0?pcBadges(b.precheck):'<span class="hint">—</span>')+'</td></tr>';
+  }).join(''):'<tr><td colspan="4" class="hint">（尚无工作区桶）</td></tr>';
+  $('queue').innerHTML='<tr><th>桶</th><th class="n">待批</th><th>最老年龄</th><th class="n">预审</th></tr>'+rows+
+    '<tr class="tot"><td>合计</td><td class="n">'+tot+'</td><td>—</td><td class="n">'+pcBadges(tot.ok+tot.manual+tot.discard+tot.unchecked>0?pcTot:null)+'</td></tr>';
 }
 function srcOf(k){
   if(SESS[k]!==undefined)return['会话覆盖','session'];

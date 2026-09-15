@@ -4,12 +4,15 @@
  * ① 资产重建：比对 `artifactSig`，不一致或不存在 → `rebuildMemoArtifact`（失败保留上一代）
  * ② 体检：跑 §7.3 四项，写日志到 `<workspace>/health.log`；超阈值告警
  * ③ 草稿：把 `agent/turn-stopping` 收集的回合摘要写成 `pending/<date>-<slug>.md`（**等确认，不自动入库**）
+ * ③b 票06 预审：对 pending/ 只读三态标记（可一键批/需人工/建议丢弃，伴随 .status.json；
+ *     垃圾判定先于 Tag 判定；**绝不代批**——D10 机械批准污染教训）
  * ④ 节流与退避：默认 15 分钟一轮；连续失败指数退避；每轮耗时与结果写日志
  */
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Config } from './config.js'
 import { candidateReportPath, writeCandidateReport } from './consolidation.js'
+import { precheckDrafts, type PrecheckSummary } from './drafts.js'
 import { formatHealth, healthReport } from './health.js'
 import { excerpt } from './render.js'
 import type { PendingDraft } from './session.js'
@@ -26,6 +29,8 @@ export interface GuardianRound {
   draftsWritten: number
   /** 票 04：本轮合并候选数（null=检测关闭/空库无从判定；-1=空库）。 */
   mergeCandidates: number | null
+  /** 票 06：草稿预审三态计数（null=本轮未跑：maintenance.drafts 关闭或预审前守护轮已失败）。 */
+  draftPrecheck: PrecheckSummary | null
   error: string | null
   nextDelayMs: number
 }
@@ -94,6 +99,7 @@ export class WorkspaceDaemon {
     let artifactRebuilt = false
     let error: string | null = null
     let draftsWritten = 0
+    let draftPrecheck: PrecheckSummary | null = null
 
     try {
       /* ① 资产重建 */
@@ -152,6 +158,21 @@ export class WorkspaceDaemon {
       /* ③ 草稿落盘（等确认，不自动入库） */
       if (this.options.config.maintenance.drafts) {
         draftsWritten = this.flushDrafts()
+        /* ③b 票06：pending/ 只读预审三态标记（伴随 .status.json，随守护轮刷新）。
+         * 红线：预审只分级提示、绝不代批（D10：机械批准曾把空用户+空助手草稿灌进库污染召回）。
+         * 失败不拖垮守护轮——下轮自动重试。 */
+        try {
+          draftPrecheck = await precheckDrafts(workspace, this.options.config.write.dedupCosine)
+          if (draftPrecheck.ok + draftPrecheck.manual + draftPrecheck.discard + draftPrecheck.failures > 0) {
+            log(
+              'info',
+              `guardian draft-precheck ok=${draftPrecheck.ok} manual=${draftPrecheck.manual} ` +
+                `discard=${draftPrecheck.discard} failures=${draftPrecheck.failures}（只读预审，不代批）`,
+            )
+          }
+        } catch (e) {
+          log('warn', `draft-precheck-failed: ${String((e as Error)?.message ?? e)}（下轮自动重试）`)
+        }
       }
 
       this.consecutiveFailures = 0
@@ -170,13 +191,17 @@ export class WorkspaceDaemon {
         },
         draftsWritten,
         mergeCandidates: consOut === null ? null : consOut.status === 'empty' ? -1 : consOut.candidates.length,
+        draftPrecheck,
         error: null,
         nextDelayMs: this.nextDelay(),
       }
       log(
         'info',
         `guardian-round=${round.round} ok=1 components=${report.components} artifactRebuilt=${artifactRebuilt} ` +
-          `drafts=${draftsWritten} elapsedMs=${round.elapsedMs} nextDelayMs=${round.nextDelayMs}`,
+          `drafts=${draftsWritten} elapsedMs=${round.elapsedMs} nextDelayMs=${round.nextDelayMs}` +
+          (draftPrecheck
+            ? ` precheck=${draftPrecheck.ok}/${draftPrecheck.manual}/${draftPrecheck.discard}${draftPrecheck.failures ? ` fail=${draftPrecheck.failures}` : ''}`
+            : ''),
       )
       return round
     } catch (e) {
@@ -192,6 +217,7 @@ export class WorkspaceDaemon {
         health: { components: -1, hubRatio: null, uncoveredRatio: 0, warnings: [] },
         draftsWritten,
         mergeCandidates: null,
+        draftPrecheck,
         error,
         nextDelayMs: this.nextDelay(),
       }
