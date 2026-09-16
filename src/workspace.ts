@@ -4,11 +4,22 @@
  * **工作区级（不是会话级）**：同一工作区的多个会话共享一份库与一份原生索引；
  * 会话级状态一律放 src/session.ts 的 Map（DESIGN.md §5.2 / §6.5）。
  */
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import type { Config } from './config.js'
 import { closeEmbedTransport, EmbedClient, embedTransportIntent } from './embed.js'
 import { MemoEngine, loadKnowledgeBaseManager } from './native.js'
-import { Logger, ensureWorkspaceDirs, loadEnvFile, workspaceHash, workspacePaths, type WorkspacePaths } from './runtime.js'
+import {
+  Logger,
+  ensureWorkspaceDirs,
+  loadEnvFile,
+  memoRiverRoot,
+  readJsonSafe,
+  workspaceHash,
+  workspacePaths,
+  workspacePathsAtRoot,
+  type WorkspacePaths,
+} from './runtime.js'
 import { KnowledgeStore } from './store.js'
 import { recall, type RecallOptions, type RecallOutcome } from './recall.js'
 
@@ -63,6 +74,21 @@ export class WorkspaceRuntime {
     const runtime = new WorkspaceRuntime(paths, store, resolved, config)
     runtime.logger.info(
       `workspace-open cwd=${cwd} hash=${paths.hash} bucket=${paths.bucket} db=${paths.dbPath} embed=${resolved.source} transport=${embedTransportIntent()}`,
+    )
+    return runtime
+  }
+
+  /** 票 01（recall-quality-0916）：按已解析路径打开——跨桶真路由用。
+   *
+   * 目录已存在（resolveBucket 保证 hasDb），**不建目录、不写 manifest**；嵌入配置
+   * 沿用本插件部署（全机共享同一端点，目标桶向量即由它产出）；日志落目标桶自己的
+   * memo-river.log（跨桶召回在目标桶口径下留痕）。 */
+  static openExisting(paths: WorkspacePaths, config: Config): WorkspaceRuntime {
+    const resolved = resolveEmbed(config, paths)
+    const store = new KnowledgeStore(paths.dbPath)
+    const runtime = new WorkspaceRuntime(paths, store, resolved, config)
+    runtime.logger.info(
+      `bucket-route-open bucket=${paths.bucket} hash=${paths.hash} db=${paths.dbPath} embed=${resolved.source} transport=${embedTransportIntent()}`,
     )
     return runtime
   }
@@ -182,6 +208,136 @@ export function releaseAllWorkspaces(): void {
   registry.clear()
   // 票 02：共享 undici Agent 是进程级的，所有工作区都释放后才收掉传输层连接池。
   closeEmbedTransport()
+}
+
+/* ────────────── 票 01（recall-quality-0916）：桶名→状态目录解析（memo_recall folder 真路由） ──────────────
+ *
+ * 旧实现是「本桶检索 + 结果集按 diaryName 事后过滤」，跨桶查询必然 0 命中——目标条目
+ * 根本不在本桶语料里（D58 归因纠偏①：genshin-ts 千星知识图谱在其他项目永远查不到）。
+ * 真路由 = 把桶名解析到状态目录（~/.dsh/memo-river/<hash>/），在目标桶上打开运行时执行检索。
+ *
+ * 解析规则（按可靠性排序）：
+ *   ① folder 是 16 位 hex → 视为工作区哈希（manifest.hash / 目录名精确匹配，同名消歧通道）；
+ *   ② workspace.json manifest 的 bucket 字段精确匹配；
+ *   ③ 无 manifest 桶名时退回 dailynote/ 唯一子目录名。
+ * 桶名在本机**不保证唯一**（历史 /var/tmp 自净测试桶留有大量同名根）：同名多桶 →
+ * 报错列出候选让调用方用哈希消歧——静默挑一个会把查询打到错误的库上。 */
+
+/** 状态根下的一个桶（可路由单元）。 */
+export interface BucketEntry {
+  /** 工作区哈希（manifest.hash 优先，缺省目录名）。 */
+  hash: string
+  /** 状态目录绝对路径。 */
+  root: string
+  /** 桶名（diary_name）。 */
+  bucket: string
+  /** manifest 里的 cwd（可能缺失）。 */
+  cwd: string | null
+  /** knowledge_base.sqlite 是否存在（可检索的前提；纯日志残目录不算桶）。 */
+  hasDb: boolean
+  /** workspace.json 的 mtime（ms；排序用，新的在前——歧义提示里最近的更可能是想要的）。 */
+  updatedAt: number
+}
+
+/** 列出状态根下全部桶（只读、永不抛；扫不动返回空）。 */
+export function listBuckets(): BucketEntry[] {
+  const out: BucketEntry[] = []
+  let roots: string[]
+  try {
+    roots = readdirSync(memoRiverRoot(), { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => join(memoRiverRoot(), d.name))
+  } catch {
+    return out
+  }
+  for (const root of roots) {
+    const manifestPath = join(root, 'workspace.json')
+    const hasDb = existsSync(join(root, 'knowledge_base.sqlite'))
+    if (!hasDb && !existsSync(manifestPath)) continue
+    const manifest = readJsonSafe<{ cwd?: string; bucket?: string; hash?: string }>(manifestPath, {})
+    let bucket = typeof manifest.bucket === 'string' && manifest.bucket ? manifest.bucket : ''
+    if (!bucket) {
+      // 无 manifest 桶名：dailynote/ 唯一子目录名兜底（多个子目录无法定位桶名，跳过）
+      try {
+        const subs = readdirSync(join(root, 'dailynote'), { withFileTypes: true })
+          .filter((d) => d.isDirectory())
+          .map((d) => d.name)
+        if (subs.length === 1) bucket = subs[0]!
+      } catch {
+        /* 无 dailynote/：兜底不了 */
+      }
+    }
+    if (!bucket) continue
+    let updatedAt = 0
+    try {
+      updatedAt = statSync(manifestPath).mtimeMs
+    } catch {
+      /* 缺 manifest 记 0（排序垫底） */
+    }
+    out.push({
+      hash: (typeof manifest.hash === 'string' && manifest.hash) || basename(root),
+      root,
+      bucket,
+      cwd: typeof manifest.cwd === 'string' ? manifest.cwd : null,
+      hasDb,
+      updatedAt,
+    })
+  }
+  return out.sort((a, b) => b.updatedAt - a.updatedAt || a.bucket.localeCompare(b.bucket))
+}
+
+/** 可用桶清单（去重桶名、有库者优先、截 30——桶多的机器上别刷屏）。 */
+function availableBucketLines(entries: BucketEntry[]): string[] {
+  const names: string[] = []
+  for (const e of entries) {
+    if (!e.hasDb || names.includes(e.bucket)) continue
+    names.push(e.bucket)
+  }
+  names.sort((a, b) => a.localeCompare(b))
+  const cap = 30
+  return [`可用桶（${names.length} 个）：${names.slice(0, cap).join('、')}${names.length > cap ? ` …还有 ${names.length - cap} 个` : ''}`]
+}
+
+export type BucketResolution = { ok: true; entry: BucketEntry } | { ok: false; error: string }
+
+/** 桶名/16 位哈希 → 状态目录。失败返回**完整报错文本**（含可用桶清单；memo_recall 原样返回）。 */
+export function resolveBucket(folder: string): BucketResolution {
+  const entries = listBuckets()
+  const byHash = /^[0-9a-f]{16}$/.test(folder) ? entries.filter((e) => e.hash === folder) : []
+  const byName = entries.filter((e) => e.bucket === folder)
+  const hits = (byHash.length > 0 ? byHash : byName).filter((e) => e.hasDb)
+  const hashNote = '提示：桶名不唯一时，folder 可传 16 位工作区哈希（memo-river 状态目录名）消歧。'
+  if (hits.length === 1) return { ok: true, entry: hits[0]! }
+  if (hits.length > 1) {
+    return {
+      ok: false,
+      error: [
+        `【memo_recall·folder 路由失败】桶名「${folder}」不唯一：${hits.length} 个状态目录同名，拒绝静默挑一个。`,
+        ...hits.map((e) => `· ${e.bucket}@${e.hash} → ${e.cwd ?? e.root}`),
+        ...availableBucketLines(entries),
+        hashNote,
+      ].join('\n'),
+    }
+  }
+  return {
+    ok: false,
+    error: [
+      `【memo_recall·folder 路由失败】不存在桶「${folder}」（状态根 ${memoRiverRoot()}；解析顺序：folder 为 16 位 hex → 按工作区哈希精确匹配，否则按 workspace.json 的 bucket 字段 → dailynote/ 唯一子目录名）。`,
+      ...availableBucketLines(entries),
+      hashNote,
+    ].join('\n'),
+  }
+}
+
+/** 跨桶打开（或复用）目标桶运行时。调用方须先 resolveBucket 成功；永不建目录、永不写 manifest。
+ * 注册表键与 acquireWorkspace 同一张（键=工作区哈希）：目标桶若恰好是本进程已打开的工作区，天然复用。 */
+export function acquireBucketRuntime(entry: BucketEntry, config: Config): WorkspaceRuntime {
+  const existing = registry.get(entry.hash)
+  if (existing) return existing
+  const paths = workspacePathsAtRoot(entry.root, entry.bucket, entry.cwd ?? undefined)
+  const runtime = WorkspaceRuntime.openExisting(paths, config)
+  registry.set(entry.hash, runtime)
+  return runtime
 }
 
 /** 读 VCP 的 KnowledgeBaseManager（体检报告里带上算法版本，便于溯源）。 */

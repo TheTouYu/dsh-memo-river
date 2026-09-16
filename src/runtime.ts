@@ -55,6 +55,25 @@ export function workspacePaths(cwd: string, bucketOverride?: string, logFileOver
   }
 }
 
+/** 票 01（recall-quality-0916）：按**已存在**的状态目录构造路径（memo_recall folder 真路由用）。
+ *
+ * 与 workspacePaths 的差别：hash/root 来自解析结果而非从 cwd 推导——跨桶路由只允许
+ * 打开注册表里已存在的桶（resolveBucket 保证 hasDb），绝不为陌生桶建目录写 manifest。 */
+export function workspacePathsAtRoot(root: string, bucket: string, cwd?: string): WorkspacePaths {
+  return {
+    cwd: cwd || root,
+    hash: basename(root),
+    root,
+    dbPath: join(root, 'knowledge_base.sqlite'),
+    embCachePath: join(root, 'emb-cache.json'),
+    artifactCachePath: join(root, 'artifact-cache.json'),
+    healthLogPath: join(root, 'health.log'),
+    pendingDir: join(root, 'pending'),
+    logPath: join(root, 'memo-river.log'),
+    bucket,
+  }
+}
+
 /** 建目录 + 写 workspace.json（人类可读的工作区↔哈希映射）。 */
 export function ensureWorkspaceDirs(paths: WorkspacePaths): void {
   mkdirSync(paths.root, { recursive: true })

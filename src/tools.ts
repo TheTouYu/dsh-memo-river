@@ -35,7 +35,7 @@ import { tieBreakerParamsFrom } from './tiebreaker.js'
 import { listSessions } from './session.js'
 import type { RecallOptions } from './recall.js'
 import type { Logger } from './runtime.js'
-import type { WorkspaceRuntime } from './workspace.js'
+import { acquireBucketRuntime, resolveBucket, type WorkspaceRuntime } from './workspace.js'
 
 const TEXT_OUTPUT = {
   schema: { type: 'string' as const },
@@ -544,7 +544,12 @@ export function installTools(
         rerank: { type: 'boolean', description: '是否做原生重排（false = 只回 KNN 基线）。' },
         truncate: { type: 'boolean', description: '正文是否截断为首句。' },
         timeRange: { type: 'string', description: '::Time 语义，如 2026-09-10~2026-09-11。' },
-        folder: { type: 'string', description: '日记本桶名（缺省 = 当前工作区桶）。' },
+        folder: {
+          type: 'string',
+          description:
+            '真路由：解析桶名→目标桶状态目录，直接在目标桶上执行检索（结果/诊断/使用台账均为目标桶口径——跨项目知识共享通道）。' +
+            '缺省 = 当前工作区桶，行为不变。桶名同名冲突时可传 16 位工作区哈希消歧；目标桶不存在会报错并列出可用桶名。',
+        },
       },
       output: TEXT_OUTPUT,
       isConcurrencySafe: () => true,
@@ -567,21 +572,27 @@ export function installTools(
           // 票 05：会话级 tuning 注入（默认关——memo_tuning scope=session tieBreakerEnabled=1 可实验）。
           tieBreaker: tieBreakerParamsFrom(tuningValues(config, viewerOf(exec).sessionId)),
         }
-        const outcome = await workspace.recall(query, options)
-        // timeRange / folder 过滤（在结果集上做，避免改原生载荷）
+        /* 票 01（recall-quality-0916）：folder 真路由——先解析桶名→状态目录，再把检索整体
+         * 搬到目标桶上执行（旧实现是本桶检索后按 diaryName 事后过滤，跨桶查询必然 0 命中：
+         * 目标条目根本不在本桶语料里）。不传 folder / folder=本桶名 → 行为完全不变。 */
+        const folder = typeof args.folder === 'string' && args.folder.trim() ? args.folder.trim() : null
+        let target = workspace
+        if (folder && folder !== workspace.paths.bucket) {
+          const resolution = resolveBucket(folder)
+          if (!resolution.ok) return resolution.error
+          // 解析回本桶根（桶名与 manifest 名不一致等情形）→ 走原工作区，等价缺省行为
+          if (resolution.entry.hash !== workspace.paths.hash) target = acquireBucketRuntime(resolution.entry, config)
+        }
+        const outcome = await target.recall(query, options)
+        // timeRange 过滤保留（在目标桶结果集上做，避免改原生载荷；folder 过滤随真路由消亡）
         const range = parseTimeRange(typeof args.timeRange === 'string' ? args.timeRange : undefined)
-        const folder = typeof args.folder === 'string' && args.folder ? args.folder : null
-        if (range || folder) {
-          const owners = workspace.store.chunkOwners()
+        if (range) {
+          const owners = target.store.chunkOwners()
           const keep = (id: number): boolean => {
             const owner = owners.get(id)
             if (!owner) return false
-            if (folder && owner.diaryName !== folder) return false
-            if (range) {
-              const d = dateOf(owner.path)
-              if (!d || d < range.from || d > range.to) return false
-            }
-            return true
+            const d = dateOf(owner.path)
+            return Boolean(d && d >= range.from && d <= range.to)
           }
           outcome.candidates = outcome.candidates.filter((c) => keep(c.id))
           outcome.selected = outcome.selected.filter((c) => keep(c.id))
@@ -593,12 +604,17 @@ export function installTools(
         // 使用台账（票 01）：主动补证也是「使用」——只记工具**刻意呈现**的 selected（与被动注入同
         // 口径、同为预算内 k 条）。不记 candidates 列表：那是诊断溢出，11 篇语料下会把全库扫成
         // 「用过」，主动信号就失去「努力提取」的语义（testing effect 只认刻意检索）。
+        // 票 01（recall-quality-0916）：跨桶召回的台账记在**目标桶**（target.store）——
+        // 在哪条河里被捞起，足迹就留在哪条河。
         try {
-          if (outcome.selected.length > 0) recordUsage(workspace.store, outcome.selected.map((c) => c.fileId), 'active')
+          if (outcome.selected.length > 0) recordUsage(target.store, outcome.selected.map((c) => c.fileId), 'active')
         } catch {
           /* 台账失败静默：观测不能伤害补证 */
         }
-        return formatRecallResult(workspace, outcome, query)
+        const text = formatRecallResult(target, outcome, query)
+        return target === workspace
+          ? text
+          : `· 🔄 folder 路由 → 桶=${target.paths.bucket}@${target.paths.hash}（cwd=${target.paths.cwd}；检索/诊断/台账均为此桶口径）\n${text}`
       },
     }),
   )
