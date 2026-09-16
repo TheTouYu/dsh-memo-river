@@ -6,9 +6,9 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** ready-for-agent
+**Status:** done — 2026-09-16（证据：commit c3d313d；acceptance #37 新增两形态快照+探针全链路+四锚回归，归因克隆 HEAD+本票改动主套件全绿，#17/#25 失败归因于兄弟票未提交工作树）
 
-- [ ] 普通场景文案含质量锚，总行数仍 ≤3 行
-- [ ] 委托场景（delegationDepth 或 subagent/workflow 调用）出现共享提示变体
-- [ ] 四锚参数与现有配置不变（回归）
-- [ ] acceptance/快照断言两种文案形态（普通/委托）
+- [x] 普通场景文案含质量锚，总行数仍 ≤3 行
+- [x] 委托场景（delegationDepth 或 subagent/workflow 调用）出现共享提示变体
+- [x] 四锚参数与现有配置不变（回归）
+- [x] acceptance/快照断言两种文案形态（普通/委托）
