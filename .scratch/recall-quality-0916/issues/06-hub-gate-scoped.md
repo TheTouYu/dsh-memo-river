@@ -6,7 +6,7 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** done — 2026-09-16（证据：commit `918c0e4` + acceptance-hub-gate 8/8；主套件回归 36/37 与 merge 态基线持平；生产桶 /tmp 副本试运行三档行为符合预期——见 DESIGN §7.1.4「试运行」）
+**Status:** done — 2026-09-16（证据：commit `ffc01bc` + acceptance-hub-gate 8/8；主套件回归 36/37 与 merge 态基线持平；生产桶 /tmp 副本试运行三档行为符合预期——见 DESIGN §7.1.4「试运行」）
 
 - [x] 模拟委托会话写枢纽 Tag：被拒 + 收到词汇表内替代建议（H-2/H-4：delegationDepth=1 与 injectMode=autonomous 两路信号都验）
 - [x] 交互会话：仅软警告（现状回归）（H-3：enforce 档下交互写放行，仅「枢纽警告」软警告，无闸门痕迹）
