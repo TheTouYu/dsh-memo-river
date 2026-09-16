@@ -319,20 +319,40 @@ export function apply(ctx: AppContext, config: MemoRiverConfig): void {
     return daemon
   }
 
-  ctx.on('agent/session-start', (payload: { agent: AgentLike }) => {
+  /**
+   * 生命周期握手：0.1.5 及以前发 `agent/session-start`；0.1.6 起该事件被删除，由异步串行的
+   * `agent/created` 取代（payload 逐字段相同，只多一个可选 signal）。
+   *
+   * **两个名字都挂，而不是二选一**：事件名对不上时 `ctx.on` 照样注册成功、回调永不触发、
+   * 日志零行——这是最难发现的一类故障（插件看起来活着，记忆注入却静默停止）。
+   * 日志里的 `event=` 是实际命中的那个名字，升级后可直接当握手判据。
+   *
+   * 同一 agent 实例只处理一次（WeakSet，不阻止会话恢复后新实例再次进来）；
+   * 处理器全程 try/catch：`agent/created` 是 @mode serial 且被 await，抛错会让 Agent 创建失败。
+   */
+  const seenAgents = new WeakSet<object>()
+  const onAgentReady = (event: string, payload: { agent: AgentLike }): void => {
     try {
-      const cwd = payload.agent?.session?.header?.cwd ?? process.cwd()
-      const state = getSession(payload.agent.session.id, cwd)
+      const agent = payload.agent
+      if (typeof agent === 'object' && agent !== null) {
+        if (seenAgents.has(agent)) return
+        seenAgents.add(agent)
+      }
+      const cwd = agent?.session?.header?.cwd ?? process.cwd()
+      const state = getSession(agent.session.id, cwd)
       const workspace = getWorkspace(cwd)
       daemonFor(workspace)
       log(
         'info',
-        `session-start id=${state.sessionId} cwd=${cwd} bucket=${workspace.paths.bucket} counts=${JSON.stringify(workspace.corpusCounts)}`,
+        `session-start event=${event} id=${state.sessionId} cwd=${cwd} bucket=${workspace.paths.bucket} counts=${JSON.stringify(workspace.corpusCounts)}`,
       )
     } catch (e) {
-      log('warn', `session-start-failed: ${String((e as Error)?.message ?? e)}`)
+      log('warn', `session-start-failed event=${event}: ${String((e as Error)?.message ?? e)}`)
     }
-  })
+  }
+
+  ctx.on('agent/session-start', (payload: { agent: AgentLike }) => onAgentReady('agent/session-start', payload))
+  ctx.on('agent/created', (payload: { agent: AgentLike }) => onAgentReady('agent/created', payload))
 
   /**
    * 回合边界：**只产出候选草稿，不落库**（DESIGN §4 回合边界 / §8.3）。
