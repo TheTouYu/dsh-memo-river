@@ -131,10 +131,23 @@ function registerMemoTuning(ctx: { tools: { register(tool: unknown): () => void 
  * 票06：定义已下沉 src/drafts.ts（预审与写路径共用一份口径；此处转口导出保持 API 路径不变）。 */
 export { parseTagLine, stripTagLine } from './drafts.js'
 
-function titleFromContent(content: string, fallback: string): string {
-  const first = content.split(/\r?\n/).find((l) => l.trim().length > 0)
-  if (first && first.trim().startsWith('# ')) return first.trim().slice(2).trim()
-  return fallback
+/* ── 票 02 标题派生：正文首个非空行若是 `# ` 标题行 → 标题源（返回标题 + 剥掉该行后的正文）。
+ * 旧版 titleFromContent 只回标题不剥行，写盘模板又拼一次 `# 标题` → 单标题行在 full 里出现两次。 */
+function splitHeading(content: string): { title: string; body: string } | null {
+  const lines = content.split(/\r?\n/)
+  const idx = lines.findIndex((l) => l.trim().length > 0)
+  if (idx === -1) return null
+  const first = lines[idx]!.trim()
+  if (!first.startsWith('# ')) return null
+  const title = first.slice(2).trim()
+  if (!title) return null // `# ` 后为空不算标题源（该行留在正文里）
+  return { title, body: lines.filter((_, i) => i !== idx).join('\n') }
+}
+
+/** 旧版 `${date} 未命名` 兜底落下的残次标题——不算可保底标题：改写这种存量条目必须显式补
+ *  新标题（一次性修复指引见 docs/GUIDE-未命名存量修复.md），否则闸门会把「未命名」一直续下去。 */
+function isUntitledArtifact(title: string): boolean {
+  return title === '未命名' || /^\d{4}-\d{2}-\d{2} 未命名$/.test(title)
 }
 
 function slugify(text: string): string {
@@ -254,8 +267,12 @@ export interface WriteDiaryInput {
   content: string
   /** 已定稿 Tag 列表（调用方负责来源：memo_write 从参数/Tag 行解析；approve 从词汇表策展）。 */
   tags: string[]
-  /** 显式标题（可空串 → 取正文 `#` 首行 → `${date} 未命名`）。 */
+  /** 显式标题（空 → 正文 `#` 首行 → fallbackTitle → 拒绝；票 02 标题闸门，不再落「未命名」）。 */
   title: string
+  /** 票 02：显式 title 与正文 `# ` 行皆无时的保底标题——memo_update 传改写目标原标题、
+   *  memo_merge keep 模式传保留篇原标题（库内标题是强检索信号，改写不降级）。
+   *  「未命名」残次品（isUntitledArtifact）不算保底 → 走 missing-title 拒绝。 */
+  fallbackTitle?: string
   /** YYYY-MM-DD。 */
   date: string
   /** 桶名（diaryName）。 */
@@ -300,15 +317,30 @@ export async function writeDiaryCore(
   const existing = workspace.store.tags()
   const existingNames = new Set(existing.map((t) => t.name))
   const newTags = tags.filter((t) => !existingNames.has(t))
-  const title = input.title || titleFromContent(content, `${date} 未命名`)
-  const body = stripTagLine(content)
-  const full = `# ${title}\n\n${body}\n\nTag: ${tags.join(', ')}\n`
+  /* 票 02 标题闸门（共用层一次覆盖 write/update/merge/approve 四入口）：
+   * 派生链 = 显式 title > 正文首个 `# ` 标题行 > fallbackTitle（改写/合并保留篇原标题；
+   * 「未命名」残次品不算保底）。三级皆无 → missing-title 拒绝——库内标题是强检索信号
+   * （召回展示、memo_update/memo_merge 定位都吃它），宁拒不猜，不再自动落 `${date} 未命名`
+   * （genshin-ts 存量实锤 + 2026-09-16 memo_update 活体复现，修复指引 docs/GUIDE-未命名存量修复.md）。
+   * 附带修复：标题取自正文 `# ` 行时该行从 body 剥掉——旧版 full 里标题行出现两次。 */
+  const explicitTitle = input.title.trim()
+  const heading = splitHeading(content)
+  const fallbackTitle = (input.fallbackTitle ?? '').trim()
+  const title =
+    explicitTitle ||
+    heading?.title ||
+    (fallbackTitle && !isUntitledArtifact(fallbackTitle) ? fallbackTitle : '')
+  const body = stripTagLine(explicitTitle ? content : (heading?.body ?? content))
+  // heading 剥行后 body 以空行开头（原标题行后的空行），拼模板会得到双空行——压掉一个
+  const bodyText = body.replace(/^[ \t]*\r?\n/, '')
+  const full = title ? `# ${title}\n\n${bodyText}\n\nTag: ${tags.join(', ')}\n` : ''
   const dedupCosine = input.dedupCosine ?? 0.95 // 定标见 config.ts WriteConfig 注释
 
   /* 票 03 合批：原 newTags（同义漂移）/ full（去重+chunk 向量）/ tagVectors 三处串行单条 embed
    * → 一次批量请求 [...newTags, full]，写路径预算 15s + 失败重试 1 次（尾部硬顶 ~30s）。
-   * 向量三用：③ 同义漂移检查 / ④.5 内容去重与 chunk 向量 / 新 Tag 向量（原 :396 调用点整个消掉）。 */
-  const writeEmbed = workspace.embed.configured
+   * 向量三用：③ 同义漂移检查 / ④.5 内容去重与 chunk 向量 / 新 Tag 向量（原 :396 调用点整个消掉）。
+   * 票 02：标题源缺失时不起嵌入（马上要 missing-title 拒绝，省一次白飞的请求）。 */
+  const writeEmbed = title && workspace.embed.configured
     ? workspace.embed
         .embed([...newTags, full], WRITE_EMBED_OPTIONS)
         .then((v) => ({ ok: true as const, v }), (e: unknown) => ({ ok: false as const, e }))
@@ -322,6 +354,13 @@ export async function writeDiaryCore(
 
   /* ② 校验 */
   if (!content) return reject('content 为空')
+  if (!title) {
+    return reject(
+      'missing-title：正文无 `# ` 标题行，也没有可用的标题来源',
+      '库内标题是强检索信号，不再自动落「未命名」。修复：正文首行补 `# 标题`（memo_write 也可显式给 title 参数；' +
+        'memo_update 改写「未命名」存量条目须在新正文首行给 `# 新标题`——存量一次性修复指引见 docs/GUIDE-未命名存量修复.md）。',
+    )
+  }
   if (tags.length === 0) {
     return reject(
       'missing-tag-line：必须有 Tag 行',
@@ -687,7 +726,7 @@ export function installTools(
       parameters: {
         content: { type: 'string', required: true, description: '正文（末尾可含 Tag 行）。' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Tag 列表（建议；缺省从正文 Tag 行解析）。' },
-        title: { type: 'string', description: '标题（缺省取正文首行 # 标题）。' },
+        title: { type: 'string', description: '标题（缺省取正文首行 # 标题；两者皆无会被拒——不再落「未命名」）。' },
         date: { type: 'string', description: '日期 YYYY-MM-DD（缺省今天）。' },
         folder: { type: 'string', description: '工作区桶名（缺省 = 当前工作区桶）。' },
         newTagReason: {
@@ -739,6 +778,7 @@ export function installTools(
         '走与 memo_write 完全一致的 Tag 闸门（同义漂移/新 Tag 理由/枢纽警告）与体检增量；' +
         '磁盘原路径重写、库内同路径 upsert（fileId 不变，使用台账足迹保留）；' +
         '改写目标自身豁免内容去重（自我改写与原文相近是合法用例），但与其他篇近重复仍会被拒。' +
+        '新正文无 `# ` 标题行时保留目标原标题（标题是强检索信号，不降级「未命名」；改写「未命名」存量条目须在新正文首行补 `# 新标题`，否则 missing-title 拒绝）。' +
         '适用：修正错误、精简冗长、把新进展合并进旧篇（压缩式遗忘的单篇手动路径）。',
       parameters: {
         id: { type: 'number', description: '目标 D-id（memo_recall/memo_stats 输出里的 D 编号）。与 title 二选一。' },
@@ -809,7 +849,8 @@ export function installTools(
         const result = await writeDiaryCore(workspace, {
           content,
           tags,
-          title: '', // title 参数是查找串不是新标题；新标题取新正文 `#` 首行（titleFromContent）
+          title: '', // title 参数是查找串不是新标题；新标题取新正文 `#` 首行，无则保底目标原标题（票 02）
+          fallbackTitle: chunkTitle.get(target.id) ?? '', // 票 02：无标题派生源时保留原标题；「未命名」残次品会被闸门拦下
           date,
           bucket,
           dedupCosine: config.write.dedupCosine,
@@ -904,10 +945,17 @@ export function installTools(
         /* ②–⑤ 同一份核心；豁免集 = 全部声明源（未声明的第三篇近重复仍会被拒） */
         const fromArg = Array.isArray(args.tags) ? (args.tags as unknown[]).map((t) => String(t).trim()).filter(Boolean) : []
         const tags = fromArg.length > 0 ? fromArg : parseTagLine(full2)
+        /* 票 02 标题闸门：keep 模式新全文无 `# ` 行时保底保留篇原库内标题（与 memo_update 同口径，
+         * 只取 chunk `#` 首行、不拿文件名兜底）；新篇模式无保底——合并新全文应有自己的 `# ` 标题行，
+         * 否则 missing-title 拒绝（指引文案由共用闸门给出）。 */
+        const keepTitle = keepRow
+          ? ((/^#\s+(.+)$/m.exec(String(bucketChunks.find((c) => c.file_id === keepRow.id)?.content ?? '')) ?? [])[1]?.trim() ?? '')
+          : ''
         const result = await writeDiaryCore(workspace, {
           content: full2,
           tags,
           title: '',
+          fallbackTitle: keepTitle,
           date,
           bucket,
           dedupCosine: config.write.dedupCosine,
