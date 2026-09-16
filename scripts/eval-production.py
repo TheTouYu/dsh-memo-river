@@ -375,6 +375,161 @@ def parse_ts_z(s):
     except Exception:
         return None
 
+# ---------------------------------------------------------------- 归因校验（票 09）
+
+def _dsh_exe_of(tokens):
+    """cmd token 列表 → DSH 主进程可执行路径（node …/bin/dsh 或 dsh 本体），非 dsh 进程返回 None。
+    剔除 cloudflared（隧道名碰瓷 dsh）与 vim 等。"""
+    toks = [t for t in tokens if t]
+    if not toks: return None
+    exe = toks[1] if toks[0].endswith(('node', 'nodejs')) and len(toks) > 1 else toks[0]
+    return exe if os.path.basename(exe) == 'dsh' else None
+
+def dsh_proc_starts():
+    """运行中 DSH 主进程 [(pid, start_epoch_ms, cmd)]，按启动时间升序。
+    主判 `ps -eo pid,lstart,cmd`（lstart 为系统本地时；naive→astimezone() 贴系统时区）；
+    解析失败回退 /proc/<pid>/stat field22（自 state 起 index 19）+ /proc/stat btime。"""
+    out = []
+    try:
+        p = subprocess.run(['ps', '-eo', 'pid,lstart,cmd'], capture_output=True, text=True, timeout=10)
+        for line in p.stdout.splitlines()[1:]:
+            m = re.match(r'\s*(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$', line)
+            if not m: continue
+            if not _dsh_exe_of(m.group(3).split()): continue
+            try:
+                dt = datetime.strptime(m.group(2), '%a %b %d %H:%M:%S %Y').astimezone()
+            except ValueError:
+                continue
+            out.append((int(m.group(1)), dt.timestamp() * 1000, m.group(3)))
+        if out:
+            return sorted(out, key=lambda x: x[1])
+    except Exception:
+        pass
+    try:  # 回退：procfs
+        btime = int(re.search(r'btime\s+(\d+)', open('/proc/stat').read()).group(1))
+        hz = os.sysconf('SC_CLK_TCK')
+        for pid in os.listdir('/proc'):
+            if not pid.isdigit(): continue
+            try:
+                toks = open('/proc/%s/cmdline' % pid, 'rb').read().decode(errors='replace').split('\0')
+                if not _dsh_exe_of(toks): continue
+                stat = open('/proc/%s/stat' % pid).read()
+                fields = stat[stat.rindex(')') + 2:].split()
+                out.append((int(pid), (btime + int(fields[19]) / hz) * 1000,
+                            ' '.join(t for t in toks if t)))
+            except Exception:
+                continue
+        out.sort(key=lambda x: x[1])
+    except Exception:
+        pass
+    return out
+
+def artifact_sig_timeline(after_ms=None, until_ms=None):
+    """嵌入/图资产代际更替时间线 [(ts_ms, sig24)]。
+    实测来源：中央 plugin.log 的 `guardian artifact-rebuilt sig=…` 行——health.log 不含 sig（票面写
+    health.log 系记忆偏差，实测纠正）。只记相邻不同 sig 的真更替（重复 sig=进程重启后原代重建，非新代）。"""
+    events, prev = [], None
+    path = os.path.join(MR, 'plugin.log')
+    if not os.path.exists(path): return events
+    for line in open(path, errors='replace'):
+        if 'artifact-rebuilt' not in line: continue
+        lm = log_re.match(line.strip())
+        sm = re.search(r'sig=([0-9a-f]+)', line)
+        if not lm or not sm: continue
+        ts = parse_ts_z(lm.group(1) + 'Z')
+        if ts is None: continue
+        sig = sm.group(1)[:24]
+        if sig != prev:
+            events.append((ts, sig)); prev = sig
+    return [e for e in events if (after_ms is None or e[0] > after_ms)
+            and (until_ms is None or e[0] <= until_ms)]
+
+def parse_iso_ms(s):
+    """ISO 8601（含 +08:00 偏移；裸时间按 CST）→ epoch ms；失败 None。"""
+    if not s: return None
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None: dt = dt.replace(tzinfo=CST)
+    return dt.timestamp() * 1000
+
+def attribution_check(base, now_ms, procs=None, sig_events=None):
+    """票09：观测窗 vs 基线窗的进程/版本边界归因校验。
+    判据：存在「启动 ≤ 基线捕获时刻且仍在运行」的 DSH 主进程（载入代码贯穿两窗）→ 同进程；
+    一个都没有（基线捕获后全体重启）→ ✗ 版本不一致，归因无效。跨窗期间新起的进程只提示不打标
+    （其影响的读数份额可按会话/时间下钻分离）；artifactSig 更替多为语料写入驱动的常规重建，同样
+    只提示不闸门——否则活跃桶永远打标，检查形同虚设。procs/sig_events 可注入（自检/复现实验）。"""
+    base_gen = parse_iso_ms(base.get('generated'))
+    base_since = parse_iso_ms(base.get('since'))
+    att = {'verdict': 'unknown', 'base_generated': base_gen, 'base_since': base_since,
+           'now': now_ms, 'procs': [], 'spanning': [], 'spawned': [], 'sig_events': [], 'lines': []}
+    if base_gen is None:
+        att['lines'] = ['!! 基线缺 generated 时间戳——归因校验不可用']
+        return att
+    if procs is None: procs = dsh_proc_starts()
+    if sig_events is None: sig_events = artifact_sig_timeline(base_gen, now_ms)
+    spanning = [p for p in procs if p[1] <= base_gen]
+    spawned = [p for p in procs if base_gen < p[1] <= now_ms]
+    att.update({'procs': procs, 'spanning': spanning, 'spawned': spawned, 'sig_events': sig_events})
+    L = att['lines']
+    L.append(f"基线窗 {fmt_t(base_since)} → {fmt_t(base_gen)}（captured） | 观测 → 现在 {fmt_t(now_ms)}")
+    if not procs:
+        L.append('判定：? 无法定位 DSH 主进程（ps/procfs 均无 node dsh）——归因校验不可用，Δ 请人工核对进程/版本边界')
+        return att
+    L.append(f'DSH 主进程 {len(procs)} 个运行中：')
+    for pid, st, cmd in procs:
+        tag = ('横跨基线捕获与观测窗（贯穿代）' if st <= base_gen
+               else '⚠ 跨窗期间新起（载入当时盘上代码，仅提示不打标）')
+        L.append(f'  pid {pid:<8d} {fmt_t(st)} 启动 —— {tag}  [{" ".join(cmd.split()[:4])}]')
+    if sig_events:
+        L.append(f'artifactSig 代际更替（plugin.log，跨窗期间）{len(sig_events)} 次'
+                 f'（{sig_events[0][1][:8]}…→{sig_events[-1][1][:8]}…）'
+                 f'——语料写入驱动的常规重建，只提示不闸门')
+    else:
+        L.append('artifactSig 代际更替（plugin.log，跨窗期间）：0 次')
+    if not spanning:
+        att['verdict'] = 'version-mismatch'
+        L.append(f'判定：✗ 版本不一致，归因无效 —— 基线捕获（{fmt_t(base_gen)}）后 DSH 主进程已整体重启'
+                 f'（最早现存进程 {fmt_t(procs[0][1])} 启动晚于基线捕获）；'
+                 f'Δ 混入代码/配置换代效应，禁止记为代码战果')
+    else:
+        att['verdict'] = 'same-process'
+        L.append(f'判定：同进程 —— 存在横跨基线捕获与观测窗的 DSH 主进程（贯穿代最早 {fmt_t(spanning[0][1])} 启动）；'
+                 f'版本一致，Δ 对比成立')
+        L.append('提醒：同进程 ≠ Δ 可记代码战果——被评估代码若提交于进程启动之后，运行中仍是旧代码（端点时变会伪装成效）')
+    return att
+
+def print_attribution(att):
+    print('=== 归因校验（票09：进程/版本边界） ===')
+    for l in att['lines']:
+        print(l)
+
+def selftest_attribution():
+    """票09 自检：合成进程表注入，验证三态判定与「版本不一致，归因无效」标记串的出现/缺席。"""
+    now = datetime.now(CST).timestamp() * 1000
+    base = {'since': '2026-09-13T17:42:37+08:00', 'generated': '2026-09-15T17:42:39+08:00'}
+    gen = parse_iso_ms(base['generated'])
+    cases = [
+        ('same-process（贯穿进程存在 → 不打标）',
+         [(101, gen - 3600000, 'node /x/bin/dsh --profile sbx')], 'same-process', False),
+        ('same-process + 跨窗新起进程（提示但不打标）',
+         [(101, gen - 3600000, 'node /x/bin/dsh --profile sbx'),
+          (102, gen + 3600000, 'node /x/bin/dsh --profile web')], 'same-process', False),
+        ('version-mismatch（全体进程晚于基线捕获 → 打标）',
+         [(201, gen + 60000, 'node /x/bin/dsh --profile sbx')], 'version-mismatch', True),
+        ('unknown（无进程可见 → 不打标）', [], 'unknown', False),
+    ]
+    ok = True
+    for name, procs, want, want_mark in cases:
+        att = attribution_check(base, now, procs=procs, sig_events=[])
+        got_mark = '版本不一致，归因无效' in '\n'.join(att['lines'])
+        good = att['verdict'] == want and got_mark == want_mark
+        ok = ok and good
+        print(f"  [{'PASS' if good else 'FAIL'}] {name}: verdict={att['verdict']} 标记={'有' if got_mark else '无'}")
+    print('selftest-attribution:', 'PASS' if ok else 'FAIL')
+    return 0 if ok else 1
+
 def bucket_log_alltime(h, tree_sids=None, until_ms=None):
     """桶日志统计（--until 时为 ≤ 截止的快照）；给了 tree_sids 则附带树内会话归属的 inject 明细。"""
     path = os.path.join(MR, h, 'memo-river.log')
@@ -604,7 +759,11 @@ def main():
     ap.add_argument('--bucket', default=None, help='单桶健康：桶名（diaryName），输出体检+日志全量')
     ap.add_argument('--until', default=None,
                     help='快照截止（--session/--bucket 模式）：CST 本地时间或 UTC ISO，复现历史深评读数')
+    ap.add_argument('--selftest-attribution', action='store_true',
+                    help='票09 自检：合成进程表验证归因三态判定与「版本不一致，归因无效」标记')
     args = ap.parse_args()
+    if args.selftest_attribution:
+        sys.exit(selftest_attribution())
     if args.session:
         report_session(args); return
     if args.bucket:
@@ -626,11 +785,18 @@ def main():
     buckets = discover_buckets()
     r_logs = part_logs(since, buckets)
     r_sessions, tool_stats = part_sessions(since, sb_map)
+    # 票09：归因校验先于 Δ 输出与落盘计算（同进程才允许把 Δ 归因给代码改动）
+    base, attribution = None, None
+    if args.baseline and os.path.exists(args.baseline):
+        base = json.load(open(args.baseline))
+        attribution = attribution_check(base, datetime.now(CST).timestamp() * 1000)
     out_path = args.out or '/tmp/mr-eval/summary.json'
     summary = {'since': since.isoformat(), 'generated': datetime.now(CST).isoformat(),
                'since_hours': args.since_hours, 'buckets': r_logs,
                'sessions': r_sessions, 'tool_stats': tool_stats,
                'plugin_funnel': dict(funnel)}
+    if attribution:
+        summary['attribution'] = attribution
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     json.dump(summary, open(out_path, 'w'), ensure_ascii=False, indent=1, default=str)
 
@@ -653,9 +819,11 @@ def main():
               f"preset={st['agent_preset']} U={st['user_msgs']} 注入={st['injections']} "
               f"direct_answer={st['roles'].get('direct_answer',0)} k截={st['k_limit']} "
               f"引用={st['overlap']}/{len(st['injected_ids'])} 工具={st['tools']} 错={st['tool_errors']}")
-    if args.baseline and os.path.exists(args.baseline):
-        base = json.load(open(args.baseline))
-        print(f"=== Δ vs 基线 {os.path.basename(args.baseline)} ===")
+    if base is not None:
+        if attribution:
+            print_attribution(attribution)
+        suffix = '（✗ 版本不一致，归因无效）' if attribution and attribution['verdict'] == 'version-mismatch' else ''
+        print(f"=== Δ vs 基线 {os.path.basename(args.baseline)} ==={suffix}")
         for bk, b in r_logs.items():
             ob = (base.get('buckets') or {}).get(bk) or {}
             od = ob.get('ms_dist') or {}
