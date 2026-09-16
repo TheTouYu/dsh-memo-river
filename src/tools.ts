@@ -1154,19 +1154,36 @@ export function installTools(
   const selectDraftTargets = (
     args: Record<string, unknown>,
     exec: unknown,
-  ): { targets: DraftRecord[]; error: string | null } => {
+  ): { targets: DraftRecord[]; error: string | null; scope: string; currentBucket: string } => {
     const { cwd } = viewerOf(exec)
     const current = deps.getWorkspace(cwd)
-    const listing = listPending(current.paths.root, true)
-    if (args.all === true) {
-      const bucket = typeof args.bucket === 'string' && args.bucket ? args.bucket : null
-      return { targets: listing.filter((r) => !bucket || r.bucket === bucket), error: null }
+    const currentBucket = current.paths.bucket
+    /* 票13：缺省作用域=本桶（对齐 memo_drafts 的缺省直觉）；跨桶必须显式 bucket。
+     * 事故样本（2026-09-16）：memo_discard {all:true} 未带 bucket，旧语义「缺省全部桶」一次扫了
+     * 66 篇——其中 48 篇是未复核的其他工作区草稿。破坏性操作的缺省必须是窄作用域；
+     * 读取（memo_drafts）可以宽缺省，写入/丢弃不行——作用域不对称原则。 */
+    const explicitBucket = typeof args.bucket === 'string' && args.bucket.trim() ? args.bucket.trim() : null
+    const scope = explicitBucket ?? currentBucket
+    const full = listPending(current.paths.root, true)
+    const listing = full.filter((r) => r.bucket === scope)
+    if (explicitBucket && listing.length === 0) {
+      const buckets = [...new Set(full.map((r) => r.bucket))]
+      return {
+        targets: [],
+        error: `桶「${explicitBucket}」没有待处理草稿${buckets.length > 0 ? `（有待处理草稿的桶：${buckets.join('、')}）` : '（全队列均空）'}`,
+        scope,
+        currentBucket,
+      }
     }
+    if (args.all === true) return { targets: listing, error: null, scope, currentBucket }
     const ids = Array.isArray(args.ids) ? (args.ids as unknown[]).map(String) : []
-    if (ids.length === 0) return { targets: [], error: '给 ids（memo_drafts 列出的文件名子串）或 all: true。' }
+    if (ids.length === 0) return { targets: [], error: '给 ids（memo_drafts 列出的文件名子串）或 all: true。', scope, currentBucket }
     const { ok, errors } = matchDrafts(listing, ids)
-    if (errors.length > 0) return { targets: [], error: errors.join('；') }
-    return { targets: ok, error: null }
+    if (ok.length === 0 && errors.length > 0) {
+      errors.push(`提示：草稿匹配只查${explicitBucket ? `指定桶（${scope}）` : `本桶（${currentBucket}）`}；跨桶操作须显式传 bucket`)
+    }
+    if (errors.length > 0) return { targets: [], error: errors.join('；'), scope, currentBucket }
+    return { targets: ok, error: null, scope, currentBucket }
   }
 
   ctx.tools.register(
@@ -1227,17 +1244,20 @@ export function installTools(
         '=1 即串行）：N 篇耗时 ≈ ⌈N/并发⌉ × 单篇；单篇失败/跳过不影响其余，结果逐篇回报。',
       parameters: {
         ids: { type: 'array', items: { type: 'string' }, description: '草稿文件名子串列表（memo_drafts 列出的文件名）。' },
-        all: { type: 'boolean', description: '批准队列全部草稿（与 ids 二选一）。' },
-        bucket: { type: 'string', description: 'all=true 时限定桶名（缺省全部桶）。' },
+        all: { type: 'boolean', description: '批准本桶全部草稿（缺省只作用本工作区桶；跨桶须显式 bucket）。' },
+        bucket: { type: 'string', description: '显式目标桶名：跨桶操作必须给出（缺省=本工作区桶，不再缺省全部桶——2026-09-16 事故后收紧）。' },
       },
       output: TEXT_OUTPUT,
       isConcurrencySafe: () => false,
       async execute(args: Record<string, unknown>, exec: unknown) {
-        const { targets, error } = selectDraftTargets(args, exec)
+        const { targets, error, scope, currentBucket } = selectDraftTargets(args, exec)
         if (error) return `❌ memo_approve：${error}`
         if (targets.length === 0) return '【记忆河流·memo_approve】队列为空，无可批准草稿。'
         const startedAt = Date.now()
-        const lines = [`【记忆河流·memo_approve】待处理 ${targets.length} 篇`]
+        const lines = [
+          `【记忆河流·memo_approve】待处理 ${targets.length} 篇` +
+            (scope !== currentBucket ? `（⚠️ 跨桶操作：桶=${scope}，当前工作区桶=${currentBucket}）` : ''),
+        ]
         /* 票06：批准会话的形态/档位解析一次（批准者是谁就按谁的场景算——机械批准污染
          * （D10 样本一）正是 autonomous/delegation 会话在无人把关时批量入库的场景内行为）。 */
         const viewer = viewerOf(exec)
@@ -1332,16 +1352,19 @@ export function installTools(
         '丢弃待确认草稿：移入 rejected/（不删文件、不入库，可追溯）。用于不值得入库的回合摘要，或人工 memo_write 撰写后清理原草稿。',
       parameters: {
         ids: { type: 'array', items: { type: 'string' }, description: '草稿文件名子串列表。' },
-        all: { type: 'boolean', description: '丢弃队列全部草稿（与 ids 二选一）。' },
-        bucket: { type: 'string', description: 'all=true 时限定桶名（缺省全部桶）。' },
+        all: { type: 'boolean', description: '丢弃本桶全部草稿（缺省只作用本工作区桶；跨桶须显式 bucket）。' },
+        bucket: { type: 'string', description: '显式目标桶名：跨桶操作必须给出（缺省=本工作区桶，不再缺省全部桶——2026-09-16 事故后收紧）。' },
       },
       output: TEXT_OUTPUT,
       isConcurrencySafe: () => false,
       async execute(args: Record<string, unknown>, exec: unknown) {
-        const { targets, error } = selectDraftTargets(args, exec)
+        const { targets, error, scope, currentBucket } = selectDraftTargets(args, exec)
         if (error) return `❌ memo_discard：${error}`
         if (targets.length === 0) return '【记忆河流·memo_discard】队列为空，无可丢弃草稿。'
-        const lines = [`【记忆河流·memo_discard】待处理 ${targets.length} 篇`]
+        const lines = [
+          `【记忆河流·memo_discard】待处理 ${targets.length} 篇` +
+            (scope !== currentBucket ? `（⚠️ 跨桶操作：桶=${scope}，当前工作区桶=${currentBucket}）` : ''),
+        ]
         let done = 0
         for (const record of targets) {
           if (resolveDraft(record, 'rejected')) {
