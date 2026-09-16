@@ -54,3 +54,8 @@ REAL_EMBED=1 node scripts/setup-selftest.mjs && REAL_EMBED=1 node scripts/accept
   配对漂移、词汇表污染会让 A-1/A-3/M-3 假红（2026-09-16 实证）。
 - SIGBUS 环境症：主套件偶发 `Bus error (core dumped)`、崩点漂移——先在干净 HEAD
   同刻复现判环境，重启 DSH 后复跑（2026-09-16 结案先例），不要急着改代码。
+- **主套件 #31 是端点敏感项**（种子写与注入全走真嵌入）：端点抖动窗口会假红
+  （种子写 2 嵌入失败 → 热载篇缺库 → k=1 选中旧篇）。判别工具：
+  `node scripts/probe-31.mjs 5`（#31 fixture 独立抽出，秒级×N 统计——2026-09-16
+  用它判定路由修复无回归，罪魁是端点抖动而非代码）。
+- 疑似回归先单点探针再二分整跑：整跑 2min×N + SIGBUS 高发窗口 = 代价陷阱。
