@@ -99,6 +99,18 @@ export function ageText(hours: number): string {
   return `${Math.round(hours / 24)} 天`
 }
 
+/** 票12：接续锚提取——正文末段一句（剥掉尾部 Tag 行），截 ~36 字。
+ * 拿不到（空正文/全是 Tag 行）返回 null，nudge 文案回落现状。 */
+export function continuationTail(content: string): string | null {
+  const lines = content.split('\n').map((x) => x.trim())
+  while (lines.length > 0) {
+    const last = lines.pop()!
+    if (last.length === 0 || /^tag\s*[:：]/i.test(last)) continue
+    return last.length > 36 ? `${last.slice(0, 36)}…` : last
+  }
+  return null
+}
+
 /**
  * 写入节律提醒文案（B6 瘦身原则：只带「该写了 + 写什么 + 怎么写」，
  * 写日记规范不复读——它住在固定契约段里）。
@@ -124,10 +136,16 @@ export function renderWriteNudge(
   suggestedTags: string[],
   queue?: PendingQueueStats | null,
   delegation?: boolean,
+  /** 票12：接续锚——最近一篇日记的末段一句（拿不到则省略，文案回落现状）。 */
+  tail?: string | null,
+  /** 票12：压缩联动——自上次写入以来观测到的 compress 次数（>0 才带）。 */
+  compressed?: number,
 ): string {
   const tags = suggestedTags.length > 0 ? suggestedTags.join('、') : '（用 memo_tags 看词汇表后选）'
+  const compressClause =
+    compressed && compressed > 0 ? `；刚压缩过 ${compressed} 段——优先落盘被压缩前的关键细节` : ''
   const lines = [
-    `[memo-river·写入节律] 记忆节律提醒，非新任务：${reason}，turn ${turn} 的进展尚未入河——「${digest}」`,
+    `[memo-river·写入节律] 记忆节律提醒，非新任务：${reason}${compressClause}，turn ${turn} 的进展尚未入河——「${digest}」`,
   ]
   if (delegation) {
     lines.push(
@@ -137,7 +155,9 @@ export function renderWriteNudge(
   lines.push(
     delegation
       ? `现在正是写日记的时机：用 memo_write 落一篇，Tag 优先复用词汇表：${tags}。规范见「写日记规范」段。`
-      : `现在正是写日记的时机：用 memo_write 落一篇，写增量（延续/转折/因果），不复述已入河内容；Tag 优先复用词汇表：${tags}。规范见「写日记规范」段。`,
+      : tail
+        ? `现在正是写日记的时机：上一篇止于「${tail}」——本篇写增量（延续/转折/因果），不复述已入河内容；Tag 优先复用词汇表：${tags}。规范见「写日记规范」段。`
+        : `现在正是写日记的时机：用 memo_write 落一篇，写增量（延续/转折/因果），不复述已入河内容；Tag 优先复用词汇表：${tags}。规范见「写日记规范」段。`,
   )
   if (queue && queue.pending > 0) {
     const age = queue.oldestAgeHours !== null ? `（最老 ${ageText(queue.oldestAgeHours)}）` : ''

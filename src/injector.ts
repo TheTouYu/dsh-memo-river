@@ -31,9 +31,11 @@
  */
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { createHash } from 'node:crypto'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import type { Config } from './config.js'
 import { recordOmega, recordUsage } from './health.js'
-import { BLOCK_CLOSE, renderInjection, renderSkipNotice, renderWriteNudge } from './render.js'
+import { BLOCK_CLOSE, continuationTail, renderInjection, renderSkipNotice, renderWriteNudge } from './render.js'
 import { buildQueryField, type RecallOptions } from './recall.js'
 import { tuningValues } from './tuning.js'
 import { getSession, peekSession, type SessionState } from './session.js'
@@ -443,6 +445,22 @@ function hasDelegationCall(message: unknown): boolean {
   )
 }
 
+/** 票12：压缩探针——上下文压缩调用（ACP compress）。与 memo_write 同构识别；
+ * 观测到 → 累计 streak（自上次写入以来），nudge 据此带「抢救被压细节」提示。
+ * 证据：c9f838ba 父会话 6 连压后写入细节损失、D5 诊断「压缩后写得更糟」——
+ * 模型压缩后只能凭摘要写，被压掉的关键细节若不趁热落盘就永久丢失。 */
+function hasCompressCall(message: unknown): boolean {
+  const content = (message as { content?: unknown })?.content
+  if (!Array.isArray(content)) return false
+  return content.some(
+    (block) =>
+      !!block &&
+      typeof block === 'object' &&
+      (block as { type?: string }).type === 'tool-call' &&
+      'compress' === String((block as { name?: string }).name ?? ''),
+  )
+}
+
 /* ── 票05：增量锚的工具输出封顶（用户拍板 2026-09-14）──────────────────────────
  * 工具大输出（浏览器 DOM dump 等）不是概念进展，全额计入增量锚会在几分钟内攒满
  * 50K 反复触发（生产实锤：11:04:48/11:06:36/11:08:48 三连拍）。封顶口径：
@@ -499,6 +517,8 @@ export function evaluateWriteNudge(
   queueProvider?: () => PendingQueueStats | null,
   /** 票05（recall-quality-0916）：委托场景（delegationDepth>0 或探针闩上）→ 共享提示变体。 */
   delegation = false,
+  /** 票12：接续锚——最近一篇日记末段一句的懒取（只在确认要发提醒时读一次盘）。 */
+  tailProvider?: () => string | null,
 ): string | null {
   const t = tuningValues(config, state.sessionId)
   const everyMin = t.writeNudgeEveryMinutes
@@ -554,12 +574,54 @@ export function evaluateWriteNudge(
   } catch {
     queue = null
   }
-  return renderWriteNudge(reason, draft?.turn ?? turn, digest, draft?.suggestedTags ?? [], queue, delegation)
+  // 票12①：接续锚（懒取——拿不到就省略，文案回落现状）；
+  // 票12②：压缩联动——自上次写入以来有 compress 且晚于最后写入 → 带「抢救细节」提示。
+  let tail: string | null = null
+  try {
+    tail = tailProvider ? tailProvider() : null
+  } catch {
+    tail = null
+  }
+  const compressed = state.compressStreak > 0 && state.lastCompressAt > state.lastDiaryWriteAt ? state.compressStreak : 0
+  return renderWriteNudge(
+    reason,
+    draft?.turn ?? turn,
+    digest,
+    draft?.suggestedTags ?? [],
+    queue,
+    delegation,
+    tail,
+    compressed,
+  )
 }
 
 /**
  * 注册注入 seam。返回 disposer 列表（调用方用 ctx.effect 包住）。
  */
+
+/** 票12①：接续锚——本桶最近一篇日记的末段一句（D10 复读机根因：无锚则复述；
+ * 给「上一篇止于哪」比要求「别复述」有效）。纯路径直读磁盘（readdir+mtime 择新），
+ * **不走 deps.getWorkspace**——实测其副作用会扰动注入用的工作区/嵌入实例
+ * （#11/#25/#26/#31 五连红，双盲回退 injector 后复绿，定位于此）。失败/无日记 → null。 */
+function lastDiaryTail(deps: InjectorDeps, agent: unknown, wstate: SessionState): string | null {
+  void deps
+  try {
+    const cwd = resolveCwd(agent as never, wstate)
+    const paths = workspacePaths(cwd)
+    const dir = join(paths.root, 'dailynote', paths.bucket)
+    const names = readdirSync(dir).filter((n) => n.endsWith('.md'))
+    if (names.length === 0) return null
+    let newest: { name: string; mtime: number } = { name: names[0]!, mtime: statSync(join(dir, names[0]!)).mtimeMs }
+    for (const n of names.slice(1)) {
+      const m = statSync(join(dir, n)).mtimeMs
+      if (m > newest.mtime) newest = { name: n, mtime: m }
+    }
+    return continuationTail(readFileSync(join(dir, newest.name), 'utf8'))
+  } catch {
+    return null
+  }
+}
+
 export function installInjection(
   ctx: {
     on(event: 'agent/pre-step', listener: (payload: PreStepPayload, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>, options?: { prepend?: boolean }): () => void
@@ -616,10 +678,18 @@ export function installInjection(
           }
           // 票05（recall-quality-0916）：委托闩锁——独立成趟（上一趟撞 memo_write 会 break，
           // 本趟必须看全序：先写后派的批次要正确再闩上，先派后写要正确回落）。
+          // 票12：压缩计数同趟（同样需要全序；memo_write 观测即清零——进展已落盘，
+          // 「抢救被压细节」的提示窗口关闭）。
           let delegationDelta: boolean | null = null
           for (let i = from; i < log.length; i++) {
             if (hasDelegationCall(log[i])) delegationDelta = true
-            else if (hasMemoWriteCall(log[i])) delegationDelta = false
+            else if (hasCompressCall(log[i])) {
+              wstate.lastCompressAt = Date.now()
+              wstate.compressStreak++
+            } else if (hasMemoWriteCall(log[i])) {
+              delegationDelta = false
+              wstate.compressStreak = 0
+            }
           }
           if (delegationDelta !== null) wstate.delegationActive = delegationDelta
           wstate.lastObservedLogLength = log.length
@@ -645,7 +715,7 @@ export function installInjection(
               } catch {
                 return null // 路径解析失败 → 提醒不带队列行，不出数字
               }
-            }, delegation)
+            }, delegation, () => lastDiaryTail(deps, payload.agent, wstate))
           : null
         const extra: unknown[] = []
         if (text) extra.push(createInjectionMessage(text))

@@ -231,7 +231,15 @@ function slugify(text: string): string {
 
 /* ────────────── 语义相关旧日记（回注用） ────────────── */
 
-async function relatedDiaries(workspace: WorkspaceRuntime, content: string, limit = 3): Promise<string[]> {
+/** 票12：近重复引导阈值——knn ≥ 此值的最近邻在写前回注里给「memo_update 并入」建议。
+ * 低于拒绝线 0.95（那是硬闸门），0.80 是引导区：高度相似但未到拒绝——大概率同一主题的延续。 */
+const MERGE_SUGGEST_KNN = 0.8
+
+async function relatedDiaries(
+  workspace: WorkspaceRuntime,
+  content: string,
+  limit = 3,
+): Promise<Array<{ id: number; title: string; score: number }>> {
   try {
     // 票 03：写路径嵌入预算（15s + 重试 1 次）——回注查询不再共用注入路径的 60s 宽松超时。
     const [vec] = await workspace.embed.embed([content.slice(0, 2000)], WRITE_EMBED_OPTIONS)
@@ -245,7 +253,7 @@ async function relatedDiaries(workspace: WorkspaceRuntime, content: string, limi
       .map((c) => {
         const owner = owners.get(c.id)
         const title = owner ? (owner.path.replace(/\\/g, '/').split('/').pop() ?? '').replace(/\.[^.]+$/, '') : `D${c.id}`
-        return `D${c.id}「${title}」 knn=${c.score.toFixed(3)}`
+        return { id: c.id, title, score: c.score }
       })
   } catch {
     return []
@@ -271,11 +279,21 @@ async function composeReinjection(
     pre.hub && pre.hub.ratio >= HUB_RATIO_LIMIT
       ? `⚠️ 枢纽警告：「${pre.hub.name}」已出现 ${pre.hub.count}/${total} 篇（≥1/3），再堆它会让直接锚泛化`
       : `枢纽检查：当前最大 Tag 频次 ${pre.hub ? `${pre.hub.name}×${pre.hub.count}` : 'n/a'}（<1/3 ✅）`
+  const relatedStr = related.map((c) => `D${c.id}「${c.title}」 knn=${c.score.toFixed(3)}`).join(' / ')
+  // 票12③：正向四要素 + 近重复引导（去重从事后拒绝变事前引导；总增量 ≤300 字符红线）。
+  const qualityAnchor = '【写前回注】质量四要素：写清——延续什么 / 转折什么 / 因果链 / 教训（读者是三个月后的自己或接手的兄弟代理）。'
+  const top = related[0]
+  const mergeHint =
+    top && top.score >= MERGE_SUGGEST_KNN
+      ? `【写前回注】最相似 D${top.id}《${top.title}》knn=${top.score.toFixed(2)}——同一主题的延续优先 memo_update 并入，别新开复读篇。`
+      : ''
   return [
     ...lead,
     `【写前回注】旧 Tag 词汇表（top ${Math.min(30, freq.length)}）：${reinjectTop}`,
-    `【写前回注】语义相关旧日记：${related.length > 0 ? related.join(' / ') : '(无)'}`,
+    `【写前回注】语义相关旧日记：${relatedStr || '(无)'}`,
     `【写前回注】${hubWarn}；当前连通分量 = ${pre.components}（判据 =1）`,
+    qualityAnchor,
+    ...(mergeHint ? [mergeHint] : []),
   ].join('\n')
 }
 
@@ -842,7 +860,7 @@ export function installTools(
         '③新 Tag 闸门（引入库中不存在的 Tag 必须给 newTagReason）④写入 files/file_tags/tags/chunks + 嵌入 + 索引追加 + 资产重建 ⑤返回体检增量。' +
         '拒绝条件会明确报错，不静默。',
       parameters: {
-        content: { type: 'string', required: true, description: '正文（末尾可含 Tag 行）。' },
+        content: { type: 'string', required: true, description: '正文（末尾可含 Tag 行）。写清四要素：延续什么/转折什么/因果链/教训。' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Tag 列表（建议；缺省从正文 Tag 行解析）。' },
         title: { type: 'string', description: '标题（缺省取正文首行 # 标题；两者皆无会被拒——不再落「未命名」）。' },
         date: { type: 'string', description: '日期 YYYY-MM-DD（缺省今天）。' },

@@ -116,6 +116,10 @@ export interface SessionState {
   toolLens: number[]
   /** 最近一条 ≥150 字助手正文的首行摘要（票05：digest 触发时现取，不走 turn-stopping 存货）。 */
   lastAssistantDigest: string
+  /** 最近一次观测到 compress 工具调用的时刻（票12 压缩联动：写入提醒带「抢救被压细节」提示）。 */
+  lastCompressAt: number
+  /** 自上次 memo_write 以来观测到的 compress 次数（票12：>0 且 lastCompressAt>lastDiaryWriteAt 时 nudge 带压缩提示）。 */
+  compressStreak: number
   /** 模型主动思考累计毫秒（llm/stream 实际流时长逐次累加；不含工具执行、不含空闲）。 */
   activeMs: number
   /** 最近一次提醒/写入时的 activeMs 基线（时间锚只量「思考时间」，2026-09-13 用户拍板）。 */
@@ -168,6 +172,8 @@ export function getSession(sessionId: string, cwd: string | null): SessionState 
     lastWriteNudgeStep: 0,
     lastWriteNudgeReason: '',
     delegationActive: false,
+    lastCompressAt: 0,
+    compressStreak: 0,
     lastInjectMode: 'interactive',
     toolLens: [],
     lastAssistantDigest: '',
