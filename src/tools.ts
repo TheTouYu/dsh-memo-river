@@ -30,6 +30,7 @@ import {
 import { cosine, WRITE_EMBED_OPTIONS, WRITE_EMBED_RETRIES, WRITE_EMBED_TIMEOUT_MS } from './embed.js'
 import { formatHealth, healthReport, HUB_RATIO_LIMIT, KV_USAGE, readUsageLedger, recordUsage } from './health.js'
 import { excerpt } from './render.js'
+import { patrolBucket } from './patrol.js'
 import { setTuning, tuningSnapshot, tuningDefaults, tuningValues } from './tuning.js'
 import { tieBreakerParamsFrom } from './tiebreaker.js'
 import { listSessions, peekSession } from './session.js'
@@ -847,6 +848,50 @@ export function installTools(
           lines.push('· 原生资产：未载入（native-unavailable）')
         }
         return lines.join('\n')
+      },
+    }),
+  )
+
+  /* ── memo_patrol（票 10：只读质量巡检 → 修正建议闭环的检出半边） ── */
+  ctx.tools.register(
+    defineTool({
+      name: 'memo_patrol',
+      description:
+        '语料质量巡检（只读，票10）：检出三类已写入质量问题——①hub Tag 超限（频次≥1/3，直接锚泛化）②未命名/占位标题存量③同轴近重复簇（文件质心余弦≥0.80）' +
+        '——输出具体修正建议（哪篇/什么问题/建议 memo_update 还是 memo_merge）。不代批、不静默手术：执行需在场者确认。',
+      parameters: {
+        folder: { type: 'string', description: '真路由桶名（缺省=当前工作区桶；跨桶巡检用，同 memo_recall 语义）。' },
+        hubRatio: { type: 'number', description: 'hub 判定阈值（频次/篇数），缺省 0.333。' },
+        nearDupCosine: { type: 'number', description: '近重复质心余弦阈值，缺省 0.80。' },
+      },
+      output: TEXT_OUTPUT,
+      isConcurrencySafe: () => true,
+      async execute(args: Record<string, unknown>, exec: unknown) {
+        const { cwd } = viewerOf(exec)
+        const workspace = deps.getWorkspace(cwd)
+        /* 票 01 folder 真路由同款：解析桶名→状态目录，巡检整体在目标桶上执行。 */
+        const folder = typeof args.folder === 'string' && args.folder.trim() ? args.folder.trim() : null
+        let target: WorkspaceRuntime = workspace
+        if (folder && folder !== workspace.paths.bucket) {
+          const resolution = resolveBucket(folder)
+          if (!resolution.ok) return resolution.error
+          if (resolution.entry.hash !== workspace.paths.hash) target = acquireBucketRuntime(resolution.entry, config)
+        }
+        const result = patrolBucket(target.store, target.paths.bucket, {
+          hubRatio: typeof args.hubRatio === 'number' && args.hubRatio > 0 && args.hubRatio <= 1 ? args.hubRatio : undefined,
+          nearDupCosine:
+            typeof args.nearDupCosine === 'number' && args.nearDupCosine > 0 && args.nearDupCosine < 1
+              ? args.nearDupCosine
+              : undefined,
+          dimension: target.resolved.dimension,
+        })
+        const patrolLogger: Logger = target.logger
+        patrolLogger.info(
+          `memo_patrol bucket=${target.paths.bucket} scanned=${result.scanned} findings=${result.findings.length} ` +
+            `hub=${result.findings.filter((f) => f.kind === 'hub').length} untitled=${result.findings.filter((f) => f.kind === 'untitled').length} ` +
+            `near-dup=${result.findings.filter((f) => f.kind === 'near-dup').length}`,
+        )
+        return result.text
       },
     }),
   )
