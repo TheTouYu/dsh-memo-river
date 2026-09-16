@@ -21,6 +21,7 @@ import { join } from 'node:path'
 const TMP = mkdtempSync('/var/tmp/memo-river-route-')
 process.env.DSH_HOME = join(TMP, 'dsh-home')
 const { apply, Config: ConfigSchema } = await import('../lib/index.js')
+const { startEmbedStub } = await import('./embed-stub.mjs')
 const { acquireWorkspace, releaseAllWorkspaces, resolveBucket } = await import('../lib/workspace.js')
 const { readUsageLedger, KV_USAGE } = await import('../lib/health.js')
 const { workspacePaths } = await import('../lib/runtime.js')
@@ -76,7 +77,14 @@ let failed = false
 try {
   hr('票 01 folder 真路由 · acceptance-folder-route')
   /* bucket 配置留空 → 每个工作区桶名 = basename(cwd)（routeA / routeB） */
-  const config = ConfigSchema({ native: { vcpRoot: VCP } })
+  /* 提速资产（0916）：缺省本地嵌入桩（秒级、零网络、确定性）；REAL_EMBED=1 回落真端点。
+   * 桩的词袋余弦尺度低于真嵌入 → gate 阈值同步调低（本套件测路由与落桶，不测语义门限）。 */
+  const REAL_EMBED = process.env.REAL_EMBED === '1'
+  const stub = REAL_EMBED ? null : await startEmbedStub('hash')
+  const config = ConfigSchema({
+    native: { vcpRoot: VCP },
+    ...(stub ? { embed: { apiUrl: stub.url, apiKey: 'stub' }, inject: { gateThreshold: 0.2 } } : {}),
+  })
   const h = createMockCtx()
   await apply(h.ctx, config)
   const memoWrite = h.registered.tools.find((t) => t.name === 'memo_write')
@@ -168,6 +176,48 @@ try {
     `按哈希 ${hashB}：${r5hash.split('\n')[0]}；命中褶皱篇=${r5hash.includes('布料模拟褶皱参数调优')}`,
   ])
 
+  /* ── FR-7/8/9（0916 手术现场 bug 回归）：跨桶 write/update/merge 真路由 ──
+   * 生产翻车样本：memo_merge{folder} 报「D-id 不在桶」——folder 只当 diary_name 过滤器用、
+   * 工作区仍是 cwd 本桶。此处三用例锁死三条写路径。 */
+  const memoUpdate = h.registered.tools.find((t) => t.name === 'memo_update')
+  const memoMerge = h.registered.tools.find((t) => t.name === 'memo_merge')
+  if (!memoUpdate || !memoMerge) { console.error('❌ 工具未注册：memo_update / memo_merge'); process.exit(2) }
+
+  const countB = () => wsB.store.files('routeB').length
+  const countA = () => wsA.store.files('routeA').length
+  const b0 = countB(), a0 = countA()
+
+  /* FR-7 跨桶写入：A 会话 folder=routeB → 落 B 桶，A 桶零变更 */
+  const w7 = await writeWithRetry(WS_A, {
+    content: '# 跨桶写入验证：路由后落对桶\n\n从 routeA 会话用 folder=routeB 写入：验证 write 族真路由（手术现场 bug 回归）。布料桶的冷启动条目。\n\nTag: 布料模拟, 参数调优, 角色动画',
+    folder: hashB, newTagReason: '跨桶路由回归测试写入',
+  })
+  const w7ok = /已写入 D\d+/.test(w7) && countB() === b0 + 1 && countA() === a0
+  check('FR-7', 'memo_write{folder=哈希路由 routeB}（A 会话；按名会撞 FR-5 同名歧义）→ 落 B 桶（+1），A 桶零变更', w7ok, [
+    `写入输出（尾 4 行）：${w7.split('\n').slice(-4).join(' ⏎ ')}`, `B=${countB()}（${b0}→+1 应 ${b0 + 1}） A=${countA()}（应恒 ${a0}）`,
+  ])
+
+  /* FR-8 跨桶改写：A 会话 folder=routeB 定位 FR-7 条目原地更新 */
+  const u8 = String(await memoUpdate.execute({
+    title: '跨桶写入验证', folder: hashB,
+    content: '# 跨桶写入验证：路由后落对桶\n\n改写体：update 族跨桶路由回归（0916 手术 bug：folder 曾只改 diary_name 不换工作区）。\n\nTag: 布料模拟, 参数调优, 角色动画',
+  }, execStub(WS_A)))
+  const u8ok = !u8.includes('不在桶') && /已更新|✅/.test(u8)
+  check('FR-8', 'memo_update{folder=哈希路由 routeB}（A 会话）→ 命中 B 桶条目原地改写', u8ok, [u8.split('\n')[0]])
+
+  /* FR-9 跨桶合并：A 会话 folder=routeB 合并 B 桶两篇（生产事故原样路径） */
+  const fb = wsB.store.files('routeB')
+  const cloth = fb.find((f) => f.path.includes('褶皱参数调优'))
+  const skin = fb.find((f) => f.path.includes('蒙皮权重'))
+  const m9 = String(await memoMerge.execute({
+    folder: hashB, sources: [cloth.id, skin.id], keep: cloth.id,
+    content: '# 布料模拟两篇归一：褶皱参数与蒙皮权重\n\n合并自褶皱参数调优（迭代 12/自碰撞 0.8cm/碰撞放大 1.2）与蒙皮权重修复（过渡带 2→8 帧消抖）——跨桶 merge 路由回归篇。\n\nTag: 布料模拟, 参数调优, 角色动画',
+  }, execStub(WS_A)))
+  const m9ok = !m9.includes('不在桶') && /合并|归一|✅/.test(m9) && countB() === b0 /* +1(FR-7) 后 2→1 合并回 b0 */
+  check('FR-9', 'memo_merge{folder=哈希路由, sources=B 桶 D-id}（A 会话）→ 解析成功并归一（不报「不在桶」）', m9ok, [
+    m9.split('\n')[0], `B=${countB()}（FR-7 后 ${b0 + 1}，合并 2→1 应回 ${b0}）`,
+  ])
+
   /* 附加取证：resolver 纯函数面（可用桶清单确实含两个真实桶 + 哈希匹配可独立命中） */
   const entries = (await import('../lib/workspace.js')).listBuckets().filter((e) => e.hasDb)
   line(`\n（取证）隔离状态根里有库桶：${entries.map((e) => `${e.bucket}@${e.hash}`).join('、')}`)
@@ -176,6 +226,7 @@ try {
   line(`❌ 异常：${e?.stack ?? e}`)
 } finally {
   try { releaseAllWorkspaces() } catch { /* 已关 */ }
+  try { await stub?.stop() } catch { /* 已关 */ }
   rmSync(TMP, { recursive: true, force: true })
   line(`\n（自净）已删除 ${TMP}`)
 }

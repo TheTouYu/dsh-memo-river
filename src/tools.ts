@@ -90,6 +90,24 @@ function writeSessionShape(exec: unknown): { scoped: boolean; source: string } {
   return { scoped: false, source: 'interactive' }
 }
 
+/** folder 真路由共享块（recall/patrol 同语义；0916 手术现场发现 write/update/merge
+ * 此前只把 folder 当 diary_name 过滤器用、工作区仍是 cwd 本桶——跨桶 merge 报
+ * 「D-id 不在桶」、跨桶 write/update 会写错根目录）。不传/同名 → 原工作区。 */
+function routeWorkspaceByFolder(
+  folderArg: unknown,
+  workspace: WorkspaceRuntime,
+  config: Config,
+): { ok: true; target: WorkspaceRuntime } | { ok: false; error: string } {
+  const folder = typeof folderArg === 'string' && folderArg.trim() ? folderArg.trim() : null
+  if (!folder || folder === workspace.paths.bucket) return { ok: true, target: workspace }
+  const resolution = resolveBucket(folder)
+  if (!resolution.ok) return { ok: false, error: resolution.error }
+  if (resolution.entry.hash !== workspace.paths.hash) {
+    return { ok: true, target: acquireBucketRuntime(resolution.entry, config) }
+  }
+  return { ok: true, target: workspace }
+}
+
 /** 票06：桶内 Tag 频次（name → 挂它的本桶文件数）+ 分母。分母只数本桶文件
  *  （tagFrequency() 是跨桶全局口径——多桶共用 sqlite 时会错分母）。 */
 function bucketTagCounts(
@@ -920,9 +938,12 @@ export function installTools(
       async execute(args: Record<string, unknown>, exec: unknown) {
         const viewer = viewerOf(exec)
         const { cwd } = viewer
-        const workspace = deps.getWorkspace(cwd)
+        const baseWorkspace = deps.getWorkspace(cwd)
+        const routed = routeWorkspaceByFolder(args.folder, baseWorkspace, config)
+        if (!routed.ok) return routed.error
+        const workspace = routed.target
         const content = String(args.content ?? '').trim()
-        const bucket = typeof args.folder === 'string' && args.folder ? args.folder : workspace.paths.bucket
+        const bucket = workspace.paths.bucket // folder 语义已由 routeWorkspaceByFolder 真路由接管（哈希消歧时 folder≠桶名）
         const date = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : new Date().toISOString().slice(0, 10)
         const newTagReason = typeof args.newTagReason === 'string' ? args.newTagReason.trim() : ''
 
@@ -981,9 +1002,12 @@ export function installTools(
       async execute(args: Record<string, unknown>, exec: unknown) {
         const viewer = viewerOf(exec)
         const { cwd } = viewer
-        const workspace = deps.getWorkspace(cwd)
+        const baseWorkspace = deps.getWorkspace(cwd)
+        const routed = routeWorkspaceByFolder(args.folder, baseWorkspace, config)
+        if (!routed.ok) return routed.error
+        const workspace = routed.target
         const content = String(args.content ?? '').trim()
-        const bucket = typeof args.folder === 'string' && args.folder ? args.folder : workspace.paths.bucket
+        const bucket = workspace.paths.bucket // folder 语义已由 routeWorkspaceByFolder 真路由接管（哈希消歧时 folder≠桶名）
         const date = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : new Date().toISOString().slice(0, 10)
         const newTagReason = typeof args.newTagReason === 'string' ? args.newTagReason.trim() : ''
 
@@ -1080,9 +1104,12 @@ export function installTools(
       isConcurrencySafe: () => false,
       async execute(args: Record<string, unknown>, exec: unknown) {
         const { cwd } = viewerOf(exec)
-        const workspace = deps.getWorkspace(cwd)
+        const baseWorkspace = deps.getWorkspace(cwd)
+        const routed = routeWorkspaceByFolder(args.folder, baseWorkspace, config)
+        if (!routed.ok) return routed.error
+        const workspace = routed.target
         const content = String(args.content ?? '').trim()
-        const bucket = typeof args.folder === 'string' && args.folder ? args.folder : workspace.paths.bucket
+        const bucket = workspace.paths.bucket // folder 语义已由 routeWorkspaceByFolder 真路由接管（哈希消歧时 folder≠桶名）
         const date = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : new Date().toISOString().slice(0, 10)
         const newTagReason = typeof args.newTagReason === 'string' ? args.newTagReason.trim() : ''
 

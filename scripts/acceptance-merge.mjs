@@ -17,6 +17,7 @@ import { join, basename } from 'node:path'
 import { apply, Config as ConfigSchema } from '../lib/index.js'
 import { acquireWorkspace } from '../lib/workspace.js'
 import { workspacePaths } from '../lib/runtime.js'
+import { startEmbedStub } from './embed-stub.mjs'
 import { KV_USAGE } from '../lib/health.js'
 
 const ROOT = '/home/h/app/dsh-memo-river'
@@ -61,7 +62,11 @@ if (!existsSync(dbPath)) {
 }
 
 hr('票 03 memo_merge · acceptance-merge')
-const config = ConfigSchema({ bucket: BUCKET, native: { vcpRoot: VCP } })
+/* 提速资产（0916）：缺省本地嵌入桩（秒级零网络）；REAL_EMBED=1 回落真端点。
+ * 桩余弦尺度低于真嵌入 → gate 阈值同步调低（本套件测 merge/update 机制，不测语义门限）。 */
+const REAL_EMBED = process.env.REAL_EMBED === '1'
+const stub = REAL_EMBED ? null : await startEmbedStub('hash')
+const config = ConfigSchema({ bucket: BUCKET, native: { vcpRoot: VCP }, ...(stub ? { embed: { apiUrl: stub.url, apiKey: 'stub' }, inject: { gateThreshold: 0.2 } } : {}) })
 const h = createMockCtx()
 await apply(h.ctx, config)
 const tool = (name) => h.registered.tools.find((t) => t.name === name)
@@ -181,4 +186,5 @@ check('M-6', 'DESIGN.md 更新归档语义与溯源规范', design.includes('mem
 hr('结果')
 const failed = results.filter((r) => !r.pass)
 line(`${results.length - failed.length}/${results.length} PASS${failed.length ? `；FAIL：${failed.map((f) => f.id).join(', ')}` : ''}`)
+try { await stub?.stop() } catch { /* 已关 */ }
 process.exit(failed.length ? 1 : 0)

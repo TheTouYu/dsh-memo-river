@@ -42,7 +42,8 @@ const BUCKET = args.get('bucket') || basename(SRC)
 const FORCE = flags.has('force')
 
 /** 解析 schemastery Config 的默认值（与插件运行时同一份 schema）。 */
-const config = ConfigSchema({ bucket: BUCKET, native: { vcpRoot: '/home/h/app/VCPToolBox' } })
+/* 提速资产（0916）：EMBED_STUB_URL 环境变量 → 走本地嵌入桩（setup-selftest 快循环用）。 */
+const config = ConfigSchema({ bucket: BUCKET, native: { vcpRoot: '/home/h/app/VCPToolBox' }, ...(process.env.EMBED_STUB_URL ? { embed: { apiUrl: process.env.EMBED_STUB_URL, apiKey: 'stub' } } : {}) })
 
 const paths = workspacePaths(CWD, BUCKET)
 ensureWorkspaceDirs(paths)

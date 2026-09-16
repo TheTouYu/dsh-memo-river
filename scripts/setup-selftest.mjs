@@ -12,7 +12,8 @@
  */
 import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { workspacePaths } from '../lib/runtime.js'
 import { KnowledgeStore } from '../lib/store.js'
 
@@ -26,9 +27,13 @@ const WS_RIVER = { cwd: join(ROOT, '.selftest', '教室建模归档'), bucket: '
 const WS_ISLAND = { cwd: join(ROOT, '.selftest', '教室建模孤岛'), bucket: '教室建模孤岛' }
 const WS_WRITE = { cwd: join(ROOT, '.selftest', '教室建模写入测试'), bucket: '教室建模写入测试' }
 
-const run = (args) => {
+/* 提速资产（0916）：异步 spawn——同步版会阻塞父进程事件循环，父进程里的嵌入桩
+ * 无法应答子进程请求 → 60s 死锁超时（write-prompts 无此问题因为不分叉）。 */
+const execFileAsync = promisify(execFile)
+const run = async (args) => {
   console.log(`\n$ node ${args.join(' ')}`)
-  console.log(execFileSync(process.execPath, args, { cwd: ROOT, encoding: 'utf8' }).trim())
+  const { stdout } = await execFileAsync(process.execPath, args, { cwd: ROOT, encoding: 'utf8' })
+  console.log(stdout.trim())
 }
 
 /* ① 清理这三个工作区（只删它们自己的目录） */
@@ -42,11 +47,17 @@ for (const ws of [WS_RIVER, WS_ISLAND, WS_WRITE]) {
 }
 
 /* ② 河流语料 */
-run(['scripts/import-dailynote.mjs', '--force', '--src', RIVER_SRC, '--cwd', WS_RIVER.cwd, '--bucket', WS_RIVER.bucket])
+/* 提速资产（0916）：缺省本地嵌入桩（REAL_EMBED=1 回落真端点）→ setup 从 ~30s 降到秒级。 */
+const { startEmbedStub } = await import('./embed-stub.mjs')
+const REAL_EMBED = process.env.REAL_EMBED === '1'
+const stub = REAL_EMBED ? null : await startEmbedStub('hash')
+if (stub) process.env.EMBED_STUB_URL = stub.url
+
+await run(['scripts/import-dailynote.mjs', '--force', '--src', RIVER_SRC, '--cwd', WS_RIVER.cwd, '--bucket', WS_RIVER.bucket])
 
 /* ③ 孤岛语料（先生成再导入） */
-run(['scripts/build-island-corpus.mjs', '--out', ISLAND_STAGE])
-run(['scripts/import-dailynote.mjs', '--force', '--src', ISLAND_SRC, '--cwd', WS_ISLAND.cwd, '--bucket', WS_ISLAND.bucket])
+await run(['scripts/build-island-corpus.mjs', '--out', ISLAND_STAGE])
+await run(['scripts/import-dailynote.mjs', '--force', '--src', ISLAND_SRC, '--cwd', WS_ISLAND.cwd, '--bucket', WS_ISLAND.bucket])
 
 /* ④ 写入测试工作区 = 河流库的副本（含 emb-cache，写入时命中缓存不再消耗额度） */
 {
@@ -73,3 +84,5 @@ run(['scripts/import-dailynote.mjs', '--force', '--src', ISLAND_SRC, '--cwd', WS
 }
 
 console.log('\n✅ 三个工作区已就绪')
+
+try { await stub?.stop() } catch { /* 已关 */ }
