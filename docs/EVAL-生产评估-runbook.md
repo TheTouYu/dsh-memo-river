@@ -1,6 +1,6 @@
 # 记忆河流 · 生产评估 Runbook
 
-> 版本 v1 · 2026-09-15 · 配套工具 `scripts/eval-production.py` · 基线 `docs/eval-baselines/2026-09-15.json`
+> 版本 v1.1 · 2026-09-16（票09 增 §二·8 进程边界条款） · 配套工具 `scripts/eval-production.py` · 基线 `docs/eval-baselines/2026-09-15.json`
 > 源头：D38/D39（全项目双日评估）资产化。用户令「多多评测」——每次记忆系统改动后、或每周例行，跑一轮存基线对比趋势。
 
 ## 一、怎么跑
@@ -29,7 +29,19 @@ python3 scripts/eval-production.py --since-hours 48 --out docs/eval-baselines/<�
 | 5 | 使用效果 | 引用=注入∩正文 D-id | 交互会话 >50%；自主会话单独看 |
 | 6 | 语料健康 | health.log 尾行 | components=1；hub <1/3；uncovered 低 |
 | 7 | 遗忘落地 | approve/discard/merge 工具数 + pending | pending 不堆积；approved 跟上 collected |
-| 8 | 性能 | inject elapsedMs（桶日志）+ memo_write 时延（会话侧） | 注入 mean <3s、p95 <5s；write 无 >30s 尾部 |
+| 8 | 性能 | inject elapsedMs（桶日志）+ memo_write 时延（会话侧） | 注入 mean <3s、p95 <5s；write 无 >30s 尾部；**Δ 对比须先过进程边界条款（下）** |
+
+**8 · 进程边界条款（票09，2026-09-16）**：性能 Δ 只有在「同进程」下才可归因——存在启动时间早于基线捕获时刻、
+且横跨到观测窗的 DSH 主进程（`ps -eo pid,lstart,cmd`，exe=`node …/bin/dsh`；解析失败回退 `/proc/<pid>/stat`
+field22+btime）。基线捕获后主进程已全体重启 → `--baseline` 自动打「**版本不一致，归因无效**」标，该 Δ 禁止记为代码战果。
+实测口径与两点告诫：
+
+- artifactSig 代际时间线在中央 plugin.log 的 `guardian artifact-rebuilt sig=…` 行（health.log 不含 sig——票面
+  写 health.log 系记忆偏差，实测纠正）；代际更替多为语料写入驱动的常规重建，**只提示不闸门**（否则活跃桶永远打标，检查形同虚设）。
+- 同进程 ≠ Δ 可记代码战果：被评估代码若提交于进程启动之后，运行中的仍是旧代码（09-15 险情 D58：c9f838ba 夜间
+  inject mean 2311ms vs 基线 5836ms，进程 09-14 21:08 启动未重启，Δ 实为端点时变；perf 票 01/02 收益至今未经生产验证）。
+  跨窗期间新起的进程（载入当时盘上代码）同样只提示不打标——其影响的读数份额可按会话/时间下钻分离。
+- 判定逻辑自检：`python3 scripts/eval-production.py --selftest-attribution`（合成进程表验证同进程/打标/无进程三态）。
 
 ## 三、2026-09-15 基线快照（48h 窗口，25 会话）
 
