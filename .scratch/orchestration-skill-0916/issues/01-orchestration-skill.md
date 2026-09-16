@@ -2,6 +2,8 @@
 
 **What to build:** 基于取证报告 docs/EVAL-工作流效率-0916.md 的六根因，制作一个可复用技能（skill），让「编排子代理协作完成任务」从手工规约变成固化流程：①每代理独立 git worktree + 分支，树隔离零互踩，提交由主代理合并队列串行 fast-forward；②套件分道（代理只跑自己道+冒烟，合并态主代理一次全量回归）；③写侧配置保证（短命代理免 write-nudge / hub-gate，不信 prompt 禁令）；④依赖驱动调度（票依赖即启动，无波次屏障）；⑤上下文最小化（COMMON 瘦身、结构化回收）；⑥主代理代写日记协议（子代理产出由主代理筛价值入河）。技能应包含编排检查单、worktree 协议脚本/模板、失败处理（SIGBUS/端点抖动重试策略）。
 
+**工程保障映射（验收线，R 编号见 docs/EVAL-工作流效率-0916.md）：** E1 worktree 隔离→R1（互踩/取证税归零）；E2 套件分道+合并态一次全量→R3；E3 worktree 内 build、锁仅护合并队列→R2（219min 等待归零）；E4 依赖链 promise 调度替代波次屏障→R5；E5 委托态 nudge 豁免（配置层）→R4；E6 嵌入桩档默认+失败重派→R6。根因定性：**隔离缺位，flock 只是串行化了命令没隔离编辑**——旧编排的设计错误是「串行化执行」而非「隔离执行」。
+
 **Blocked by:** None — can start immediately（取证已固化在报告）
 
 **Status:** ready-for-agent
