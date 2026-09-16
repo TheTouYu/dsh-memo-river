@@ -99,6 +99,12 @@ export interface SessionState {
   lastWriteNudgeStep: number
   /** 最近一次 write-nudge 的触发理由（遥测：落桶日志用，evaluateWriteNudge 写入）。 */
   lastWriteNudgeReason: string
+  /**
+   * 委托在飞（票05 场景感知）：增量扫描到 subagent/workflow 等委托工具调用 → true；
+   * 观测到 memo_write（进展已落盘）→ false。与 header.delegationDepth>0 取或后
+   * 决定 write-nudge 用「先落盘：兄弟代理可立即召回」变体。
+   */
+  delegationActive: boolean
   /** 最近观测到的工具输出长度环形样本（≤20 条；增量锚截尾均值的量尺，票05）。 */
   toolLens: number[]
   /** 最近一条 ≥150 字助手正文的首行摘要（票05：digest 触发时现取，不走 turn-stopping 存货）。 */
@@ -154,6 +160,7 @@ export function getSession(sessionId: string, cwd: string | null): SessionState 
     lastDiaryWriteStep: 0,
     lastWriteNudgeStep: 0,
     lastWriteNudgeReason: '',
+    delegationActive: false,
     toolLens: [],
     lastAssistantDigest: '',
     activeMs: 0,

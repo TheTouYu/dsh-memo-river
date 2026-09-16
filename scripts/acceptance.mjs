@@ -1936,6 +1936,112 @@ hr('#36 守护预审三态：垃圾稳定「建议丢弃」；Tag 边界「需�
   rmSync(pc.root, { recursive: true, force: true })
 }
 
+/* ══════════════════════ #37 票05（recall-quality-0916）write-nudge 场景感知文案 ══════════════════════ */
+
+hr('#37 write-nudge 场景感知：普通含质量锚≤3行；委托变体（depth/工具闩锁）；memo_write 后回落；四锚参数不动（票05）')
+{
+  const { renderWriteNudge } = await import('../lib/render.js')
+  const ANCHOR = '写增量（延续/转折/因果），不复述已入河内容'
+  const tags37 = ['写入去重', '回合边界依赖']
+
+  /* (a) 快照：普通形态——质量锚折进第 2 行，基底 2 行；带队列恰 3 行（≤3 红线） */
+  const normSnap = renderWriteNudge('已 2 轮汇报未写入', 5, '把队列可见性做完', tags37, null, false)
+  const normQueueSnap = renderWriteNudge('已 2 轮汇报未写入', 5, '把队列可见性做完', tags37, { pending: 2, oldestAgeHours: 27 }, false)
+  const normSnapOk =
+    normSnap ===
+      '[memo-river·写入节律] 记忆节律提醒，非新任务：已 2 轮汇报未写入，turn 5 的进展尚未入河——「把队列可见性做完」\n' +
+      `现在正是写日记的时机：用 memo_write 落一篇，${ANCHOR}；Tag 优先复用词汇表：写入去重、回合边界依赖。规范见「写日记规范」段。` &&
+    normSnap.split('\n').length === 2 &&
+    !normSnap.includes('委托进行中')
+  const normQueueOk = normQueueSnap.split('\n').length === 3 && normQueueSnap.includes('草稿队列 2 篇待批（最老 27 小时）')
+
+  /* (b) 快照：委托形态——先落盘+读者点明+锚三要素齐；基底 3 行；带队列 4 行 */
+  const delSnap = renderWriteNudge('已 2 轮汇报未写入', 5, '扇出前的关键进展', tags37, null, true)
+  const delSnapOk =
+    delSnap ===
+      '[memo-river·写入节律] 记忆节律提醒，非新任务：已 2 轮汇报未写入，turn 5 的进展尚未入河——「扇出前的关键进展」\n' +
+      '委托进行中——先落盘当前进展：子代理/兄弟代理可立即召回。这篇日记的读者是兄弟代理而非未来的自己：写它们接手所需的可共享知识（结论/路径/教训），写增量（延续/转折/因果），不复述已入河内容。\n' +
+      '现在正是写日记的时机：用 memo_write 落一篇，Tag 优先复用词汇表：写入去重、回合边界依赖。规范见「写日记规范」段。' &&
+    delSnap.split('\n').length === 3
+  const delQueueLines = renderWriteNudge('已 2 轮汇报未写入', 5, '扇出前的关键进展', tags37, { pending: 2, oldestAgeHours: 27 }, true).split('\n').length
+  const delQueueOk = delQueueLines === 4
+
+  /* (c) 探测全链路（真实 seam）：subagent 工具调用闩锁 → 变体；memo_write 观测 → 闩清回落 */
+  const h37 = createMockCtx()
+  apply(h37.ctx, makeConfig({ bucket: BUCKET_RIVER, inject: { writeNudgeEveryMinutes: 30 } }))
+  const toolMsg37 = (name) => ({ role: 'assistant', content: [{ type: 'tool-call', name }], source: { kind: 'model' } })
+  const ag37 = createAgent('sess-nudge-37', WS_RIVER, [textMsg('user', '场景感知测试'), textMsg('assistant', '好的。')])
+  const nudgesOf37 = (d) => d.messages.map(msgText).filter((t) => t.includes('[memo-river·写入节律]')).join('\n')
+  const arm37 = (st, digest) => {
+    st.lastDiaryWriteAt = Date.now() - 35 * 60_000
+    st.activeMs += 35 * 60_000 // 时间锚只量思考时长（与 #20/#35 同口径）
+    st.lastDraftSummary = { turn: 3, at: Date.now() - 60_000, suggestedTags: ['写入去重'], digest, substantive: true }
+    st.lastWriteNudgeAt = Date.now() - 6 * 60_000 // 过 5 分钟最小重发间隔
+  }
+  await runPreStep(h37, ag37, 2, [textMsg('user', '先聊')], 1) // 惰性建 session state
+  const st37 = peekSession('sess-nudge-37')
+  arm37(st37, '扇出前的关键进展')
+  const nA = nudgesOf37(await runPreStep(h37, ag37, 3, [textMsg('user', '继续')], 1))
+  const normalFired = nA.includes(ANCHOR) && !nA.includes('委托进行中') && nA.split('\n').length === 2 // WS_RIVER 队列空 → 无队列行
+  ag37.log.push(toolMsg37('subagent')) // 委托调用进日志 → 下一拍闩上
+  arm37(st37, '扇出进行中')
+  const nB = nudgesOf37(await runPreStep(h37, ag37, 3, [textMsg('user', '看看兄弟')], 2))
+  const latchOn =
+    st37.delegationActive === true &&
+    nB.includes('先落盘当前进展：子代理/兄弟代理可立即召回') &&
+    nB.includes('读者是兄弟代理而非未来的自己') &&
+    nB.includes(ANCHOR) &&
+    nB.split('\n').length === 3
+  ag37.log.push(toolMsg37('memo_write')) // 进展已落盘 → 闩清
+  await runPreStep(h37, ag37, 3, [textMsg('user', '落盘了')], 3)
+  const latchedOff = st37.delegationActive === false && st37.lastDiaryWriteAt > Date.now() - 5_000
+  arm37(st37, '写完继续推进')
+  const nC = nudgesOf37(await runPreStep(h37, ag37, 3, [textMsg('user', '继续推进')], 4))
+  const backToNormal = nC.includes(ANCHOR) && !nC.includes('委托进行中')
+
+  /* (d) delegationDepth 路径：被派的孩子会话（header.delegationDepth=2，零委托调用）→ 变体 */
+  const deepLog = [textMsg('user', '孩子会话'), textMsg('assistant', '好的。')]
+  const agDeep = { session: { id: 'sess-nudge-37-deep', header: { cwd: WS_RIVER, delegationDepth: 2 }, deriveMessages: () => deepLog }, log: deepLog }
+  await runPreStep(h37, agDeep, 2, [textMsg('user', '孩子先聊')], 1)
+  const stDeep = peekSession('sess-nudge-37-deep')
+  arm37(stDeep, '兄弟代理的检索基底')
+  const nD = nudgesOf37(await runPreStep(h37, agDeep, 3, [textMsg('user', '孩子继续')], 1))
+  const depthVariant = nD.includes('委托进行中') && nD.includes('子代理/兄弟代理可立即召回') && stDeep.delegationActive === false // 纯 depth 触发，非闩锁
+
+  /* (e) 遥测：write-nudge 桶日志行带 delegation 标记（变体触发可归因） */
+  let logDeepOk = false
+  let logNormOk = false
+  try {
+    const lines37 = readFileSync(join(workspacePaths(WS_RIVER, BUCKET_RIVER).root, 'memo-river.log'), 'utf8').split('\n')
+    logDeepOk = lines37.some((l) => l.includes('write-nudge session=sess-nudge-37 ') && l.includes('delegation=1(depth=0+latch)'))
+    logNormOk = lines37.some((l) => l.includes('write-nudge session=sess-nudge-37 ') && l.includes('delegation=0'))
+  } catch {
+    /* 读不到即断言红 */
+  }
+
+  /* (f) 四锚参数回归（票面红线：7min/2turns/40steps/50K chars 不动） */
+  const cfg37 = makeConfig()
+  const anchorsOk =
+    cfg37.inject.writeNudgeEveryMinutes === 7 &&
+    cfg37.inject.writeNudgeEveryTurns === 2 &&
+    cfg37.inject.writeNudgeEverySteps === 40 &&
+    cfg37.inject.writeNudgeGrowthChars === 50_000
+
+  check(
+    37,
+    'write-nudge 场景感知：普通形态含质量锚（≤3 行）；委托变体三要素；memo_write 回落；四锚不动（票05）',
+    normSnapOk && normQueueOk && delSnapOk && delQueueOk && normalFired && latchOn && latchedOff && backToNormal && depthVariant && logDeepOk && logNormOk && anchorsOk,
+    [
+      `(a) 普通快照=${normSnapOk ? '✅ 2 行含锚' : `❌ ${JSON.stringify(normSnap)}`}；带队列=${normQueueOk ? '✅ 3 行' : `❌ ${normQueueSnap.split('\n').length} 行`}`,
+      `(b) 委托快照=${delSnapOk ? '✅ 三要素（先落盘/读者点明/锚）齐' : `❌ ${JSON.stringify(delSnap)}`}；带队列=${delQueueOk ? '✅ 4 行' : `❌ ${delQueueLines} 行`}`,
+      `(c) 探测链路：普通触发=${normalFired ? '✅' : '❌'}；subagent 闩锁=${latchOn ? '✅ 变体' : `❌ ${JSON.stringify(nB.slice(0, 80))}`}；memo_write 回落=${latchedOff && backToNormal ? '✅ 闩清+普通形态' : `❌ latch=${st37.delegationActive} 回落=${backToNormal}`}`,
+      `(d) delegationDepth=2=${depthVariant ? '✅ 变体（纯 depth，非闩锁）' : `❌ ${JSON.stringify(nD.slice(0, 80))}`}；日志 delegation 标记=${logDeepOk && logNormOk ? '✅ 1(depth+latch)/0 两态' : `❌ deep=${logDeepOk} norm=${logNormOk}`}`,
+      `(e) 四锚默认=${anchorsOk ? '✅ 7min/2turns/40steps/50K' : `❌ ${JSON.stringify({ m: cfg37.inject.writeNudgeEveryMinutes, t: cfg37.inject.writeNudgeEveryTurns, s: cfg37.inject.writeNudgeEverySteps, c: cfg37.inject.writeNudgeGrowthChars })}`}`,
+    ],
+  )
+  h37.dispose()
+}
+
 /* ══════════════════════ 汇总 ══════════════════════ */
 
 h.dispose()

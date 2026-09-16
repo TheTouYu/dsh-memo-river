@@ -64,7 +64,8 @@ export function sha256(text: string): string {
 export interface AgentLike {
   session: {
     id: string
-    header?: { cwd?: string }
+    /** delegationDepth：DSH SessionFormatHeader 固有字段（dsh-subagent 派子代理时 +1 盖章持久化）；顶层缺省。 */
+    header?: { cwd?: string; delegationDepth?: number }
     deriveMessages(): unknown[]
   }
 }
@@ -395,6 +396,36 @@ function hasMemoWriteCall(message: unknown): boolean {
   )
 }
 
+/* ── 票05（recall-quality-0916）：委托场景探针 ──────────────────────────────
+ * c9f838ba 取证：父 22:25 派 26 子代理前落的 D3/D4 成为它们的检索基底——扇出在飞时
+ * 写入价值最大，nudge 要换「先落盘：兄弟代理可立即召回」变体。两个信号：
+ *   ① session.header.delegationDepth > 0（本会话自身是被派的孩子——DSH 派发时盖章）；
+ *   ② 会话日志增量里出现委托工具调用（subagent/workflow/send_message 等，DSH 默认
+ *      toolName；与 memo_write 同形态的 tool-call 块）。
+ * 闩锁语义：见委托调用 → delegationActive=true；见 memo_write（进展已落盘）→ false。
+ * 与既有 memo_write 增量扫描（lastObservedLogLength 游标）共用范围，独立成趟——
+ * 既有那趟撞到 memo_write 会 break，本趟必须看全序（先写后派的批次要正确再闩上）。 */
+export const DELEGATION_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'subagent',
+  'subagent_fork',
+  'workflow',
+  'send_message',
+  'agent_send',
+  'ralph',
+])
+
+function hasDelegationCall(message: unknown): boolean {
+  const content = (message as { content?: unknown })?.content
+  if (!Array.isArray(content)) return false
+  return content.some(
+    (block) =>
+      !!block &&
+      typeof block === 'object' &&
+      (block as { type?: string }).type === 'tool-call' &&
+      DELEGATION_TOOL_NAMES.has(String((block as { name?: string }).name ?? '')),
+  )
+}
+
 /* ── 票05：增量锚的工具输出封顶（用户拍板 2026-09-14）──────────────────────────
  * 工具大输出（浏览器 DOM dump 等）不是概念进展，全额计入增量锚会在几分钟内攒满
  * 50K 反复触发（生产实锤：11:04:48/11:06:36/11:08:48 三连拍）。封顶口径：
@@ -449,6 +480,8 @@ export function evaluateWriteNudge(
   contextChars: number | null = null,
   /** 票05：草稿队列读数——懒取（只在确认要发提醒时求值一次，省每步目录 IO）。 */
   queueProvider?: () => PendingQueueStats | null,
+  /** 票05（recall-quality-0916）：委托场景（delegationDepth>0 或探针闩上）→ 共享提示变体。 */
+  delegation = false,
 ): string | null {
   const t = tuningValues(config, state.sessionId)
   const everyMin = t.writeNudgeEveryMinutes
@@ -504,7 +537,7 @@ export function evaluateWriteNudge(
   } catch {
     queue = null
   }
-  return renderWriteNudge(reason, draft?.turn ?? turn, digest, draft?.suggestedTags ?? [], queue)
+  return renderWriteNudge(reason, draft?.turn ?? turn, digest, draft?.suggestedTags ?? [], queue, delegation)
 }
 
 /**
@@ -564,6 +597,14 @@ export function installInjection(
               break
             }
           }
+          // 票05（recall-quality-0916）：委托闩锁——独立成趟（上一趟撞 memo_write 会 break，
+          // 本趟必须看全序：先写后派的批次要正确再闩上，先派后写要正确回落）。
+          let delegationDelta: boolean | null = null
+          for (let i = from; i < log.length; i++) {
+            if (hasDelegationCall(log[i])) delegationDelta = true
+            else if (hasMemoWriteCall(log[i])) delegationDelta = false
+          }
+          if (delegationDelta !== null) wstate.delegationActive = delegationDelta
           wstate.lastObservedLogLength = log.length
           if ([...decision.messages, ...(payload.messages ?? [])].some(hasMemoWriteCall)) {
             wstate.lastDiaryWriteAt = Date.now()
@@ -577,6 +618,9 @@ export function installInjection(
         const text = await buildTailInjection(deps, payload.agent, payload.turn, payload.step, payload.messages)
         // 写侧：写入节律提醒（独立于召回，可同拍并存；四锚：时间/汇报轮/步/增量）
         // 票05：提醒文案带本工作区草稿队列读数（懒取——evaluateWriteNudge 确认要发才扫目录）。
+        // 票05（recall-quality-0916）：委托场景（header.delegationDepth>0 或探针闩上）→ 共享提示变体。
+        const delegationDepth = payload.agent.session?.header?.delegationDepth ?? 0
+        const delegation = delegationDepth > 0 || (wstate?.delegationActive ?? false)
         const nudge = wstate
           ? evaluateWriteNudge(config, wstate, payload.turn, Date.now(), payload.step, contextChars, () => {
               try {
@@ -584,7 +628,7 @@ export function installInjection(
               } catch {
                 return null // 路径解析失败 → 提醒不带队列行，不出数字
               }
-            })
+            }, delegation)
           : null
         const extra: unknown[] = []
         if (text) extra.push(createInjectionMessage(text))
@@ -592,13 +636,15 @@ export function installInjection(
           extra.push(createWriteNudgeMessage(nudge))
           // 票01：遥测落桶日志（memo-river.log）——deps.log 是宿主 logger，生产实测两处都看不到
           // （09-14 评估：composer 11 次投递、桶日志 0 行）。带触发理由与步号。
+          // 票05（recall-quality-0916）：补 delegation 标记（depth/闩锁双来源），变体触发可归因。
+          const delegationTag = ` delegation=${delegation ? 1 : 0}${delegation ? `(depth=${delegationDepth}${wstate?.delegationActive ? '+latch' : ''})` : ''}`
           try {
             const wsLog = deps.getWorkspace(resolveCwd(payload.agent, wstate)).logger
             wsLog.info(
-              `write-nudge session=${wstate!.sessionId} turn=${payload.turn} step=${payload.step} reason=${wstate!.lastWriteNudgeReason}`,
+              `write-nudge session=${wstate!.sessionId} turn=${payload.turn} step=${payload.step} reason=${wstate!.lastWriteNudgeReason}${delegationTag}`,
             )
           } catch {
-            deps.log('info', `write-nudge session=${wstate!.sessionId} turn=${payload.turn} reason=${wstate!.lastWriteNudgeReason}`)
+            deps.log('info', `write-nudge session=${wstate!.sessionId} turn=${payload.turn} reason=${wstate!.lastWriteNudgeReason}${delegationTag}`)
           }
         }
         if (extra.length === 0) return decision

@@ -110,6 +110,12 @@ export function ageText(hours: number): string {
  * 在极简底座下是悬空引用（指向一个不存在的段落）。
  * 票05：队列非空时追加一行「草稿队列 N 篇待批（最老 X 小时）」——把漏斗断裂
  * 暴露到每次提醒；队列为空不追加（不显示误导数字，也不挤占原提醒信息）。
+ * 票05（recall-quality-0916）：两种形态——
+ *   · 普通：质量锚折进第 2 行，基底仍 2 行（+队列行 ≤3 行不变，2026-09-13 用户拍板
+ *     15→7 的前提是提醒成本极低，行数不加）；
+ *   · 委托（delegation）：c9f838ba 取证——父 22:25 派 26 子代理前落的 D3/D4 成为
+ *     它们的检索基底，扇出前写入价值最大。追加一行「先落盘当前进展：子代理/兄弟代理
+ *     可立即召回」+ 点明读者是兄弟代理而非未来的自己（引导写可共享知识）；锚在第 2 行。
  */
 export function renderWriteNudge(
   reason: string,
@@ -117,12 +123,22 @@ export function renderWriteNudge(
   digest: string,
   suggestedTags: string[],
   queue?: PendingQueueStats | null,
+  delegation?: boolean,
 ): string {
   const tags = suggestedTags.length > 0 ? suggestedTags.join('、') : '（用 memo_tags 看词汇表后选）'
   const lines = [
     `[memo-river·写入节律] 记忆节律提醒，非新任务：${reason}，turn ${turn} 的进展尚未入河——「${digest}」`,
-    `现在正是写日记的时机：用 memo_write 落一篇，Tag 优先复用词汇表：${tags}。规范见「写日记规范」段。`,
   ]
+  if (delegation) {
+    lines.push(
+      '委托进行中——先落盘当前进展：子代理/兄弟代理可立即召回。这篇日记的读者是兄弟代理而非未来的自己：写它们接手所需的可共享知识（结论/路径/教训），写增量（延续/转折/因果），不复述已入河内容。',
+    )
+  }
+  lines.push(
+    delegation
+      ? `现在正是写日记的时机：用 memo_write 落一篇，Tag 优先复用词汇表：${tags}。规范见「写日记规范」段。`
+      : `现在正是写日记的时机：用 memo_write 落一篇，写增量（延续/转折/因果），不复述已入河内容；Tag 优先复用词汇表：${tags}。规范见「写日记规范」段。`,
+  )
   if (queue && queue.pending > 0) {
     const age = queue.oldestAgeHours !== null ? `（最老 ${ageText(queue.oldestAgeHours)}）` : ''
     lines.push(`草稿队列 ${queue.pending} 篇待批${age}——可提示用户处理（看草稿 / 批准 / 丢弃）。`)
