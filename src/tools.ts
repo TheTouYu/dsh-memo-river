@@ -32,7 +32,7 @@ import { formatHealth, healthReport, HUB_RATIO_LIMIT, KV_USAGE, readUsageLedger,
 import { excerpt } from './render.js'
 import { setTuning, tuningSnapshot, tuningDefaults, tuningValues } from './tuning.js'
 import { tieBreakerParamsFrom } from './tiebreaker.js'
-import { listSessions } from './session.js'
+import { listSessions, peekSession } from './session.js'
 import type { RecallOptions } from './recall.js'
 import type { Logger } from './runtime.js'
 import { acquireBucketRuntime, resolveBucket, type WorkspaceRuntime } from './workspace.js'
@@ -59,13 +59,79 @@ export interface ToolDeps {
   log(level: 'info' | 'warn' | 'error', message: string): void
 }
 
-/** 查看者视角：从工具执行上下文解析 sessionId + cwd。 */
-export function viewerOf(exec: unknown): { sessionId: string | null; cwd: string } {
-  const agent = (exec as { agent?: { session?: { id?: string; header?: { cwd?: string } } } })?.agent
+/** 查看者视角：从工具执行上下文解析 sessionId + cwd + delegationDepth（票06 加）。 */
+export function viewerOf(exec: unknown): { sessionId: string | null; cwd: string; delegationDepth: number } {
+  const agent = (exec as { agent?: { session?: { id?: string; header?: { cwd?: string; delegationDepth?: number } } } })?.agent
+  const depth = agent?.session?.header?.delegationDepth
   return {
     sessionId: agent?.session?.id ?? null,
     cwd: agent?.session?.header?.cwd ?? process.cwd(),
+    delegationDepth: typeof depth === 'number' && Number.isFinite(depth) && depth > 0 ? depth : 0,
   }
+}
+
+/** 票06（recall-quality-0916）：写侧会话形态——探明的三个可用信号（按可信度排序）：
+ *  ① header.delegationDepth>0：DSH 派发子代理时盖章持久化（SessionFormatHeader 固有
+ *     字段），写工具的 exec 与 injector 的 payload 同源——c9f838ba 一夜 26 子代理
+ *     推爆「千星官方课程」的正是这批会话；
+ *  ② delegationActive 闩锁：本会话日志增量里出现过委托工具调用且进展未落盘
+ *     （票05 的探针，父侧扇出在飞）；
+ *  ③ lastInjectMode='autonomous'：injector 每 pre-step 持久化的注入形态
+ *     （injectMode=autonomous 的写侧等价物——oneshot/长回合无新用户输入的节律步）。
+ * 三者任一命中 = 「autonomous/delegation 会话」→ hub 闸门场景化生效；
+ * 全不命中 = 交互会话，保持现状软警告（票面验收线）。 */
+function writeSessionShape(exec: unknown): { scoped: boolean; source: string } {
+  const v = viewerOf(exec)
+  if (v.delegationDepth > 0) return { scoped: true, source: `delegationDepth=${v.delegationDepth}` }
+  const st = v.sessionId ? peekSession(v.sessionId) : undefined
+  if (st?.delegationActive) return { scoped: true, source: 'delegation-latch' }
+  if (st?.lastInjectMode === 'autonomous') return { scoped: true, source: 'injectMode=autonomous' }
+  return { scoped: false, source: 'interactive' }
+}
+
+/** 票06：桶内 Tag 频次（name → 挂它的本桶文件数）+ 分母。分母只数本桶文件
+ *  （tagFrequency() 是跨桶全局口径——多桶共用 sqlite 时会错分母）。 */
+function bucketTagCounts(
+  workspace: WorkspaceRuntime,
+  bucket: string,
+): { counts: Map<string, number>; files: number } {
+  const counts = new Map<string, number>()
+  const files = workspace.store.files(bucket)
+  for (const f of files) {
+    for (const t of workspace.store.fileTags(f.id)) {
+      counts.set(t.name, (counts.get(t.name) ?? 0) + 1)
+    }
+  }
+  return { counts, files: files.length }
+}
+
+/** 票06：词汇表内替代建议——优先按与被拒 Tag 的向量近邻（语义近的既有词），
+ *  无向量（嵌入未配置/旧词缺向量）退回桶内高频非枢纽词。两者都排除已枢纽化 Tag。 */
+function hubTagAlternatives(
+  workspace: WorkspaceRuntime,
+  rejected: string,
+  counts: Map<string, number>,
+  files: number,
+  limit = 5,
+): string[] {
+  const isHub = (name: string): boolean => {
+    const c = counts.get(name) ?? 0
+    return files > 0 && c / files >= HUB_RATIO_LIMIT
+  }
+  const pool = [...counts.keys()].filter((n) => n !== rejected && !isHub(n))
+  const rejVec = workspace.store.tags().find((t) => t.name === rejected)?.vector ?? null
+  if (workspace.embed.configured && rejVec) {
+    const scored: Array<{ name: string; score: number }> = []
+    for (const t of workspace.store.tags()) {
+      if (!pool.includes(t.name) || !t.vector) continue
+      scored.push({ name: t.name, score: cosine(rejVec, t.vector.subarray(0, workspace.resolved.dimension)) })
+    }
+    scored.sort((a, b) => b.score - a.score)
+    if (scored.length > 0) return scored.slice(0, limit).map((s) => s.name)
+  }
+  return pool
+    .sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0))
+    .slice(0, limit)
 }
 
 /** memo_tuning（§6.6 调参面板的工具面：面板走 HTTP，模型/用户走工具）。 */
@@ -88,12 +154,17 @@ function registerMemoTuning(ctx: { tools: { register(tool: unknown): () => void 
         tieBreakerCap: { type: 'number', description: '强化上界（默认 0.05）' },
         tieBreakerTau: { type: 'number', description: 'tanh 饱和常数（默认 2）' },
         tieBreakerRecencyHalfLifeDays: { type: 'number', description: '主动召回半衰期天数（默认 30）' },
+        hubGateMode: {
+          type: 'number',
+          description:
+            '票06 hub 写入闸门：0=off（只软警告）1=suggest（缺省：autonomous/delegation 会话写枢纽 Tag 放行+观察日志+替代建议）2=enforce（场景内硬拒+替代建议）。交互会话任何档位都保持软警告',
+        },
       },
       output: TEXT_OUTPUT,
       isConcurrencySafe: () => true,
       async execute(args: Record<string, unknown>, exec: unknown) {
         const viewer = viewerOf(exec)
-        const SPEC_KEYS = ['writeNudgeEveryMinutes', 'writeNudgeEveryTurns', 'writeNudgeEverySteps', 'writeNudgeGrowthChars', 'tieBreakerEnabled', 'tieBreakerCap', 'tieBreakerTau', 'tieBreakerRecencyHalfLifeDays']
+        const SPEC_KEYS = ['writeNudgeEveryMinutes', 'writeNudgeEveryTurns', 'writeNudgeEverySteps', 'writeNudgeGrowthChars', 'tieBreakerEnabled', 'tieBreakerCap', 'tieBreakerTau', 'tieBreakerRecencyHalfLifeDays', 'hubGateMode']
         if (args.action === 'get') {
           const snap = tuningSnapshot(config, tuningDefaults(), listSessions)
           const mine = viewer.sessionId ? (snap.session[viewer.sessionId] ?? {}) : {}
@@ -280,6 +351,10 @@ export interface WriteDiaryInput {
   newTagReason: string
   /** 写入内容去重阈值（0=关；调用方从 config.write.dedupCosine 传入，核心默认 0.88）。 */
   dedupCosine?: number
+  /** 票06：hub 闸门场景化——调用方解析的档位（tuningValues hubGateMode：0=off/1=suggest/2=enforce）
+   * + 写侧会话形态（writeSessionShape）。不传（memo_merge）= 豁免：合并是去枢纽手术工具，
+   * 源篇退役净文件数只减不增，拦它等于拦治疗。 */
+  hubGate?: { mode: number; scoped: boolean; source: string }
   /** 拒绝/成功报告的前置段（memo_write 传写前回注；memo_approve 传草稿出处；memo_update 传改写目标+回注）。
    * 票 03：允许传 Promise——write/update/merge 传 composeReinjection(...) 的**在飞** Promise，
    * 让回注嵌入与 writeDiaryCore 的合批嵌入并行；memo_approve 仍传 string。 */
@@ -375,6 +450,38 @@ export async function writeDiaryCore(
   }
   const longTag = tags.find((t) => [...t].length > TAG_NAME_MAX)
   if (longTag) return reject(`tag-too-long：Tag 名 ≤${TAG_NAME_MAX} 字`, `「${longTag}」为 ${[...longTag].length} 字`)
+
+  /* ②.5 票06：hub 闸门场景化——autonomous/delegation 会话写已枢纽化 Tag（桶内频次≥1/3）时
+   * 从软警告升级：enforce 硬拒 + 词汇表内替代建议；suggest（缺省）放行但带观察段与日志行
+   * （先观察后收紧——攒误伤证据再 memo_tuning hubGateMode=2）。交互会话不进这里（scoped=false），
+   * 保持 composeReinjection 的现状软警告。频次口径 = 桶内跨篇数（tagFrequency() 是跨桶全局口径）。 */
+  let hubObserve: { tag: string; count: number; files: number; advice: string[] } | null = null
+  if (input.hubGate && input.hubGate.mode > 0 && input.hubGate.scoped) {
+    const { counts, files: bucketFiles } = bucketTagCounts(workspace, bucket)
+    if (bucketFiles > 0) {
+      /* 改写目标已有的 Tag 不算「再堆」：它已计入跨篇数，改写不使频次 +1（拦它只会阻止修复）。 */
+      const exempt = new Set(
+        input.updateOf ? workspace.store.fileTags(input.updateOf.fileId).map((t) => t.name) : [],
+      )
+      const hubHit = tags.find((t) => !exempt.has(t) && (counts.get(t) ?? 0) / bucketFiles >= HUB_RATIO_LIMIT)
+      if (hubHit) {
+        const count = counts.get(hubHit) ?? 0
+        const advice = hubTagAlternatives(workspace, hubHit, counts, bucketFiles)
+        const where = `「${hubHit}」已挂 ${count}/${bucketFiles} 篇（≥1/3，桶=${bucket}），本会话形态=${input.hubGate.source}`
+        if (input.hubGate.mode >= 2) {
+          logger.info(
+            `memo_write bucket=${bucket} rejected=hub-tag-scoped tag=${hubHit} ratio=${(count / bucketFiles).toFixed(3)} shape=${input.hubGate.source} alternatives=${advice.join(',')}`,
+          )
+          return reject(
+            `hub-tag-scoped：${where}——autonomous/delegation 会话再堆枢纽 Tag 会把直接锚泛化（c9f838ba：26 子代理一夜推到 80.8%）`,
+            `词汇表内替代建议：${advice.length > 0 ? advice.map((a) => `「${a}」×${counts.get(a) ?? 0}`).join(' ') : '（暂无非枢纽替代词——宁可少一个 Tag，或确认概念真变了再给 newTagReason）'}\n` +
+              `交互会话不受此闸门约束（保持软警告）；档位来自 write.hubGateMode=2（enforce），可 memo_tuning 调回。`,
+          )
+        }
+        hubObserve = { tag: hubHit, count, files: bucketFiles, advice }
+      }
+    }
+  }
 
   /* 票 03 嵌入预算裁决：配置了嵌入但 15s×(1+重试) 后仍失败 → 整个写入以明确错误返回、不悬挂。
    * 不落无向量日记：chunk 向量为空的篇永不可 KNN 召回，旧文案许诺的「守护循环补算」并无对应代码
@@ -502,6 +609,17 @@ export async function writeDiaryCore(
       `memo_update bucket=${bucket} file=D${written.fileId} path=${filePath} ` +
         `checksum ${prevRow ? String(prevRow.checksum).slice(0, 12) : '?'}→${createHash('sha256').update(full).digest('hex').slice(0, 12)} ` +
         `title=${title} tags=${tags.join(',')}（原路径重写，fileId/台账足迹保留）`,
+    )
+  }
+  /* 票06 suggest 档观察：放行但留痕——报告段 + hub-gate-observe 日志行（收紧的判据素材）。 */
+  if (hubObserve) {
+    logger.info(
+      `hub-gate-observe bucket=${bucket} tag=${hubObserve.tag} ratio=${(hubObserve.count / hubObserve.files).toFixed(3)} ` +
+        `shape=${input.hubGate!.source} mode=suggest alternatives=${hubObserve.advice.join(',')}（放行观察；收紧=memo_tuning hubGateMode=2）`,
+    )
+    healthLines.push(
+      `· 【hub 闸门·观察】${hubObserve.tag} 已挂 ${hubObserve.count}/${hubObserve.files} 篇（≥1/3），本会话（${input.hubGate!.source}）又写它——已放行（hubGateMode=1 建议档）`,
+      `· 替代建议：${hubObserve.advice.length > 0 ? hubObserve.advice.map((a) => `「${a}」`).join(' ') : '（暂无非枢纽替代词）'}；下次写增量换用替代词，或观察攒证后 memo_tuning hubGateMode=2 收紧为硬拒`,
     )
   }
 
@@ -737,7 +855,8 @@ export function installTools(
       output: TEXT_OUTPUT,
       isConcurrencySafe: () => false,
       async execute(args: Record<string, unknown>, exec: unknown) {
-        const { cwd } = viewerOf(exec)
+        const viewer = viewerOf(exec)
+        const { cwd } = viewer
         const workspace = deps.getWorkspace(cwd)
         const content = String(args.content ?? '').trim()
         const bucket = typeof args.folder === 'string' && args.folder ? args.folder : workspace.paths.bucket
@@ -760,6 +879,11 @@ export function installTools(
           date,
           bucket,
           dedupCosine: config.write.dedupCosine,
+          /* 票06：hub 闸门场景化——档位走 tuning（preset/session 均可调），形态来自 exec 头+SessionState。 */
+          hubGate: {
+            mode: tuningValues(config, viewer.sessionId).hubGateMode ?? config.write.hubGateMode,
+            ...writeSessionShape(exec),
+          },
           newTagReason,
           preamble: reinjection,
           toolName: 'memo_write',
@@ -792,7 +916,8 @@ export function installTools(
       output: TEXT_OUTPUT,
       isConcurrencySafe: () => false,
       async execute(args: Record<string, unknown>, exec: unknown) {
-        const { cwd } = viewerOf(exec)
+        const viewer = viewerOf(exec)
+        const { cwd } = viewer
         const workspace = deps.getWorkspace(cwd)
         const content = String(args.content ?? '').trim()
         const bucket = typeof args.folder === 'string' && args.folder ? args.folder : workspace.paths.bucket
@@ -854,6 +979,12 @@ export function installTools(
           date,
           bucket,
           dedupCosine: config.write.dedupCosine,
+          /* 票06：改写也走 hub 闸门（场景内给**别的**篇新挂枢纽 Tag 同样是推爆）；
+           * 目标自身已有的 Tag 在核心里豁免（跨篇数不 +1，拦它只会阻止修复）。 */
+          hubGate: {
+            mode: tuningValues(config, viewer.sessionId).hubGateMode ?? config.write.hubGateMode,
+            ...writeSessionShape(exec),
+          },
           newTagReason,
           preamble: reinjection,
           toolName: 'memo_update',
@@ -959,6 +1090,8 @@ export function installTools(
           date,
           bucket,
           dedupCosine: config.write.dedupCosine,
+          /* 票06：memo_merge 不传 hubGate = 豁免——合并把源篇退役归一，净文件数只减不增，
+           * 是去枢纽的手术工具（与 perf-funnel 票08 存量手术衔接）；拦它等于拦治疗。 */
           newTagReason,
           preamble: reinjection,
           toolName: 'memo_merge',
@@ -1087,6 +1220,13 @@ export function installTools(
         if (targets.length === 0) return '【记忆河流·memo_approve】队列为空，无可批准草稿。'
         const startedAt = Date.now()
         const lines = [`【记忆河流·memo_approve】待处理 ${targets.length} 篇`]
+        /* 票06：批准会话的形态/档位解析一次（批准者是谁就按谁的场景算——机械批准污染
+         * （D10 样本一）正是 autonomous/delegation 会话在无人把关时批量入库的场景内行为）。 */
+        const viewer = viewerOf(exec)
+        const hubGate = {
+          mode: tuningValues(config, viewer.sessionId).hubGateMode ?? config.write.hubGateMode,
+          ...writeSessionShape(exec),
+        }
 
         /* 票 04：逐篇串行 → 有界并行（worker-pool，模式同 embed.ts 的 TAG_VECTORIZE_CONCURRENCY）。
          * 每篇仍走与串行版**同一份**闸门链：workspaceFor → curateTags（∩ 词汇表）→ TAG_MIN 跳过 →
@@ -1114,6 +1254,7 @@ export function installTools(
             date,
             bucket: record.bucket,
             dedupCosine: config.write.dedupCosine,
+            hubGate,
             newTagReason: '',
             preamble: `【草稿批准】${basename(record.path)}（桶=${record.bucket}，回合${record.turn}；Tag 只复用既有词汇）`,
             toolName: 'memo_approve',

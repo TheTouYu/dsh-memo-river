@@ -146,6 +146,19 @@ export interface WriteConfig {
    *   → 0.95 居中，两端各留 ~0.02。短文+同 Tag 行是合法侧的最坏情形（boilerplate 占比最大）。
    */
   dedupCosine: number
+  /**
+   * 票06（recall-quality-0916）：hub Tag 写入闸门场景化——autonomous/delegation 会话
+   * （delegationDepth>0 / 委托闩锁 / 最近一步 injectMode=autonomous）写已枢纽化 Tag
+   * （桶内频次 ≥1/3）时的处理档位；交互会话永远保持软警告（现状）。
+   * 由头：c9f838ba 一夜 26 子代理 25 篇把「千星官方课程」推到 21/26=80.8%，写侧枢纽
+   * 警告全触发放行——软警告对无人类在场的会话没有约束力。
+   *   0 = off：回旧行为（场景内也只软警告）；
+   *   1 = suggest（缺省）：先观察后收紧——写入放行，但报告带观察段+词汇表内替代建议，
+   *       并落 hub-gate-observe 日志行（收集误伤率，攒证据再收紧）；
+   *   2 = enforce：场景内硬拒（hub-tag-scoped）+ 词汇表内替代 Tag 建议。
+   * preset 级可调（memo_tuning hubGateMode / tuning.json，无需重启）。
+   */
+  hubGateMode: number
 }
 
 export interface Config {
@@ -283,6 +296,8 @@ export const Config: z<Config> = z.object({
   write: z
     .object({
       dedupCosine: z.number().min(0).max(1).default(0.95),
+      /** 票06 hub 闸门档位：0=off / 1=suggest（缺省，观察+建议）/ 2=enforce（场景内硬拒）。语义见 WriteConfig.hubGateMode。 */
+      hubGateMode: z.number().min(0).max(2).default(1),
     })
     .default({} as WriteConfig),
 

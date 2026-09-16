@@ -105,6 +105,13 @@ export interface SessionState {
    * 决定 write-nudge 用「先落盘：兄弟代理可立即召回」变体。
    */
   delegationActive: boolean
+  /**
+   * 最近一步的注入形态（票06 写侧信号）：injector 每 pre-step 落一次
+   * isTurnStart ? 'interactive' : 'autonomous'——memo_write 等写工具在 execute
+   * 里读它做 hub 闸门场景化（autonomous 会话写枢纽 Tag 从软警告升级）。
+   * 没被 injector 见过的会话（新起/禁用注入）保持 'interactive' 缺省——保守不误伤。
+   */
+  lastInjectMode: 'interactive' | 'autonomous'
   /** 最近观测到的工具输出长度环形样本（≤20 条；增量锚截尾均值的量尺，票05）。 */
   toolLens: number[]
   /** 最近一条 ≥150 字助手正文的首行摘要（票05：digest 触发时现取，不走 turn-stopping 存货）。 */
@@ -161,6 +168,7 @@ export function getSession(sessionId: string, cwd: string | null): SessionState 
     lastWriteNudgeStep: 0,
     lastWriteNudgeReason: '',
     delegationActive: false,
+    lastInjectMode: 'interactive',
     toolLens: [],
     lastAssistantDigest: '',
     activeMs: 0,

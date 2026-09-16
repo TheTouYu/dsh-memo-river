@@ -215,6 +215,11 @@ export async function buildTailInjection(
     (m) => (m as { role?: string }).role === 'user' && (m as { source?: { kind?: string } }).source?.kind !== 'tool',
   )
   const isTurnStart = step === 1 || hasFreshUserInput
+  /* 票06（recall-quality-0916）：写侧会话形态信号——把本步 injectMode 持久化到
+   * SessionState，写工具（memo_write/update/approve）execute 时可读，做 hub 闸门
+   * 场景化（autonomous 会话写已枢纽化 Tag 升级处理）。放在时序闸（:191 同步去重）
+   * 之后、节流闸（:223 无事早退）之前：无论本步是否真注入，形态都要最新。 */
+  state.lastInjectMode = isTurnStart ? 'interactive' : 'autonomous'
   const compactionId = latestCompactionId([...rawHistory, ...(claimed ?? [])])
   const compactionFired = compactionId !== null && compactionId !== state.lastCompactionId
   if (compactionId !== null) state.lastCompactionId = compactionId

@@ -27,6 +27,8 @@ export interface TuningSpecItem {
   hint: string
   min: number
   max: number
+  /** 键落地的 config 段（票06 首次出现 write 段键；缺省 'inject' 兼容既有八键）。 */
+  target?: 'inject' | 'write'
 }
 
 export const TUNING_SPEC: readonly TuningSpecItem[] = [
@@ -86,9 +88,22 @@ export const TUNING_SPEC: readonly TuningSpecItem[] = [
     min: 1,
     max: 365,
   },
+  {
+    key: 'hubGateMode',
+    label: 'hub 写入闸门（票06）',
+    hint: 'autonomous/delegation 会话写已枢纽化 Tag（桶内频次≥1/3）：0=关（只软警告）1=建议（缺省：放行+观察日志+替代建议）2=硬拒+替代建议。交互会话不受影响',
+    min: 0,
+    max: 2,
+    target: 'write',
+  },
 ] as const
 
 const SPEC_KEYS = new Set(TUNING_SPEC.map((s) => s.key))
+
+/** 键 → config 段（inject/write；票06 前全部住在 inject）。 */
+function configSection(config: Config, target: 'inject' | 'write' | undefined): Record<string, number> {
+  return (target === 'write' ? config.write : config.inject) as unknown as Record<string, number>
+}
 
 /** 预设级覆盖文件（测试可换路径）。 */
 let tuningFile = join(homedir(), '.dsh/.agent-presets/memo-river/tuning.json')
@@ -122,7 +137,10 @@ export function applyPresetTuning(config: Config): void {
   const { mtime, values } = readTuningFile()
   fileMtimeMs = mtime
   fileValues = values
-  Object.assign(config.inject as unknown as Record<string, number>, values)
+  /* 票06：键按 spec.target 分段灌入（hubGateMode → config.write，其余 → config.inject）。 */
+  for (const s of TUNING_SPEC) {
+    if (values[s.key] !== undefined) configSection(config, s.target)[s.key] = values[s.key]
+  }
 }
 
 /** 每次求值时调用：外部改了文件（别的进程/手编）也能自动跟进。 */
@@ -131,13 +149,12 @@ function refreshPresetTuning(config: Config): void {
   if (mtime !== fileMtimeMs) applyPresetTuning(config)
 }
 
-/** 会话生效值：会话级 > 预设级（config.inject 已含） > 默认。 */
+/** 会话生效值：会话级 > 预设级（config 段已含） > 默认。 */
 export function tuningValues(config: Config, sessionId: string | null): Record<string, number> {
   refreshPresetTuning(config)
   const out: Record<string, number> = {}
   for (const s of TUNING_SPEC) {
-    const base = (config.inject as unknown as Record<string, number>)[s.key] ?? 0
-    out[s.key] = base
+    out[s.key] = configSection(config, s.target)[s.key] ?? 0
   }
   const ov = sessionId ? sessionTuning.get(sessionId) : undefined
   if (ov) Object.assign(out, ov)
@@ -212,7 +229,11 @@ export function setTuning(
     writeFileSync(tuningFile, JSON.stringify(next, null, 2) + '\n', 'utf8')
     fileValues = next
     fileMtimeMs = statSync(tuningFile).mtimeMs
-    Object.assign(config.inject as unknown as Record<string, number>, applied)
+    /* 票06：按 spec.target 分段变异（hubGateMode → config.write）。 */
+    for (const [k, v] of Object.entries(applied)) {
+      const spec = TUNING_SPEC.find((s) => s.key === k)!
+      configSection(config, spec.target)[k] = v
+    }
   } else {
     if (!sessionId) return { scope, applied, rejected: [...rejected, { key: '(scope)', reason: '会话级需要 sessionId' }] }
     const cur = sessionTuning.get(sessionId) ?? {}
@@ -232,7 +253,7 @@ export function tuningDefaults(): Record<string, number> {
     // cordis z：运行时全字段有默认，空对象即可解出默认值（TS 签名要求完整 Config，故双 cast）
     const parsed = ConfigSchema({} as unknown as Config) as Config
     const out: Record<string, number> = {}
-    for (const s of TUNING_SPEC) out[s.key] = (parsed.inject as unknown as Record<string, number>)[s.key] ?? 0
+    for (const s of TUNING_SPEC) out[s.key] = configSection(parsed, s.target)[s.key] ?? 0
     return out
   } catch {
     return {}

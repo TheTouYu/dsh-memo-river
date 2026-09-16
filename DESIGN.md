@@ -271,12 +271,13 @@ D6「终局报告：六轮盲测 0 误判」 role=thematic_neighbor  topology=+0
 执行顺序（**不可省略**）：
 1. **回注**：现有 Tag 词汇表（按频次 top 30）+ 语义相关旧日记 3 条 + 体检警告（当前连通分量数 / 是否有 Tag 超过总量 1/3）；
 2. **校验**：必须有 `Tag:` 行；单篇 3–5 个 Tag；Tag 名 ≤20 字；不得含同义漂移高风险词（与现有 Tag 余弦 > 0.92 视为同义 → 要求复用）；必须有标题派生源（票 02，2026-09-16：显式 `title` 参数 > 正文首个 `# ` 标题行 > 改写/合并保留篇原标题，三级皆无 → `missing-title` 拒绝——不再自动落「未命名」占位标题；标题取自正文 `# ` 行时该行从写盘全文剥掉，不再重复拼两次）；
+2.5. **hub 闸门场景化**（票 06，2026-09-16，详 §7.1.4）：autonomous/delegation 会话写已枢纽化 Tag（桶内跨篇频次 ≥1/3）→ 按 `write.hubGateMode` 档位处理（缺省 1=suggest 放行+观察；2=enforce 硬拒；0=off）；交互会话任何档位都只走第 1 步的软警告；
 3. **新 Tag 闸门**：若引入库中不存在的 Tag，必须在参数 `newTagReason` 里给出"概念确实变了"的理由，否则拒绝；
 3.5. **内容去重闸门**（写侧对称物 of inject.dedupeSelection）：新日记全文嵌入 vs 本桶既有 chunk 的最大余弦 > `write.dedupCosine`（默认 0.95，定标见 config.ts 注释：合法同话题续写 0.9325 放行 / 逐句重排复读 0.9793 拦截）→ 拒绝并**指认孪生篇**（路径+分数），提示「写增量/转折，或合并进旧篇」。嵌入算一次，入库复用；
 4. **写入**：`files`/`file_tags`/`tags`/`chunks` 落库（VCP schema）→ 嵌入 → 索引追加 → 触发 artifact 重建（异步）；
 5. **返回**：体检增量（连通分量是否仍为 1、新 Tag 频次、该篇在河中的位置）。
 
-**拒绝条件**（明确报错，不静默）：缺标题派生源（missing-title）/ 缺 Tag 行 / 未确认新 Tag / Tag 超过单篇 5 个 / 与既有 Tag 同义 / 与既有日记正文近重复。
+**拒绝条件**（明确报错，不静默）：缺标题派生源（missing-title）/ 缺 Tag 行 / 未确认新 Tag / Tag 超过单篇 5 个 / 与既有 Tag 同义 / 与既有日记正文近重复 / autonomous·delegation 会话写已枢纽化 Tag（hub-tag-scoped，仅 enforce 档）。
 
 ### 7.1.1 `memo_update` —— 单篇原地改写（票 02，2026-09-14；兑 3.5「或合并进旧篇」的承诺）
 
@@ -317,6 +318,29 @@ D6「终局报告：六轮盲测 0 误判」 role=thematic_neighbor  topology=+0
 - 守护接线：`daemon.ts` runOnce ② 步（体检前），health.log 行新增 `mergeCandidates=off|无从判定（空库）|无候选|K/checked`；`GuardianRound.mergeCandidates`（null=关闭，-1=空库）。
 - 闭环：票①台账（判定②数据）→ 票③ memo_merge（执行通道）→ 本票检测（建议生产）——「压缩式遗忘」从手动工具升级为守护循环的自动建议流。
 - 验收：`scripts/acceptance-consolidation.mjs`（C-1..C-5）。
+
+### 7.1.4 hub 写入闸门场景化（票 06，2026-09-16；子代理防推爆）
+
+**由头**：软警告对无人类在场的会话没有约束力——c9f838ba 一夜 26 子代理写 25 篇把「千星官方课程」推到 21/26=80.8%（health round=27 告警），写侧枢纽警告**全部触发放行**；本仓桶同病（「记忆自驱」等 top3 均 ≥1/3）。与 perf-funnel-0915 票 08 存量手术衔接：手术后本票防复发。
+
+**写侧会话形态（三个信号，任一命中 = autonomous/delegation 会话）**，探明顺序即可信度顺序：
+1. `session.header.delegationDepth > 0`——DSH 派发子代理时盖章持久化，写工具的 `exec` 与 injector 的 payload 同源（c9f838ba 的 26 个推爆者全在此列）；
+2. `delegationActive` 闩锁（票05 探针）：本会话日志增量出现过委托工具调用且进展未落盘（父侧扇出在飞）；
+3. `SessionState.lastInjectMode === 'autonomous'`（本票新增持久化）：injector 每 pre-step 落 `isTurnStart ? 'interactive' : 'autonomous'`——`injectMode=autonomous` 的写侧等价物。全不命中 = 交互会话。
+
+**频次口径**：Tag 的**桶内**跨篇数 / 本桶文件数 ≥ `HUB_RATIO_LIMIT`(1/3)（与体检判据②同一条线；`tagFrequency()` 是跨桶全局口径，多桶共用 sqlite 时会错分母，故写侧单独算）。
+
+**档位** `write.hubGateMode`（preset 级可调：`memo_tuning` / tuning.json / 面板，改完即生效）：
+
+| 档 | 值 | 场景内行为（交互会话任何档都只是软警告） |
+|---|---|---|
+| off | 0 | 回旧行为：场景内也只软警告（回滚位） |
+| suggest | **1（缺省）** | 放行 + 报告带【hub 闸门·观察】段 + 词汇表内替代建议 + `hub-gate-observe` 日志行（先观察后收紧：攒误伤证据再上 enforce） |
+| enforce | 2 | **硬拒** `hub-tag-scoped`：拒绝文案带该 Tag 桶内频次与会话形态来源 + 词汇表内替代建议（嵌入可用时按与被拒 Tag 的向量近邻排序，否则桶内高频非枢纽词） |
+
+**豁免**（都有闸门语义依据，不是漏洞）：`memo_merge` 整体豁免——合并把源篇退役归一，净文件数只减不增，是去枢纽的手术工具；`memo_update` 豁免改写目标自身已有的 Tag——该 Tag 跨篇数不 +1，拦它只会阻止修复。覆盖 `memo_write`/`memo_update`/`memo_approve` 三入口（同一份 `writeDiaryCore`；approve 的会话形态按**批准者**算——D10 机械批准污染正是无人把关的批量入库）。
+
+**试运行**（生产桶 6c8bcf85 的 /tmp 副本，2026-09-16，files=70：被动召回 27/70=38.6%、记忆自驱 25/70=35.7%、上游对照 24/70=34.3% 均 ≥1/3）：模拟委托子代理写「记忆自驱」——suggest 档放行+观察段+替代建议（归因错误/写入去重/回合边界依赖/上下文审计/门控校准）；enforce 档 `hub-tag-scoped` 硬拒+带频次的替代建议；同 enforce 档交互会话放行（软警告仍在）。验收：`scripts/acceptance-hub-gate.mjs`（H-1..H-8）。
 
 ### 7.2 `memo_recall`
 
