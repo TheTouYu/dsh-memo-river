@@ -35,7 +35,8 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Config } from './config.js'
 import { recordOmega, recordUsage } from './health.js'
-import { BLOCK_CLOSE, continuationTail, renderInjection, renderSkipNotice, renderWriteNudge } from './render.js'
+import { BLOCK_CLOSE, continuationTail, DelegationExtras, renderInjection, renderSkipNotice, renderWriteNudge } from './render.js'
+import { coldTagSuggest, sameAxisHit, scanTagAxis } from './nudge-guide.js'
 import { buildQueryField, type RecallOptions } from './recall.js'
 import { tuningValues } from './tuning.js'
 import { getSession, peekSession, type SessionState } from './session.js'
@@ -519,6 +520,8 @@ export function evaluateWriteNudge(
   delegation = false,
   /** 票12：接续锚——最近一篇日记末段一句的懒取（只在确认要发提醒时读一次盘）。 */
   tailProvider?: () => string | null,
+  /** 票11：委托变体引导（冷门 Tag + 同轴合并）的懒取（仅 delegation 时调用一次）。 */
+  extrasProvider?: (suggestedTags: string[]) => DelegationExtras | null,
 ): string | null {
   const t = tuningValues(config, state.sessionId)
   const everyMin = t.writeNudgeEveryMinutes
@@ -583,6 +586,15 @@ export function evaluateWriteNudge(
     tail = null
   }
   const compressed = state.compressStreak > 0 && state.lastCompressAt > state.lastDiaryWriteAt ? state.compressStreak : 0
+  // 票11：委托变体引导（懒取——只在确认发提醒且 delegation 时扫一次盘；失败回落 null）。
+  let delegationExtras: DelegationExtras | null = null
+  if (delegation) {
+    try {
+      delegationExtras = extrasProvider ? extrasProvider(draft?.suggestedTags ?? []) : null
+    } catch {
+      delegationExtras = null
+    }
+  }
   return renderWriteNudge(
     reason,
     draft?.turn ?? turn,
@@ -592,12 +604,24 @@ export function evaluateWriteNudge(
     delegation,
     tail,
     compressed,
+    delegationExtras,
   )
 }
 
 /**
  * 注册注入 seam。返回 disposer 列表（调用方用 ctx.effect 包住）。
  */
+
+/** 票12①/票11：会话对应桶的日记目录（纯路径解析，无副作用）。失败 → null。 */
+function diaryDirFor(agent: unknown, wstate: SessionState): string | null {
+  try {
+    const cwd = resolveCwd(agent as never, wstate)
+    const paths = workspacePaths(cwd)
+    return join(paths.root, 'dailynote', paths.bucket)
+  } catch {
+    return null
+  }
+}
 
 /** 票12①：接续锚——本桶最近一篇日记的末段一句（D10 复读机根因：无锚则复述；
  * 给「上一篇止于哪」比要求「别复述」有效）。纯路径直读磁盘（readdir+mtime 择新），
@@ -606,9 +630,8 @@ export function evaluateWriteNudge(
 function lastDiaryTail(deps: InjectorDeps, agent: unknown, wstate: SessionState): string | null {
   void deps
   try {
-    const cwd = resolveCwd(agent as never, wstate)
-    const paths = workspacePaths(cwd)
-    const dir = join(paths.root, 'dailynote', paths.bucket)
+    const dir = diaryDirFor(agent, wstate)
+    if (!dir) return null
     const names = readdirSync(dir).filter((n) => n.endsWith('.md'))
     if (names.length === 0) return null
     let newest: { name: string; mtime: number } = { name: names[0]!, mtime: statSync(join(dir, names[0]!)).mtimeMs }
@@ -617,6 +640,24 @@ function lastDiaryTail(deps: InjectorDeps, agent: unknown, wstate: SessionState)
       if (m > newest.mtime) newest = { name: n, mtime: m }
     }
     return continuationTail(readFileSync(join(dir, newest.name), 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+/** 票11：委托变体引导（堵改疏）——冷门 Tag 建议（剔枢纽 ≥1/3，不足从词汇表补齐）+
+ * 同轴合并提示（近期高 Tag 重叠 → 优先 update/merge 而非新开篇）。纯路径扫描
+ * （nudge-guide，无 getWorkspace 副作用）；失败/空桶 → null（文案回落票 05/12 形态）。 */
+function delegationExtrasFor(agent: unknown, wstate: SessionState, suggested: string[]): DelegationExtras | null {
+  try {
+    const dir = diaryDirFor(agent, wstate)
+    if (!dir) return null
+    const scan = scanTagAxis(dir)
+    if (!scan || scan.files === 0) return null
+    return {
+      coldTags: coldTagSuggest(suggested, scan).tags,
+      sameAxis: sameAxisHit(scan, suggested),
+    }
   } catch {
     return null
   }
@@ -715,7 +756,7 @@ export function installInjection(
               } catch {
                 return null // 路径解析失败 → 提醒不带队列行，不出数字
               }
-            }, delegation, () => lastDiaryTail(deps, payload.agent, wstate))
+            }, delegation, () => lastDiaryTail(deps, payload.agent, wstate), (suggested) => delegationExtrasFor(payload.agent, wstate, suggested))
           : null
         const extra: unknown[] = []
         if (text) extra.push(createInjectionMessage(text))

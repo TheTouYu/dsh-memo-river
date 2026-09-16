@@ -129,6 +129,17 @@ export function continuationTail(content: string): string | null {
  *     它们的检索基底，扇出前写入价值最大。追加一行「先落盘当前进展：子代理/兄弟代理
  *     可立即召回」+ 点明读者是兄弟代理而非未来的自己（引导写可共享知识）；锚在第 2 行。
  */
+/**
+ * 票 11（recall-quality-0916）：委托变体追加引导（堵改疏）——
+ *   · coldTags：冷门 Tag 建议（枢纽 ≥1/3 不入名单，injector 纯路径扫描得出）；
+ *   · sameAxis：同轴合并提示——近期已有高 Tag 重叠条目时，引导「优先 update/merge
+ *     并入而非新开篇」。两者缺省时委托变体与票 05/12 形态逐字一致（零回归）。
+ */
+export interface DelegationExtras {
+  coldTags?: string[]
+  sameAxis?: { title: string; overlap: number; shared?: string[] } | null
+}
+
 export function renderWriteNudge(
   reason: string,
   turn: number,
@@ -140,8 +151,12 @@ export function renderWriteNudge(
   tail?: string | null,
   /** 票12：压缩联动——自上次写入以来观测到的 compress 次数（>0 才带）。 */
   compressed?: number,
+  /** 票11：委托变体引导（冷门 Tag + 同轴合并提示；仅 delegation=true 时生效）。 */
+  delegationExtras?: DelegationExtras | null,
 ): string {
-  const tags = suggestedTags.length > 0 ? suggestedTags.join('、') : '（用 memo_tags 看词汇表后选）'
+  const extras = delegation ? (delegationExtras ?? null) : null
+  const tagSource = extras?.coldTags && extras.coldTags.length > 0 ? extras.coldTags : suggestedTags
+  const tags = tagSource.length > 0 ? tagSource.join('、') : '（用 memo_tags 看词汇表后选）'
   const compressClause =
     compressed && compressed > 0 ? `；刚压缩过 ${compressed} 段——优先落盘被压缩前的关键细节` : ''
   const lines = [
@@ -150,6 +165,12 @@ export function renderWriteNudge(
   if (delegation) {
     lines.push(
       '委托进行中——先落盘当前进展：子代理/兄弟代理可立即召回。这篇日记的读者是兄弟代理而非未来的自己：写它们接手所需的可共享知识（结论/路径/教训），写增量（延续/转折/因果），不复述已入河内容。',
+    )
+  }
+  if (extras?.sameAxis) {
+    const shared = extras.sameAxis.shared?.length ? `：${extras.sameAxis.shared.join('、')}` : ''
+    lines.push(
+      `同轴提示：近期已有《${extras.sameAxis.title}》（Tag 重叠 ${extras.sameAxis.overlap}${shared}）——这是同轴第 2+ 篇：优先 memo_update 并入前篇或 memo_merge 归一，而非新开篇。`,
     )
   }
   lines.push(
