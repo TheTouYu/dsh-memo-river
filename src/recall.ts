@@ -20,6 +20,13 @@ import { applyUsageTieBreaker, type TieBreakerParams } from './tiebreaker.js'
  */
 export const GATE_ASSISTANT_MARGIN = 0.07
 
+/**
+ * 票 03：自适应 K 的池地板——候选数 <5 的稀疏桶保持固定 k（旧行为逐位不变）。
+ * 5 的由头：验收 #19/#25（k=2/池 3）与 #31（k=1/池 2）等显式小 k 用例都在此之下；
+ * 池=5 时 ceil(5×0.6)=3 恰等于默认 k=3，扩容从零起步平滑衔接（无跳变）。
+ */
+export const ADAPTIVE_K_POOL_FLOOR = 5
+
 export interface RecallCandidate {
   /** chunk id（VCP 里就是日记的 D<id>）。 */
   id: number
@@ -89,6 +96,10 @@ export interface RecallOptions {
   k: number
   tokenBudget: number
   dynamicK: number
+  /** 票 03：自适应 K 比例——候选池 ≥ ADAPTIVE_K_POOL_FLOOR 时条数上限提到 clamp(ceil(池×比例), k, adaptiveKMax)；0/缺省 = 固定 k（旧行为）。 */
+  adaptiveKRatio?: number
+  /** 票 03：自适应 K 条数硬顶（与 adaptiveKRatio 配套；ratio≤0 或 max≤0 视为关闭）。 */
+  adaptiveKMax?: number
   gate: boolean
   gateThreshold: number
   minKnnForReward: number
@@ -389,8 +400,22 @@ export async function recall(
        只在近似并列处翻序——细节与风险声明见 DESIGN「边界与不承诺」。 */
     const ranked = applyUsageTieBreaker(rows, readUsageLedger(store), options.tieBreaker, started)
 
-    /* ⑤ 动态 K（倍率）+ 预算截断（::Truncate：保 role 与首句） */
-    const kEff = Math.max(1, Math.round(options.k * Math.max(0, options.dynamicK)))
+    /* ⑤ 条数上限（票 03 自适应 K）+ 动态 K 倍率 + 预算截断（::Truncate：保 role 与首句）
+     *
+     * 自适应 K：候选池 ≥ ADAPTIVE_K_POOL_FLOOR 时，条数上限从固定 k 抬到
+     * clamp(ceil(池×adaptiveKRatio), k, adaptiveKMax)——只升不降；池 <5（稀疏桶）保持
+     * 固定 k，旧行为逐位不变。定标依据与回滚开关见 config.ts adaptiveKRatio 注释。
+     * **预算绝不让步**：这里只抬「条数上限」，总预算仍由下方逐条 cost 校验兜底
+     * （超预算先截首句、再丢 token-budget）——k 再大也装不超 tokenBudget。
+     * dynamicK 倍率语义不变：先定基数 kBase，再乘倍率取整（≥1）。 */
+    const poolSize = ranked.length
+    const adaptiveRatio = options.adaptiveKRatio ?? 0
+    const adaptiveMax = options.adaptiveKMax ?? 0
+    let kBase = options.k
+    if (adaptiveRatio > 0 && adaptiveMax > 0 && poolSize >= ADAPTIVE_K_POOL_FLOOR) {
+      kBase = Math.max(options.k, Math.min(Math.ceil(poolSize * adaptiveRatio), adaptiveMax))
+    }
+    const kEff = Math.max(1, Math.round(kBase * Math.max(0, options.dynamicK)))
     const dropped: Array<{ id: number; title: string; reason: string }> = []
     const selected: RecallCandidate[] = []
     let used = 0
@@ -491,6 +516,10 @@ export async function recall(
         gateMaxKnn,
         retrievalMaxKnn,
         pipelineElapsedMs,
+        // 票 03：选择阶段留痕（inject 日志的 candidates/dropped 之外的口径自检素材）
+        kEff,
+        kBase,
+        adaptivePool: poolSize,
         readoutDiagnostics: readout.diagnostics ?? null,
         fieldTrusted: (meta.diagnostics as Record<string, unknown> | undefined)?.fieldTrusted ?? null,
         fieldEntropy: (meta.diagnostics as Record<string, unknown> | undefined)?.fieldEntropy ?? null,

@@ -28,6 +28,21 @@ export interface InjectConfig {
   mode: ReadoutMode
   /** 动态 K 倍率（`[[本:1.5]]` 语义，是倍率不是条数）。 */
   dynamicK: number
+  /**
+   * 票 03：自适应 K 比例——被动注入的候选池 ≥ ADAPTIVE_K_POOL_FLOOR(5，见 recall.ts) 时，
+   * 条数上限从固定 k 抬到 clamp(ceil(候选数×本值), k, adaptiveKMax)（只升不降）；
+   * 池 <5 的稀疏桶逐位保持旧行为（固定 k）。0 = 关闭（回滚到固定 k）。
+   *
+   * 定标（2026-09-16，genshin-ts 桶 c9f838ba 深评 docs/EVAL-单会话深评-genshin-ts-c9f838ba.md）：
+   * 一夜 26 子代理写 25 篇（桶 2→27），被动注入固定 k=3 → 后期注入 dropped 24/26≈92%
+   * （dropped 率 = dropped.length/候选数，inject 日志口径）。dropped 率 <50% 需 k≥14：
+   * ratio=0.5 → ceil(26×0.5)=13 → 恰 50% 不过线；取 0.6 → ceil(15.6)=16 → dropped
+   * 10/26≈38.5% ✅。预算不让步：自适应只抬条数上限，chars/token 总预算仍由读出侧
+   * 逐条 cost 校验（超预算先截首句、再丢 token-budget）兜底，k 再大也装不超 tokenBudget。
+   */
+  adaptiveKRatio: number
+  /** 票 03：自适应 K 条数硬顶——病理大池封顶渲染成本：c9f838ba 27 篇场景 k=16 时 dropped 11/27≈41%，仍 <50%。 */
+  adaptiveKMax: number
   /** 低基数门限（§2.2 规则 4）：KNN 低于此值的候选不发放结构奖励。 */
   minKnnForReward: number
   /** 门控阈值：本会话查询场对日记本的最大 KNN 余弦低于此值 → 清空不注入。 */
@@ -182,6 +197,10 @@ export const Config: z<Config> = z.object({
       tokenBudget: z.number().min(1).default(600),
       mode: z.union(MODES.map((m) => z.const(m)) as [z<ReadoutMode>, ...z<ReadoutMode>[]]).default('topology_v3'),
       dynamicK: z.number().min(0).default(1),
+      /** 票 03：自适应 K 比例（0=关）。定标：26 候选 dropped 24/26 场景，ratio=0.5 → 恰 50% 不过线 → 取 0.6（16 条，dropped≈38.5%）；完整依据见 InjectConfig.adaptiveKRatio 注释。 */
+      adaptiveKRatio: z.number().min(0).max(1).default(0.6),
+      /** 票 03：自适应 K 条数硬顶（27 篇病理大池定标 16：dropped≈41%<50%，渲染成本有界）。 */
+      adaptiveKMax: z.number().min(1).max(64).default(16),
       minKnnForReward: z.number().default(0.6),
       gateThreshold: z.number().default(0.55),
       queryLookback: z.number().min(1).default(6),

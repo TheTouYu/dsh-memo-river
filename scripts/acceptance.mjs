@@ -896,7 +896,13 @@ hr('#15–#18 自主态节律注入：cadence / 压缩联动 / 步维刷新 / �
   // ⑰ 步维刷新：dedupeRefreshTurns=3 + every=2 → 节律尝试第 3 跳（step7）强制重注同集合。
   {
     const h17 = createMockCtx()
-    apply(h17.ctx, makeConfig({ bucket: BUCKET_RIVER, inject: { autonomousInjectEverySteps: 2, dedupeRefreshTurns: 3 } }))
+    // 票 03：本判据的对象是「同集合去重 + 步维刷新」，钉死 adaptiveKRatio=0 保持 k=3 稳定选集——
+    // 自适应扩条后边缘席（第 4~kEff 名）在查询漂移下自然抖动，同集合去重按设计失效重注，
+    // 那是票 03 的既定行为面（见 scripts/acceptance-adaptivek.mjs），不属本判据。
+    apply(
+      h17.ctx,
+      makeConfig({ bucket: BUCKET_RIVER, inject: { autonomousInjectEverySteps: 2, dedupeRefreshTurns: 3, adaptiveKRatio: 0 } }),
+    )
     const agent17 = createAgent('sess-autonomous-17', WS_RIVER, [textMsg('user', AUT_Q), textMsg('assistant', AUT_A)])
     const at = {}
     for (let s = 1; s <= 7; s++) {

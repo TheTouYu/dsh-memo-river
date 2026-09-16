@@ -100,6 +100,9 @@ function recallOptions(config: Config, queryId: string, gateText = '', gateAssis
     k: config.inject.k,
     tokenBudget: config.inject.tokenBudget,
     dynamicK: config.inject.dynamicK,
+    // 票 03：自适应 K——膨胀桶条数上限随候选池扩展（ratio=0 可回滚到固定 k）；预算截断不受影响
+    adaptiveKRatio: config.inject.adaptiveKRatio,
+    adaptiveKMax: config.inject.adaptiveKMax,
     recencyFloorDays: config.inject.recencyFloorDays,
     gate: config.inject.gate,
     gateThreshold: config.inject.gateThreshold,
