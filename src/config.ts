@@ -43,6 +43,20 @@ export interface InjectConfig {
   adaptiveKRatio: number
   /** 票 03：自适应 K 条数硬顶——病理大池封顶渲染成本：c9f838ba 27 篇场景 k=16 时 dropped 11/27≈41%，仍 <50%。 */
   adaptiveKMax: number
+  /**
+   * 票 04：选择循环有界权重（被动注入路径；机制与证据见 recall.ts「选择循环有界权重」注释）。
+   * 三项上界独立可配、缺省保守（合计 0.17 ≈ 锚奖励 0.18，只能翻近似并列，不推翻 topology
+   * 主排序）；各 0 = 对应权重关闭。主动 memo_recall 不接这些参数（显式 k 语义不受影响）。
+   */
+  selectionTagCap: number
+  /** 票 04：跨注入曝光抑制上界——台账 passive 信号 tanh 饱和 × 指数衰减，防 D1×36 搭车。 */
+  selectionExposureCap: number
+  /** 票 04：曝光惩罚半衰期（小时）。 */
+  selectionExposureHalfLifeHours: number
+  /** 票 04：近因加成上界——窗口期内新写的进展不再被旧条目搭车挤光。 */
+  selectionRecencyCap: number
+  /** 票 04：近因窗口（小时，线性衰减到 0）。 */
+  selectionRecencyWindowHours: number
   /** 低基数门限（§2.2 规则 4）：KNN 低于此值的候选不发放结构奖励。 */
   minKnnForReward: number
   /** 门控阈值：本会话查询场对日记本的最大 KNN 余弦低于此值 → 清空不注入。 */
@@ -214,6 +228,16 @@ export const Config: z<Config> = z.object({
       adaptiveKRatio: z.number().min(0).max(1).default(0.6),
       /** 票 03：自适应 K 条数硬顶（27 篇病理大池定标 16：dropped≈41%<50%，渲染成本有界）。 */
       adaptiveKMax: z.number().min(1).max(64).default(16),
+      /** 票 04：批内同 Tag 去重上界（0=关；同轴克隆在近似并列处让位异轴条目，防 hub 垄断）。 */
+      selectionTagCap: z.number().min(0).max(0.2).default(0.04),
+      /** 票 04：跨注入曝光抑制上界（0=关；被动台账 tanh×指数衰减，治 D1×36 搭车）。 */
+      selectionExposureCap: z.number().min(0).max(0.2).default(0.08),
+      /** 票 04：曝光惩罚半衰期（小时；上次被动注入越久罚越轻，不永久流放）。 */
+      selectionExposureHalfLifeHours: z.number().min(1).max(24 * 30).default(24),
+      /** 票 04：近因加成上界（0=关；窗口期内新写的进展在排序内就有竞争力）。 */
+      selectionRecencyCap: z.number().min(0).max(0.2).default(0.05),
+      /** 票 04：近因窗口（小时；窗口内线性衰减到 0）。 */
+      selectionRecencyWindowHours: z.number().min(1).max(24 * 30).default(24),
       minKnnForReward: z.number().default(0.6),
       gateThreshold: z.number().default(0.55),
       queryLookback: z.number().min(1).default(6),

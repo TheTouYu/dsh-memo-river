@@ -899,9 +899,21 @@ hr('#15–#18 自主态节律注入：cadence / 压缩联动 / 步维刷新 / �
     // 票 03：本判据的对象是「同集合去重 + 步维刷新」，钉死 adaptiveKRatio=0 保持 k=3 稳定选集——
     // 自适应扩条后边缘席（第 4~kEff 名）在查询漂移下自然抖动，同集合去重按设计失效重注，
     // 那是票 03 的既定行为面（见 scripts/acceptance-adaptivek.mjs），不属本判据。
+    // 票 04：同理钉死三个选择权重 cap——台账曝光抑制会让连续注入的选集轮换（设计语义，
+    // 见 scripts/acceptance-selection-weights.mjs #56），同集合去重按设计失配重注，不属本判据。
     apply(
       h17.ctx,
-      makeConfig({ bucket: BUCKET_RIVER, inject: { autonomousInjectEverySteps: 2, dedupeRefreshTurns: 3, adaptiveKRatio: 0 } }),
+      makeConfig({
+        bucket: BUCKET_RIVER,
+        inject: {
+          autonomousInjectEverySteps: 2,
+          dedupeRefreshTurns: 3,
+          adaptiveKRatio: 0,
+          selectionTagCap: 0,
+          selectionExposureCap: 0,
+          selectionRecencyCap: 0,
+        },
+      }),
     )
     const agent17 = createAgent('sess-autonomous-17', WS_RIVER, [textMsg('user', AUT_Q), textMsg('assistant', AUT_A)])
     const at = {}

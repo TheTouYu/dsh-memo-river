@@ -27,6 +27,57 @@ export const GATE_ASSISTANT_MARGIN = 0.07
  */
 export const ADAPTIVE_K_POOL_FLOOR = 5
 
+/* ── 票 04：选择循环有界权重（批内多样性 + 近因）──────────────────────────────
+ *
+ * 证据（genshin-ts 桶 c9f838ba 深评，docs/EVAL-单会话深评-genshin-ts-c9f838ba.md）：
+ * 09-11 的旧日记 D1 一夜被被动注入 36/37 次——同域旧条目泛化，固定排序下永远在席；
+ * 桶一夜 2→27，新写的 25 篇全程陪跑。三个有界权重治这个「搭车」：
+ *   ① 曝光抑制（跨注入）：被动台账里 recent passive 的条目按 tanh(次数/τ)×exp(年龄/半衰)
+ *      受有界惩罚。台账由 injector 每次注入成功后 recordUsage('passive') 记账，是现成的
+ *      跨注入状态（无需会话级新状态）。与票 05 tie-breaker 互为镜像：那边只认**主动**
+ *      信号做正向强化（被动计入强化=曝光偏差），这边读**被动**信号做负向抑制（反垄断）——
+ *      注入是曝光不是检索，反复曝光的条目该让位，随时间衰减则不会永久流放。
+ *   ② 批内同 Tag 去重（同轴去重）：贪心逐席选择，候选与本批已入选条目 matchedTags 的
+ *      重叠率越高扣越重——hub Tag（「千星官方课程」21/26）饱和的池子里，同 Tag 克隆的
+ *      分数天然挤成近似并列，恰在 cap 射程内让位给异轴条目。
+ *   ③ 近因加成：写入时间在窗口期内（缺省 24h）的条目线性加成——刚写的进展不该被旧
+ *      条目搭车挤光（与 §⑥ recency floor 互补：floor 是保底席，这是排序内竞争力）。
+ *
+ * 有界性/回滚：三项上界独立可配、缺省保守（合计仍 ≪ 锚奖励 0.18），只能翻近似并列、
+ * 不可能把无关条目顶到在题条目之上（不推翻 topology 主排序）；不传 selectionWeights /
+ * 各 cap=0 → 逐位旧行为；池 < ADAPTIVE_K_POOL_FLOOR(5) 同样逐位旧行为（与票 03 池地板
+ * 同界，护住稀疏桶语义）。零新增嵌入调用——权重全部复用读出已产出的分数与台账。 */
+
+/** 曝光饱和常数：tanh(passive/τ)，~3 次注入近饱和（与票 05 tieBreakerTau 同值同由头）。 */
+export const EXPOSURE_TAU = 2
+
+/** 票 04：选择权重参数（config.inject → injector.recallOptions 注入；缺省不传 = 旧行为）。 */
+export interface SelectionWeights {
+  /** 批内同 Tag 去重上界（每席扣 cap×重叠率；0=关）。 */
+  tagCap: number
+  /** 跨注入曝光抑制上界（0=关）。 */
+  exposureCap: number
+  /** 曝光惩罚半衰期（小时；上次被动注入越久罚越轻）。 */
+  exposureHalfLifeHours: number
+  /** 近因加成上界（0=关）。 */
+  recencyCap: number
+  /** 近因窗口（小时；窗口内线性衰减到 0）。 */
+  recencyWindowHours: number
+}
+
+/** 票 04：选择权重的一次执行留痕（进 outcome.diagnostics，inject 日志外的自检素材）。 */
+export interface SelectionDiagnostics {
+  on: boolean
+  /** 获得近因加成的候选行数。 */
+  recencyBoosted: number
+  /** 受曝光惩罚的候选行数。 */
+  exposurePenalized: number
+  /** 本批最大曝光惩罚值（有界性自检：≤ exposureCap）。 */
+  maxPenalty: number
+  /** 静态序首位被同 Tag 去重翻下席的次数（0=去重未改变任何选择）。 */
+  tagDemotions: number
+}
+
 export interface RecallCandidate {
   /** chunk id（VCP 里就是日记的 D<id>）。 */
   id: number
@@ -91,6 +142,12 @@ function diaryDateMs(title: string): number {
   return Number.isFinite(ms) ? ms : 0
 }
 
+/** 写入时间戳：files.updated_at（毫秒），缺失退回标题日期——§⑥ recency floor 与票 04
+ *  近因加成的共用口径（同日平局由写入时刻决胜，2026-09-14 生产实锤 D19 落选的教训）。 */
+function stampOfRow(r: { writtenAt: number | null; title: string }): number {
+  return r.writtenAt ?? diaryDateMs(r.title)
+}
+
 export interface RecallOptions {
   mode: ReadoutMode
   k: number
@@ -108,6 +165,9 @@ export interface RecallOptions {
   /** 票 05：有界 tie-breaker（缺省/关闭 = 逐位不变）。调用方从 memo_tuning 取值注入；
    *  被动注入路径不传（预设默认关），主动 memo_recall 按会话 tuning 生效。 */
   tieBreaker?: TieBreakerParams
+  /** 票 04：选择循环有界权重（缺省不传 = 逐位旧行为）。被动注入由 injector 从 config
+   *  注入（缺省保守常开——本票目的就是治 D1×36）；主动 memo_recall 不传（显式 k 语义）。 */
+  selectionWeights?: SelectionWeights
   /** 查询 id（诊断/日志用；必须按会话/轮次唯一）。 */
   queryId: string
   /**
@@ -157,6 +217,135 @@ export function buildQueryField(recentTexts: readonly string[], lookback: number
     if (text) picked.unshift(text)
   }
   return picked.join('\n').slice(-4000)
+}
+
+const HOUR_MS = 3_600_000
+
+/**
+ * 票 03+04：读出后的选择循环（纯函数，验收脚本可直驱合成行做确定性断言）。
+ *
+ * - 票 03 自适应 K：池 ≥ ADAPTIVE_K_POOL_FLOOR 时 kBase = max(k, min(ceil(池×ratio), max))，
+ *   池 <5 逐位旧行为（固定 k）；kEff = max(1, round(kBase×dynamicK))——倍率语义不变。
+ * - 票 04 权重：见文件头「选择循环有界权重」注释块。**权重关闭（不传/全 0）或池 <5 时
+ *   逐位退化为旧行为**——贪心逐席 argmax 在零权重下就是按分数序单趟走（eff===score
+ *   位级相等、静态序=ranked 序、best 恒为队首），预算截断与 dropped 语义原样保留。
+ * - **预算绝不让步**：权重只动选择顺序，逐条 cost 校验（超预算先截首句、再丢
+ *   token-budget）原样兜底——k 再大、权重再活也装不超 tokenBudget。
+ */
+export function selectCandidates(
+  ranked: RecallCandidate[],
+  opts: {
+    k: number
+    dynamicK: number
+    adaptiveKRatio: number
+    adaptiveKMax: number
+    tokenBudget: number
+    selectionWeights?: SelectionWeights
+    ledger: Map<number, { passive: number; lastPassiveAt: number | null }> | null
+    /** 时钟（测试可注入；缺省 Date.now()）。 */
+    now?: number
+  },
+): {
+  selected: RecallCandidate[]
+  dropped: Array<{ id: number; title: string; reason: string }>
+  kBase: number
+  kEff: number
+  used: number
+  pool: number
+  weights: SelectionDiagnostics
+} {
+  const pool = ranked.length
+  let kBase = opts.k
+  if (opts.adaptiveKRatio > 0 && opts.adaptiveKMax > 0 && pool >= ADAPTIVE_K_POOL_FLOOR) {
+    kBase = Math.max(opts.k, Math.min(Math.ceil(pool * opts.adaptiveKRatio), opts.adaptiveKMax))
+  }
+  const kEff = Math.max(1, Math.round(kBase * Math.max(0, opts.dynamicK)))
+  const w = opts.selectionWeights
+  const weightsOn =
+    !!w && pool >= ADAPTIVE_K_POOL_FLOOR && (w.tagCap > 0 || w.exposureCap > 0 || w.recencyCap > 0)
+  const now = opts.now ?? Date.now()
+
+  /* 静态权重（每行一次算好；row.score 不被污染——只动选择顺序，渲染/诊断仍见原生分数）。
+   * 曝光：penalty = cap×tanh(passive/τ)×exp(−age×ln2/半衰)；时钟回拨（lastP>now）不罚。 */
+  const diag: SelectionDiagnostics = { on: weightsOn, recencyBoosted: 0, exposurePenalized: 0, maxPenalty: 0, tagDemotions: 0 }
+  const halfLifeMs = w ? Math.max(1, w.exposureHalfLifeHours) * HOUR_MS : HOUR_MS
+  const recWindowMs = w ? Math.max(1, w.recencyWindowHours) * HOUR_MS : HOUR_MS
+  const seats = ranked.map((row, idx) => {
+    let eff = row.score
+    if (weightsOn && w!.exposureCap > 0) {
+      const e = opts.ledger?.get(row.fileId)
+      if (e && e.passive > 0 && e.lastPassiveAt !== null) {
+        const ageMs = now - e.lastPassiveAt
+        if (ageMs >= 0) {
+          const p = w!.exposureCap * Math.tanh(e.passive / EXPOSURE_TAU) * Math.exp((-ageMs * Math.LN2) / halfLifeMs)
+          if (p > 0) {
+            eff -= p
+            diag.exposurePenalized += 1
+            if (p > diag.maxPenalty) diag.maxPenalty = p
+          }
+        }
+      }
+    }
+    if (weightsOn && w!.recencyCap > 0) {
+      const stamp = stampOfRow(row)
+      if (stamp > 0) {
+        const ageMs = now - stamp
+        if (ageMs >= 0 && ageMs < recWindowMs) {
+          eff += w!.recencyCap * (1 - ageMs / recWindowMs)
+          diag.recencyBoosted += 1
+        }
+      }
+    }
+    return { row, idx, eff }
+  })
+  /* 静态序（eff 降序，平手按原 idx——零权重时 eff===score、与 ranked 序逐位一致） */
+  const staticOrder = seats.slice().sort((a, b) => b.eff - a.eff || a.idx - b.idx)
+
+  /* 贪心逐席：eff − tagCap×(与本批已入选 matchedTags 的重叠率)；预算语义与旧单趟逐位一致 */
+  const selected: RecallCandidate[] = []
+  const dropped: Array<{ id: number; title: string; reason: string }> = []
+  const claimed = new Set<string>()
+  let used = 0
+  const remaining = staticOrder.slice()
+  while (selected.length < kEff && remaining.length > 0) {
+    let best = 0
+    let bestVal = -Infinity
+    for (let j = 0; j < remaining.length; j++) {
+      const s = remaining[j]!
+      let val = s.eff
+      if (weightsOn && w!.tagCap > 0 && claimed.size > 0 && s.row.matchedTags.length > 0) {
+        let hit = 0
+        for (const t of s.row.matchedTags) if (claimed.has(t)) hit++
+        if (hit > 0) val -= w!.tagCap * (hit / s.row.matchedTags.length)
+      }
+      if (val > bestVal) {
+        bestVal = val
+        best = j
+      }
+    }
+    if (best !== 0) diag.tagDemotions += 1 // 静态序队首被同 Tag 去重翻下席
+    const row = remaining.splice(best, 1)[0]!.row
+    const cost = estimateTokens(row.body) + estimateTokens(row.title) + 24
+    if (used + cost > opts.tokenBudget) {
+      // `::Truncate` 语义：保 role 与首句
+      const trimmed = firstSentence(row.body)
+      const trimCost = estimateTokens(trimmed) + estimateTokens(row.title) + 24
+      if (used + trimCost <= opts.tokenBudget) {
+        selected.push({ ...row, body: trimmed })
+        used += trimCost
+        dropped.push({ id: row.id, title: row.title, reason: 'truncated-to-first-sentence' })
+        for (const t of row.matchedTags) claimed.add(t)
+        continue
+      }
+      dropped.push({ id: row.id, title: row.title, reason: 'token-budget' })
+      continue
+    }
+    selected.push(row)
+    used += cost
+    for (const t of row.matchedTags) claimed.add(t)
+  }
+  for (const s of remaining) dropped.push({ id: s.row.id, title: s.row.title, reason: 'k-limit' })
+  return { selected, dropped, kBase, kEff, used, pool, weights: diag }
 }
 
 /**
@@ -398,7 +587,8 @@ export async function recall(
     /* ④.5 票 05：Rust 读出后的**有界 tie-breaker**（options.tieBreaker 缺省/关闭 → applyUsageTieBreaker
        原样返回同一引用，分数与顺序逐位不变）。只认台账**主动**信号，上界 cap=0.05（≪ 锚 0.18），
        只在近似并列处翻序——细节与风险声明见 DESIGN「边界与不承诺」。 */
-    const ranked = applyUsageTieBreaker(rows, readUsageLedger(store), options.tieBreaker, started)
+    const usageLedger = readUsageLedger(store)
+    const ranked = applyUsageTieBreaker(rows, usageLedger, options.tieBreaker, started)
 
     /* ⑤ 条数上限（票 03 自适应 K）+ 动态 K 倍率 + 预算截断（::Truncate：保 role 与首句）
      *
@@ -408,39 +598,19 @@ export async function recall(
      * **预算绝不让步**：这里只抬「条数上限」，总预算仍由下方逐条 cost 校验兜底
      * （超预算先截首句、再丢 token-budget）——k 再大也装不超 tokenBudget。
      * dynamicK 倍率语义不变：先定基数 kBase，再乘倍率取整（≥1）。 */
-    const poolSize = ranked.length
-    const adaptiveRatio = options.adaptiveKRatio ?? 0
-    const adaptiveMax = options.adaptiveKMax ?? 0
-    let kBase = options.k
-    if (adaptiveRatio > 0 && adaptiveMax > 0 && poolSize >= ADAPTIVE_K_POOL_FLOOR) {
-      kBase = Math.max(options.k, Math.min(Math.ceil(poolSize * adaptiveRatio), adaptiveMax))
-    }
-    const kEff = Math.max(1, Math.round(kBase * Math.max(0, options.dynamicK)))
-    const dropped: Array<{ id: number; title: string; reason: string }> = []
-    const selected: RecallCandidate[] = []
-    let used = 0
-    for (const row of ranked) {
-      if (selected.length >= kEff) {
-        dropped.push({ id: row.id, title: row.title, reason: 'k-limit' })
-        continue
-      }
-      const cost = estimateTokens(row.body) + estimateTokens(row.title) + 24
-      if (used + cost > options.tokenBudget) {
-        // `::Truncate` 语义：保 role 与首句
-        const trimmed = firstSentence(row.body)
-        const trimCost = estimateTokens(trimmed) + estimateTokens(row.title) + 24
-        if (used + trimCost <= options.tokenBudget) {
-          selected.push({ ...row, body: trimmed })
-          used += trimCost
-          dropped.push({ id: row.id, title: row.title, reason: 'truncated-to-first-sentence' })
-          continue
-        }
-        dropped.push({ id: row.id, title: row.title, reason: 'token-budget' })
-        continue
-      }
-      selected.push(row)
-      used += cost
-    }
+    const selection = selectCandidates(ranked, {
+      k: options.k,
+      dynamicK: options.dynamicK,
+      adaptiveKRatio: options.adaptiveKRatio ?? 0,
+      adaptiveKMax: options.adaptiveKMax ?? 0,
+      tokenBudget: options.tokenBudget,
+      selectionWeights: options.selectionWeights,
+      ledger: usageLedger,
+      now: started,
+    })
+    const { selected, dropped, kEff, kBase } = selection
+    const poolSize = selection.pool
+    let used = selection.used
 
     /* ⑥ 近因保底（recency floor）：k-limit/预算把最近 N 天内的最新日记挤出入选集时，
        给它保留一席——挤掉分数最低席，绝不挤 top1；入选集不足 2 席（唯一位）时不启动。
@@ -455,8 +625,13 @@ export async function recall(
         const ageMs = Date.now() - stampOf(freshest)
         const floorMs = (options.recencyFloorDays ?? 0) * 86_400_000
         if (ageMs >= 0 && ageMs <= floorMs && !selected.some((s) => s.fileId === freshest.fileId)) {
-          const evicted = selected[selected.length - 1]!
-          selected.pop()
+          /* 挤「分数最低席」：票 04 权重重排后 selected 未必按分数序，末位≠最低分——
+             从尾部向前找严格更低分（旧行为=分数序时退化为末位，逐位等价）。 */
+          let evictIdx = selected.length - 1
+          for (let i = selected.length - 2; i >= 0; i--) {
+            if (selected[i]!.score < selected[evictIdx]!.score) evictIdx = i
+          }
+          const evicted = selected.splice(evictIdx, 1)[0]!
           used -= estimateTokens(evicted.body) + estimateTokens(evicted.title) + 24
           dropped.push({ id: evicted.id, title: evicted.title, reason: 'recency-floor-evicted' })
           const fullCost = estimateTokens(freshest.body) + estimateTokens(freshest.title) + 24
@@ -520,6 +695,8 @@ export async function recall(
         kEff,
         kBase,
         adaptivePool: poolSize,
+        // 票 04：权重执行留痕（on/recencyBoosted/exposurePenalized/maxPenalty/tagDemotions）
+        selectionWeights: selection.weights,
         readoutDiagnostics: readout.diagnostics ?? null,
         fieldTrusted: (meta.diagnostics as Record<string, unknown> | undefined)?.fieldTrusted ?? null,
         fieldEntropy: (meta.diagnostics as Record<string, unknown> | undefined)?.fieldEntropy ?? null,

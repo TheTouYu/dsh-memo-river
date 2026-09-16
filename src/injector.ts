@@ -103,6 +103,15 @@ function recallOptions(config: Config, queryId: string, gateText = '', gateAssis
     // 票 03：自适应 K——膨胀桶条数上限随候选池扩展（ratio=0 可回滚到固定 k）；预算截断不受影响
     adaptiveKRatio: config.inject.adaptiveKRatio,
     adaptiveKMax: config.inject.adaptiveKMax,
+    // 票 04：选择循环有界权重（曝光抑制 + 同 Tag 去重 + 近因）——只走被动注入路径，
+    // 主动 memo_recall 不接（显式 k 语义不变）；台账在读出侧共读一次（见 recall.ts §④.5）
+    selectionWeights: {
+      tagCap: config.inject.selectionTagCap,
+      exposureCap: config.inject.selectionExposureCap,
+      exposureHalfLifeHours: config.inject.selectionExposureHalfLifeHours,
+      recencyCap: config.inject.selectionRecencyCap,
+      recencyWindowHours: config.inject.selectionRecencyWindowHours,
+    },
     recencyFloorDays: config.inject.recencyFloorDays,
     gate: config.inject.gate,
     gateThreshold: config.inject.gateThreshold,
