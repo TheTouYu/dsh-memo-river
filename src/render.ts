@@ -17,8 +17,19 @@ import { proseText } from './runtime.js'
 export const BLOCK_OPEN = '⟨memo-river·被动召回⟩'
 export const BLOCK_CLOSE = '⟨/memo-river⟩'
 
-/** 单条候选的正文片段上限（字符）。 */
-const EXCERPT_CHARS = 240
+/**
+ * 单条候选的正文片段上限（字符）。
+ *
+ * 240（原值）对「叙事在前、结论在后」的日记不够用，实测的交付失败正是这种：
+ * 召回把 D16 正确排在第 1（score 0.6974），摘录却停在「**因果链…」之前，
+ * 而三个关键数字（3000 / 8000 / 2.69–4.74s）全在因果链里，一个字都没进窗口。
+ * 800 约是一篇日记正文的三到五成，能把结论段带进来；总量仍受
+ * `inject.tokenBudget`（3500）约束——装不下就少注入几条，而不是条条残缺。
+ *
+ * 配套的写作侧要求写在 `FIXED_CONTRACT_TEXT`：决定性事实要放正文开头，
+ * 否则再宽的窗口也只是把截断点往后挪。
+ */
+const EXCERPT_CHARS = 800
 
 const f3 = (x: number): string => (Number.isFinite(x) ? x.toFixed(3) : 'n/a')
 

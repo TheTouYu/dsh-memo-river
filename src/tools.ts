@@ -731,7 +731,9 @@ export function installTools(
       name: 'memo_recall',
       description:
         '主动补证：在记忆河流（VCPToolBox TagMemo/RiverMemo）里定向检索历史日记。被动注入给线索，本工具给细节。' +
-        '返回候选列表，每条带 id/title/score/role/anchorBonus/topologyBonus/omega/riverRegime/matchedTags 与 diagnostics（含 fallbackUsed/fallbackReason）。',
+        '返回候选列表，每条两行：`· D<id>「<title>」 score= knn= role= anchor= topology= omega= regime= tags=[reward-suppressed]`，' +
+        '下一行是其正文片段（默认 120 字；**显式** `truncate:false` 给全文，那是深挖的走法）。' +
+        '末尾附 `· 未注入：…` 明细行与 `diagnostics={…}`（含 fallbackReason、gateVector、readoutDiagnostics）。',
       parameters: {
         query: { type: 'string', required: true, description: '检索意图（自然语言）。' },
         k: { type: 'number', description: '返回条数上限（缺省用注入配置的 k）。' },
