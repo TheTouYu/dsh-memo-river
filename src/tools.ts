@@ -336,6 +336,7 @@ export function formatRecallResult(
   workspace: WorkspaceRuntime,
   outcome: Awaited<ReturnType<WorkspaceRuntime['recall']>>,
   query: string,
+  fullBody = false,
 ): string {
   const lines: string[] = [`【记忆河流·memo_recall】「${query}」`]
   if (!outcome.injected && outcome.candidates.length === 0) {
@@ -354,7 +355,11 @@ export function formatRecallResult(
         `omega=${c.omega === null ? 'n/a' : c.omega.toFixed(3)} regime=${c.riverRegime ?? '-'} ` +
         `tags=${c.matchedTags.join(',') || '-'}${c.rewardSuppressed ? ' [reward-suppressed]' : ''}`,
     )
-    const body = excerpt(c.body, 120)
+    // `truncate` 的语义在这里落地。默认（未传）与 `true` 都给 120 字片段；
+    // 只有**显式** `false` 才给全文——那是「深挖」路径，契约里写的正是
+    // 「被动注入给线索，细节用 memo_recall 深挖」，而在此之前渲染端无条件
+    // 截 120 字，把参数的效果整个盖掉（参数等于不存在）。
+    const body = excerpt(c.body, fullBody ? Number.POSITIVE_INFINITY : 120)
     if (body) lines.push(`    ${body}`)
   }
   if (outcome.dropped.length > 0) {
@@ -792,9 +797,8 @@ export function installTools(
           outcome.selected = outcome.selected.filter((c) => keep(c.id))
           outcome.candidateCount = outcome.candidates.length
         }
-        if (args.truncate === true) {
-          for (const c of outcome.candidates) c.body = excerpt(c.body, 120)
-        }
+        // 正文长度由 formatRecallResult 按「是否显式 truncate:false」决定；
+        // 原来这里也截一次 120，与渲染端叠加后参数永远无效（见其调用点注释）。
         // 使用台账（票 01）：主动补证也是「使用」——只记工具**刻意呈现**的 selected（与被动注入同
         // 口径、同为预算内 k 条）。不记 candidates 列表：那是诊断溢出，11 篇语料下会把全库扫成
         // 「用过」，主动信号就失去「努力提取」的语义（testing effect 只认刻意检索）。
@@ -805,7 +809,7 @@ export function installTools(
         } catch {
           /* 台账失败静默：观测不能伤害补证 */
         }
-        const text = formatRecallResult(target, outcome, query)
+        const text = formatRecallResult(target, outcome, query, args.truncate === false)
         return target === workspace
           ? text
           : `· 🔄 folder 路由 → 桶=${target.paths.bucket}@${target.paths.hash}（cwd=${target.paths.cwd}；检索/诊断/台账均为此桶口径）\n${text}`
