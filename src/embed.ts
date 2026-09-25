@@ -90,31 +90,70 @@ interface Transport {
   summary: string
 }
 
-let sharedAgent: import('undici').Agent | null = null
+let sharedAgent: import('undici').Dispatcher | null = null
 let transportReady: Promise<Transport> | null = null
 
 type TransportLogger = { warn(msg: string): void; info(msg: string): void } | undefined
+
+/**
+ * 要用的 HTTP 代理，未配置时 `undefined`（直连）。
+ *
+ * 这里必须显式包装 `ProxyAgent`，**光 export `https_proxy` 没用**：Node 的
+ * `NODE_USE_ENV_PROXY` 在 undici 的**全局 dispatcher** 那一层生效，而本模块为了
+ * keep-alive 给每个请求都传自己的 `dispatcher`，那一层就被整个盖掉了。死代理判据
+ * 实测（同进程、`https_proxy=http://127.0.0.1:9`）：不带 dispatcher 的 `fetch` 抛
+ * ECONNREFUSED（走了代理），带 `dispatcher: new Agent(...)` 的却成功 200（绕过了）。
+ *
+ * 只认 http/https：undici 的 `ProxyAgent` 不实现 SOCKS，把 `all_proxy=socks5://…`
+ * 传进去只会让每次请求都失败——那种情况宁可直连，也不要静默全灭。
+ */
+function resolveProxyUrl(): string | undefined {
+  const raw =
+    // 专用开关优先：它只影响嵌入这一条链路，不动 LLM 那条。国内模型端点
+    // （api.deepseek.com）塞进境外代理只会更慢甚至失败，所以默认不认全局
+    // `https_proxy`，要全进程生效得显式打开 TAG_EMBED_PROXY_FROM_ENV=1。
+    process.env.TAG_EMBED_PROXY ??
+    (process.env.TAG_EMBED_PROXY_FROM_ENV === '1'
+      ? process.env.https_proxy ??
+        process.env.HTTPS_PROXY ??
+        process.env.http_proxy ??
+        process.env.HTTP_PROXY ??
+        process.env.all_proxy ??
+        process.env.ALL_PROXY
+      : undefined)
+  if (raw === undefined) return undefined
+  const url = raw.trim()
+  if (url === '') return undefined
+  return /^https?:\/\//i.test(url) ? url : undefined
+}
 
 function ensureTransport(logger: TransportLogger): Promise<Transport> {
   if (!transportReady) {
     transportReady = import('undici').then(
       (m: UndiciModule) => {
-        sharedAgent = new m.Agent({
+        const proxyUrl = resolveProxyUrl()
+        const agentOptions = {
           keepAliveTimeout: keepAliveMs,
           keepAliveMaxTimeout: Math.max(600_000, keepAliveMs + 1_000),
           connections: transportConnections,
-        })
+        }
+        sharedAgent = proxyUrl === undefined ? new m.Agent(agentOptions) : new m.ProxyAgent({ uri: proxyUrl, ...agentOptions })
         if (process.env.TAG_EMBED_CONN_LOG === '1') {
           // debug 级连接日志：本地无计数 server 时的取证通道。
-          sharedAgent.on('connect', (origin: unknown) => logger?.info(`embed-transport connect origin=${String(origin)}`))
-          sharedAgent.on('disconnect', (origin: unknown) =>
+          // ProxyAgent 不保证发这两个事件，拿不到就跳过，不影响主流程。
+          const emitter = sharedAgent as unknown as { on?: (e: string, h: (o: unknown) => void) => void }
+          emitter.on?.('connect', (origin: unknown) => logger?.info(`embed-transport connect origin=${String(origin)}`))
+          emitter.on?.('disconnect', (origin: unknown) =>
             logger?.info(`embed-transport disconnect origin=${String(origin)}`),
           )
         }
         return {
           fetch: m.fetch as unknown as Transport['fetch'],
           agent: sharedAgent,
-          summary: `undici(keepAlive=${keepAliveMs}ms,connections=${transportConnections})`,
+          summary:
+            proxyUrl === undefined
+              ? `undici(keepAlive=${keepAliveMs}ms,connections=${transportConnections})`
+              : `undici+proxy(uri=${proxyUrl},keepAlive=${keepAliveMs}ms,connections=${transportConnections})`,
         }
       },
       (e: unknown) => {
@@ -132,7 +171,10 @@ function ensureTransport(logger: TransportLogger): Promise<Transport> {
 
 /** 纯描述（不触发懒加载）：workspace-open 日志打点用。 */
 export function embedTransportIntent(): string {
-  return `undici(keepAlive=${keepAliveMs}ms,connections=${transportConnections})`
+  const proxyUrl = resolveProxyUrl()
+  return proxyUrl === undefined
+    ? `undici(keepAlive=${keepAliveMs}ms,connections=${transportConnections})`
+    : `undici+proxy(uri=${proxyUrl},keepAlive=${keepAliveMs}ms,connections=${transportConnections})`
 }
 
 /** 释放共享 Agent（插件卸载/进程收尾用；fire-and-forget，不阻塞调用方）。 */
