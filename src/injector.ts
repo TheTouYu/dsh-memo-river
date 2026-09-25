@@ -29,7 +29,7 @@
  * 二者都满足设计意图，且都不改写既有消息。
  * ═══════════════════════════════════════════════════════════════════════════
  */
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type MessageSource } from '@deepseek-ai/dsh-llm'
 import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -387,11 +387,27 @@ export async function buildTailInjection(
   return text
 }
 
+/**
+ * 注入消息的 `source`。`kind` 必须是**产出方自有的非空字符串**：0.1.7 明确拒绝通用包装
+ * `kind: 'plugin'`（dsh-session-format-v3-to-v4/src/message-sources.ts:10 的
+ * `assertV4SourceRowAdmission`——老会话走 `rewritePluginSource` 会被改写成 `plugin:<name>`，
+ * 新会话则直接抛 `format v4 message requires a producer-owned source kind`）。
+ * 官方同款写法见 dsh-agent-instructions：`{ kind: 'agent-instructions', form: 'instructions', changes }`。
+ *
+ * 0.1.5 的类型 `MessageSource` 仍把 `kind` 定成 `'model' | 'user' | 'plugin' | 'tool'` 封闭联合，
+ * 但其运行时校验只覆盖 system/assistant/tool 三类消息
+ * （dsh-session/lib/index.js:939-951，`user/message` 直接放行），故 `'memo-river'`
+ * 在**两个版本的运行时都合法**。此处的断言只为让 0.1.5 的过时类型通过编译，不代表取值受限。
+ */
+function injectionSource(form: 'recall' | 'notice', extra: Record<string, unknown> = {}): MessageSource {
+  return { kind: 'memo-river', form, ...extra } as unknown as MessageSource
+}
+
 /** 组装注入消息（`form: 'recall'`：素材是从别处会话/日志里取出的记忆）。 */
 export function createInjectionMessage(text: string): unknown {
   return createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'memo-river', form: 'recall' },
+    source: injectionSource('recall'),
   })
 }
 
@@ -399,7 +415,7 @@ export function createInjectionMessage(text: string): unknown {
 export function createWriteNudgeMessage(text: string): unknown {
   return createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'memo-river', form: 'notice', summary: 'memo-river 写入节律提醒' },
+    source: injectionSource('notice', { summary: 'memo-river 写入节律提醒' }),
   })
 }
 
