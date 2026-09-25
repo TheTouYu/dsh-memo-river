@@ -10,6 +10,7 @@
 | `acceptance-update.mjs` | memo_update 原地改写 + 闸门 | 真端点（`EMBED_STUB=1` 进桩） | ~1.5min |
 | `acceptance-title-gate.mjs` / `acceptance-patrol.mjs` / `acceptance-delegation-guidance.mjs` / `acceptance-write-prompts.mjs` | 各票机制 | 离线/桩（各自内建） | 秒级 |
 | `acceptance-hub-gate.mjs`、`acceptance-adaptivek.mjs`、`acceptance-selection-weights.mjs`、`acceptance-draft-scope.mjs` | 各票机制 | 各自内建 | 秒级 |
+| `probe-anchor-trace.mjs` / `retag-content-tags.mjs` | 锚（证据分级）逐候选判读探针 / 内容词 Tag 重构器（缺省 `--dry`） | 真端点 | 秒级 / ~1min |
 
 ## 嵌入桩（`lib/embed-stub.mjs`）——0916 固化资产
 
@@ -59,3 +60,15 @@ REAL_EMBED=1 node scripts/setup-selftest.mjs && REAL_EMBED=1 node scripts/accept
   `node scripts/probe-31.mjs 5`（#31 fixture 独立抽出，秒级×N 统计——2026-09-16
   用它判定路由修复无回归，罪魁是端点抖动而非代码）。
 - 疑似回归先单点探针再二分整跑：整跑 2min×N + SIGBUS 高发窗口 = 代价陷阱。
+- **桶根由 `DSH_HOME` 决定，不由 cwd 决定**：本机 harness 会话可能跑在沙箱根
+  （如 `.compat/rehearsal/browser`），此时 `resolveBucket('某桶名')` 解析到的是**沙箱副本**，
+  不是生产根。打生产必须显式 `DSH_HOME=/home/h/.dsh`；打之前先跑一次 `resolveBucket`
+  把 root 打出来核对（2026-09-26 实测：同名同哈希两桶，选错等于改错库）。
+- **写生产桶要越过文件沙箱**：`/home/h/.dsh/**` 在会话工作区之外，`workspace-write` 下
+  写 `.md`/sqlite 报 `EROFS ... open '/home/h/.dsh/...'`（写前先 `cp -a` 备份到工作区内）。
+  EROFS 发生在**盘上文件写入**这一步、DB 事务之前——实测桶内零残留（20 chunks/8 tags 不变），
+  但每次失败都要按这个句式去核，别假设原子。
+- `retag-content-tags.mjs` 的 D 编号是 **chunk id 口径**，而 `memo_update` 的 `id` 是
+  **file-id 优先解析**（本桶 chunk 18 → file 17，存在无 file 对应的 chunk id 空档）；
+  且改写会**换 chunk id**。脚本因此落 `file-map.json` 并把 fileId 传给工具——
+  复跑安全（实测：首跑 20/20、拿旧 chunk id 复跑 19/20→修 fileId 后 20/20）。
