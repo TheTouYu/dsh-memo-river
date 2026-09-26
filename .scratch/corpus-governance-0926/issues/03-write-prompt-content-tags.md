@@ -34,3 +34,35 @@
 - [ ] 三处文案落地
 - [ ] 形态快照 + 预算红线读数
 - [ ] sha256 更新 + 回归绿
+
+---
+
+## 执行记录 — 2026-09-26
+
+### 前半已落地（commit `43bc2b4`，不涉契约）
+
+- `src/render.ts` `renderWriteNudge` 末行：「Tag 优先复用词汇表：…」→ 内容词规则 + 反流水账锚，**规则内联、行数不增**
+  （无 tail 2 行 / 带队列 3 行 / 委托 3 行）。
+- `scripts/acceptance-write-prompts.mjs` T-1 原为「文案与票 05 前逐字一致」——文案一改必红，改为**规则级断言**
+  （内容词 / 枢纽 / newTagReason / 反流水账四条短语在场 + 旧措辞已除）＋预算基线常量化。
+- 读数：**5/5 PASS**；末行 85 → **215 字符（Δ+130）**；行数 2/3 未增。
+- 跑法（沙箱）：`TMPDIR=$PWD/.scratch/tmp DSH_HOME=$PWD/.selftest/dsh-home node scripts/acceptance-write-prompts.mjs`
+  （T-4/T-5 真写日记，不设 DSH_HOME 会 ENOENT mkdir 在 `.compat/rehearsal/browser` 下）。
+
+### 契约段补丁**已拟好并干跑**（等票 08 裁定 A 后一键落地）
+
+| 改动 | 旧 | 新 |
+|---|---|---|
+| ② | `② 延续确有同一语义的稳定 Tag；只有概念真正变化时才创建新 Tag；` | `② Tag 是**检索锚**不是工作流标签——写内容词（主题/机制/对象/判据）；只有概念真正变化时才创建新 Tag，跨篇 ≥1/3 的枢纽词不再复用；` |
+| ③ | `③ 正文写清"延续、转折、因果、冲突或完成"，让 Tag 共现有叙事依据；` | 同行追加：`旁白不是日记——\`Compressed 1 block(s), ~2130 tokens reclaimed\`、\`All committed, tree clean.\` 这类工具输出与提交状态不写；` |
+
+**预算实测**（`.scratch/genprompt-dry/` 演练，仓库文件未动）：行数 **16 → 16（Δ0，预算 +≤2 ✓）**、
+字节 **2025 → 2266（Δ+241）**、新 sha256 = `5a5d65e26d8b592e8e003cf6276142d87b2932415a39decf57ca38a5cfc633f7`；
+`scripts/gen-prompt.mjs` 重生成结果与拟改文本逐字相同、常量自洽 ⇒ 落地时 #2 的两条断言同时成立。
+**注意**：该补丁以「上线文本（2025B）为基」⇒ 与票 08 的 A 路径天然合批（同一次 gen-prompt、同一次前缀缓存破）。
+
+### 剩余（本票未完成）
+
+- `src/tools.ts` 写前回注段加一行「Tag 自检：跨篇 ≥1/3 的词会被 hub 闸门拦；不确定就写内容词」（≤300 字符预算，
+  与票 02 的 tools.ts 改动分属不同区域，等 02 交付后落地，避免互相扫进对方提交）。
+- 契约段落地 + `FIXED_CONTRACT_SHA256` 更新 + `contract-registered sha256=` 日志核对 + 主套件 #2 转绿的实证。
