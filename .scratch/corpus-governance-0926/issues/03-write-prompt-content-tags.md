@@ -76,7 +76,7 @@
 - 实测（`TMPDIR=$PWD/.scratch/tmp DSH_HOME=$PWD/.selftest/dsh-home node scripts/acceptance-write-prompts.mjs`）：**5/5 PASS**，
   `单篇新增行字符：59+59 ≤300`（红线 300）。
 
-### 契约段已落地（与票 08 A 路径同批，commit `__C3H__`）
+### 契约段已落地（与票 08 A 路径同批，commit `26dd770`）
 
 - `DESIGN.md` §6.1 围栏 = 上线文本 + ②③ 补丁（2266B）；`node scripts/gen-prompt.mjs` 重生成 `src/prompt.ts`
   （sha `5a5d65e26d8b592e8e003cf6276142d87b2932415a39decf57ca38a5cfc633f7`，`FIXED_CONTRACT_SHA256` 同步）。
