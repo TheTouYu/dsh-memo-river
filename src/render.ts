@@ -184,12 +184,17 @@ export function renderWriteNudge(
       `同轴提示：近期已有《${extras.sameAxis.title}》（Tag 重叠 ${extras.sameAxis.overlap}${shared}）——这是同轴第 2+ 篇：优先 memo_update 并入前篇或 memo_merge 归一，而非新开篇。`,
     )
   }
+  /* 票03（corpus-governance-0926）：Tag 用**内容词** + 反流水账锚。
+   * 两条都不新增行数（预算红线：普通态 ≤3 行）——规则内联进既有末行。 */
+  const tagRule =
+    'Tag 用内容词（主题/机制/对象/判据），不用流程词（干跑验证/版本盘点/上游同步/构建闸门…）；跨篇 ≥1/3 的枢纽词不复用；词汇表给的词与本文不符时宁可自造并给 newTagReason'
+  const noNarration = '不复述已入河内容、工具输出、提交状态或压缩记录——只写决策/数字/判据/教训/悬而未决'
   lines.push(
     delegation
-      ? `现在正是写日记的时机：用 memo_write 落一篇，Tag 优先复用词汇表：${tags}。规范见「写日记规范」段。`
+      ? `现在正是写日记的时机：用 memo_write 落一篇，${tagRule}。本轮候选 Tag：${tags}。规范见「写日记规范」段。`
       : tail
-        ? `现在正是写日记的时机：上一篇止于「${tail}」——本篇写增量（延续/转折/因果），不复述已入河内容；Tag 优先复用词汇表：${tags}。规范见「写日记规范」段。`
-        : `现在正是写日记的时机：用 memo_write 落一篇，写增量（延续/转折/因果），不复述已入河内容；Tag 优先复用词汇表：${tags}。规范见「写日记规范」段。`,
+        ? `现在正是写日记的时机：上一篇止于「${tail}」——本篇写增量（延续/转折/因果），${noNarration}；${tagRule}。本轮候选 Tag：${tags}。规范见「写日记规范」段。`
+        : `现在正是写日记的时机：用 memo_write 落一篇，写增量（延续/转折/因果），${noNarration}；${tagRule}。本轮候选 Tag：${tags}。规范见「写日记规范」段。`,
   )
   if (queue && queue.pending > 0) {
     const age = queue.oldestAgeHours !== null ? `（最老 ${ageText(queue.oldestAgeHours)}）` : ''

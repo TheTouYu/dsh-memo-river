@@ -64,13 +64,25 @@ hr(`票 12 写侧提示词 · acceptance-write-prompts（工作区 ${CWD}）`)
 /* ── T-1/T-2/T-3：renderWriteNudge 与 continuationTail 纯函数断言 ── */
 {
   const tags = ['写入测试', '种子语料']
+  /* 票03（corpus-governance-0926）预算红线：末行字数增量以「票03 前文案」为基线常量化，不靠人眼。
+   * 规则本身（内容词/枢纽/自造/newTagReason/反流水账）逐条断言——文案可以重写，规则不许丢。 */
+  const OLD_NO_TAIL =
+    '现在正是写日记的时机：用 memo_write 落一篇，写增量（延续/转折/因果），不复述已入河内容；Tag 优先复用词汇表：写入测试、种子语料。规范见「写日记规范」段。'
+  const TAGS_CLAUSE = 'Tag 用内容词（主题/机制/对象/判据）'
+  const HUB_CLAUSE = '跨篇 ≥1/3 的枢纽词不复用'
+  const NEWTAG_CLAUSE = 'newTagReason'
+  const NARRATION_CLAUSE = '只写决策/数字/判据/教训/悬而未决'
   const old1 = renderWriteNudge('已 2 轮汇报未写入', 5, '某进展', tags, null, false)
+  const newLine1 = old1.split('\n')[1] ?? ''
   const t1 =
-    old1.includes('写增量（延续/转折/因果），不复述已入河内容') &&
+    old1.includes(TAGS_CLAUSE) && old1.includes(HUB_CLAUSE) && old1.includes(NEWTAG_CLAUSE) && old1.includes(NARRATION_CLAUSE) &&
+    !old1.includes('Tag 优先复用词汇表') &&
+    old1.split('\n').length === 2 &&
     !old1.includes('上一篇止于') && !old1.includes('刚压缩过') &&
     renderWriteNudge('已 2 轮汇报未写入', 5, '某进展', tags, { pending: 2, oldestAgeHours: 5 }, false).split('\n').length === 3
-  check('T-1', 'nudge 无 tail：文案与票 05 前逐字一致（#37 零回归），带队列 ≤3 行', t1, [
-    `无-tail 文案：${old1.split('\n')[1]}`,
+  check('T-1', 'nudge 无 tail：内容词 Tag 规则 + 反流水账锚在场，行数 ≤3 未增（票03 预算红线）', t1, [
+    `末行字符：${newLine1.length}（票03 前 ${OLD_NO_TAIL.length}，Δ${newLine1.length - OLD_NO_TAIL.length >= 0 ? '+' : ''}${newLine1.length - OLD_NO_TAIL.length}）；行数 2（带队列 3）`,
+    `规则在场：内容词=${old1.includes(TAGS_CLAUSE)} 枢纽=${old1.includes(HUB_CLAUSE)} newTagReason=${old1.includes(NEWTAG_CLAUSE)} 反流水账=${old1.includes(NARRATION_CLAUSE)} 旧措辞已除=${!old1.includes('Tag 优先复用词汇表')}`,
   ])
 
   const withTail = renderWriteNudge('已 7 分钟未写', 9, '某进展', tags, null, false, '票 11 落地完成，正进入票 12。', 0)
@@ -78,13 +90,15 @@ hr(`票 12 写侧提示词 · acceptance-write-prompts（工作区 ${CWD}）`)
   const del = renderWriteNudge('已 7 分钟未写', 9, '扇出前进展', tags, null, true, '锚点。', 1)
   const t2 =
     withTail.includes('上一篇止于「票 11 落地完成，正进入票 12。」') && withTail.includes('写增量（延续/转折/因果）') &&
+    withTail.includes(TAGS_CLAUSE) && withTail.includes(NARRATION_CLAUSE) &&
     withBoth.split('\n')[0].includes('刚压缩过 2 段——优先落盘被压缩前的关键细节') &&
     withBoth.split('\n').length === 3 &&
-    del.includes('兄弟代理') && del.includes('刚压缩过 1 段') && del.split('\n').length === 3
-  check('T-2', 'nudge 带 tail/压缩计数：接续锚+压缩提示（第 1 行）；委托变体不回归', t2, [
-    `接续锚行：${withTail.split('\n')[1].slice(0, 60)}…`,
-    `压缩子句：${withBoth.split('\n')[0].match(/刚压缩过[^，]*/)?.[0] ?? '(无)'}`,
-    `委托+压缩行数：${del.split('\n').length}（应 3）`,
+    withBoth.includes(TAGS_CLAUSE) &&
+    del.includes('兄弟代理') && del.includes('刚压缩过 1 段') && del.includes(TAGS_CLAUSE) && del.split('\n').length === 3
+  check('T-2', 'nudge 带 tail/压缩计数/委托三态：接续锚+压缩提示（第 1 行）＋三态均带内容词规则，行数不增', t2, [
+    `普通+tail 末行：${(withTail.split('\n')[1] ?? '').slice(0, 46)}…`,
+    `压缩子句：${withBoth.split('\n')[0].match(/刚压缩过[^，]*/)?.[0] ?? '(无)'}；行数 ${withBoth.split('\n').length}（应 3）`,
+    `委托末行：${(del.split('\n')[del.split('\n').length - 1] ?? '').slice(0, 46)}…；行数 ${del.split('\n').length}（应 3）`,
   ])
 
   const long = 'x'.repeat(50)
