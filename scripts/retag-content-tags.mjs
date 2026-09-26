@@ -22,6 +22,14 @@
  *   DSH_HOME=<副本根> node scripts/retag-content-tags.mjs --apply # 在副本上真写
  *   node scripts/retag-content-tags.mjs --apply --folder deepseek-harness
  *   node scripts/retag-content-tags.mjs --apply --only 1,2,3      # 只补做指定 D 编号
+ *   node scripts/retag-content-tags.mjs --apply --plan <json>     # PLAN 外置（键=chunk id 口径的 D 编号）
+ *
+ * PLAN 外置（2026-09-26 票 04）：`--plan <file.json>` 读入 `{ "12": ["TagA","TagB",…], … }`——
+ * 键 = **chunk id 口径**的 D 编号（file-map.json 兜底与 fileId 解析不变）。JSON 内以下划线开头的键
+ * 视为元数据被忽略：`_folder`（未显式传 --folder 时用作目标桶）、`_reason`（newTagReason 文案）、
+ * `_note`。跨篇上限随 plan 走：内置表仍 ≤5，外置表缺省 ≤25（`--max-per-tag N` 可覆写）；
+ * 无论哪种，脚本都硬校验 `最大跨篇 < 篇数/3`（hub 判据线）。内置表保持 deepseek-harness 默认，跑
+ * 别的桶必须同时给 --folder（或用 _folder）。
  */
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -42,7 +50,9 @@ const argOf = (name, dflt) => {
   const i = argv.indexOf(name)
   return i >= 0 && argv[i + 1] ? argv[i + 1] : dflt
 }
-const FOLDER = argOf('--folder', 'deepseek-harness')
+const hasArg = (name) => argv.includes(name)
+const PLAN_FILE = argOf('--plan', '')
+let FOLDER = argOf('--folder', 'deepseek-harness')
 const ONLY = argOf('--only', '')
   .split(',')
   .map((s) => Number(s.trim()))
@@ -79,9 +89,55 @@ const PLAN = {
   21: ['沙箱验收', 'profile清单校验', '历史坑复现'],
 }
 
-const NEW_TAG_REASON =
+/* ── PLAN 外置（票 04）：`--plan <file.json>` 覆盖内置表 ──
+ * JSON 形状 `{ "12": ["TagA","TagB",…], … }`（键 = chunk id 口径的 D 编号）。
+ * 下划线前缀键是元数据（`_folder` / `_reason` / `_note`），不进 PLAN。 */
+let ACTIVE_PLAN = PLAN
+let PLAN_SOURCE = '内置表（deepseek-harness 默认）'
+let PLAN_REASON = ''
+if (PLAN_FILE) {
+  let raw
+  try {
+    raw = JSON.parse(readFileSync(PLAN_FILE, 'utf8'))
+  } catch (e) {
+    console.error(`❌ --plan 读不出 JSON：${PLAN_FILE}\n   ${e?.message ?? e}`)
+    process.exit(2)
+  }
+  const meta = {}
+  const entries = []
+  for (const [k, v] of Object.entries(raw)) {
+    if (k.startsWith('_')) { meta[k.slice(1)] = v; continue }
+    const d = Number(k)
+    if (!Number.isSafeInteger(d) || d <= 0) { console.error(`❌ --plan 键「${k}」不是正整数的 D 编号`); process.exit(2) }
+    if (!Array.isArray(v) || v.some((t) => typeof t !== 'string' || !t.trim())) {
+      console.error(`❌ --plan D${k} 的值须是字符串数组`)
+      process.exit(2)
+    }
+    entries.push([d, v.map((t) => t.trim())])
+  }
+  if (entries.length === 0) { console.error(`❌ --plan 里没有任何条目：${PLAN_FILE}`); process.exit(2) }
+  ACTIVE_PLAN = Object.fromEntries(entries)
+  PLAN_SOURCE = `${PLAN_FILE}（${entries.length} 篇）`
+  PLAN_REASON = typeof meta.reason === 'string' ? meta.reason : ''
+  /* `_folder`：未显式传 --folder 时用作目标桶——生产桶手术防「打错桶」的第一道闸。 */
+  if (!hasArg('--folder') && typeof meta.folder === 'string' && meta.folder.trim()) FOLDER = meta.folder.trim()
+}
+const PLAN_CAP = Number(argOf('--max-per-tag', PLAN_FILE ? 25 : 5))
+/* 票04 复核补：`--max-per-tag abc` 会得 NaN，而 `c > NaN` 恒 false ⇒ cap 静默失效。
+ * 硬线（planMax < 篇数/3）还在，但预算数字会撒谎，故显式拒绝非法值。 */
+if (!Number.isSafeInteger(PLAN_CAP) || PLAN_CAP <= 0) {
+  console.error(`❌ --max-per-tag 须是正整数（收到「${argOf('--max-per-tag', '(缺省)')}」）`)
+  process.exit(2)
+}
+
+
+const BUILTIN_REASON =
   '2026-09-25 内容词 Tag 重构：原 8 个 Tag 全是流程词（干跑验证 13/20 等），自然语言查询命中不了，' +
   '锚无从建立。逐篇读正文后按**主题**重挂 21 个内容词 Tag（每篇 3–5 个、跨篇 ≤5），正文一字不动。'
+const NEW_TAG_REASON = PLAN_REASON || (PLAN_FILE
+  ? `2026-09-26 内容词 Tag 重构（${FOLDER}）：原词汇表全是流程词（归因错误 29/81、写入去重 29/81、被动召回 27/81），` +
+    `自然语言查询命中不了，锚无从建立。逐篇读标题+正文首段后按**主题**重挂内容词 Tag（每篇 3–5 个、跨篇 ≤${PLAN_CAP}），正文一字不动。`
+  : BUILTIN_REASON)
 
 const TAG_LINE_RE = /^[ \t]*Tag[：:][ \t]*(.+)$/gm
 const bodyOf = (s) => s.replace(/^[ \t]*Tag[：:][ \t]*(.+)$/m, '').replace(/\s+$/, '')
@@ -91,19 +147,22 @@ const hr = (t) => line('\n' + '═'.repeat(96) + (t ? `\n${t}` : '') + '\n' + '�
 
 /* ── 计划自检（不碰任何 I/O）：条数 / 长度 / 跨篇频次 ── */
 const freq = new Map()
-for (const [d, tags] of Object.entries(PLAN)) for (const t of tags) freq.set(t, (freq.get(t) ?? 0) + 1)
-const nFiles = Object.keys(PLAN).length
+for (const [d, tags] of Object.entries(ACTIVE_PLAN)) for (const t of tags) freq.set(t, (freq.get(t) ?? 0) + 1)
+const nFiles = Object.keys(ACTIVE_PLAN).length
 const planErrors = []
-for (const [d, tags] of Object.entries(PLAN)) {
+for (const [d, tags] of Object.entries(ACTIVE_PLAN)) {
   if (tags.length < 3 || tags.length > 5) planErrors.push(`D${d}：${tags.length} 个 Tag（须 3–5）`)
   for (const t of tags) if (t.length > 20) planErrors.push(`D${d}：「${t}」超 20 字`)
   if (new Set(tags).size !== tags.length) planErrors.push(`D${d}：Tag 重复`)
 }
-for (const [t, c] of freq) if (c > 5) planErrors.push(`「${t}」跨 ${c} 篇（>5）`)
+for (const [t, c] of freq) if (c > PLAN_CAP) planErrors.push(`「${t}」跨 ${c} 篇（>${PLAN_CAP}）`)
 const planMax = Math.max(...freq.values())
+/* hub 判据线（票 06 腿② 同口径）：最大跨篇必须 < 篇数/3——外置表 cap 25 只是留余量，这条是硬线。 */
+if (planMax >= nFiles / 3) planErrors.push(`最大跨篇 ${planMax} ≥ ${nFiles}/3 = ${(nFiles / 3).toFixed(2)}（hub 判据线，必红）`)
 
 hr('Tag 重构计划（内容词）')
-line(`桶 = ${FOLDER}　篇数（计划覆盖）= ${nFiles}　Tag 种类 = ${freq.size}　最大跨篇 = ${planMax}`)
+line(`桶 = ${FOLDER}　PLAN 来源 = ${PLAN_SOURCE}`)
+line(`篇数（计划覆盖）= ${nFiles}　Tag 种类 = ${freq.size}　最大跨篇 = ${planMax}（cap ${PLAN_CAP}）`)
 line(`判据 ②：最大频次 < 1/3 → 需 < ${(nFiles / 3).toFixed(2)}；本计划 ${planMax}/${nFiles} = ${(planMax / nFiles).toFixed(3)}`)
 line('\nTag → 篇数：')
 for (const [t, c] of [...freq].sort((a, b) => b[1] - a[1])) line(`  ${String(c).padStart(2)}  ${t}`)
@@ -112,7 +171,7 @@ if (planErrors.length) {
   for (const e of planErrors) line('  ' + e)
   process.exit(2)
 }
-line('\n✅ 计划自检通过（3–5 个/篇、≤20 字、跨篇 ≤5）')
+line(`\n✅ 计划自检通过（3–5 个/篇、≤20 字、跨篇 ≤${PLAN_CAP}、${planMax}/${nFiles} < 1/3）`)
 
 /* ── 打开目标桶（DSH_HOME 决定根；--dry 也要打开，才能报「实际」频次） ── */
 function mockCtx() {
@@ -165,12 +224,16 @@ line(`桶内篇数 = ${store.files(FOLDER).length}　chunk = ${chunks.length}`)
  * 所以从第二次起必须靠落盘的 fileId 映射（file id / 路径在改写中不变）。 */
 const filesById = new Map(store.files(FOLDER).map((f) => [f.id, f]))
 const chunkByFile = new Map(chunks.map((c) => [c.file_id, c]))
-const MAP_PATH = join(ROOT, '.scratch', 'retag', 'file-map.json')
+/* file-map 兜底按**桶**分文件：内置表（deepseek-harness）沿用旧路径不破坏既有复跑记录；
+ * 外置 PLAN 走 file-map-<folder>.json——两个桶的 D 编号都从 1 起，混用会错配 fileId。 */
+const MAP_PATH = FOLDER === 'deepseek-harness'
+  ? join(ROOT, '.scratch', 'retag', 'file-map.json')
+  : join(ROOT, '.scratch', 'retag', `file-map-${FOLDER.replace(/[^\w.-]/g, '_')}.json`)
 const fileMap = existsSync(MAP_PATH) ? JSON.parse(readFileSync(MAP_PATH, 'utf8')) : {}
 
 const before = new Map() // D-id → { fileId, content, body, tagLine, index, length, path }
 const resolvedIds = {}
-for (const d of Object.keys(PLAN).map(Number)) {
+for (const d of Object.keys(ACTIVE_PLAN).map(Number)) {
   let chunk = byId.get(d)
   let fileId = chunk ? chunk.file_id : fileMap[d]?.fileId ?? null
   if (!chunk && fileId) chunk = chunkByFile.get(fileId)
@@ -198,7 +261,7 @@ writeFileSync(MAP_PATH, JSON.stringify(resolvedIds, null, 2))
 
 if (!APPLY) {
   hr('干跑：将写入的改动（每篇只动末尾 Tag 行）')
-  for (const [d, tags] of Object.entries(PLAN).map(([k, v]) => [Number(k), v])) {
+  for (const [d, tags] of Object.entries(ACTIVE_PLAN).map(([k, v]) => [Number(k), v])) {
     const b = before.get(d)
     line(`\nD${d}　${b.path.split('/').pop()}`)
     line(`  旧：${b.tagLine}`)
@@ -210,8 +273,9 @@ if (!APPLY) {
 
 /* ────────────── 真写：逐篇 memo_update（同一份闸门） ────────────── */
 hr(`真写：${APPLY ? 'APPLY' : 'DRY'}　DSH_HOME=${process.env.DSH_HOME ?? '(缺省 ~/.dsh)'}`)
+line(`PLAN 来源 = ${PLAN_SOURCE}${ONLY.length ? `　--only ${ONLY.join(',')}（只写这些，其余只做定位/自证）` : ''}`)
 const results = []
-for (const [d, tags] of Object.entries(PLAN).map(([k, v]) => [Number(k), v])) {
+for (const [d, tags] of Object.entries(ACTIVE_PLAN).map(([k, v]) => [Number(k), v])) {
   if (ONLY.length && !ONLY.includes(d)) continue
   const b = before.get(d)
   const newContent = b.content.slice(0, b.index) + `Tag: ${tags.join(', ')}` + b.content.slice(b.index + b.length)
@@ -242,7 +306,7 @@ const chunks2 = store2.chunks(FOLDER)
 const byId2 = new Map(chunks2.map((c) => [c.id, c]))
 
 /* ① 正文完整性：去掉 Tag 行后逐字节相同（按 **fileId** 找当前 chunk——改写换 chunk id） */
-let bodyDrift = []
+const bodyDrift = []
 const chunkByFile2 = new Map(chunks2.map((c) => [c.file_id, c]))
 for (const d of before.keys()) {
   const b = before.get(d)
@@ -250,6 +314,9 @@ for (const d of before.keys()) {
   if (!c2) { bodyDrift.push(`D${d}(file ${b.fileId}) 消失`); continue }
   if (bodyOf(String(c2.content)) !== b.body) bodyDrift.push(`D${d}`)
 }
+const rewrittenSet = new Set(results.map((r) => r.d))
+const driftInScope = bodyDrift.filter((s) => rewrittenSet.has(Number(/^D(\d+)/.exec(s)?.[1])))
+const untouched = before.size - rewrittenSet.size
 
 /* ② Tag 频次 + ③ 连通分量 */
 const freq2 = store2.tagFrequency()
@@ -262,7 +329,9 @@ line(`\nTag 频次（新词汇表，降序）：`)
 for (const t of freq2) line(`  ${String(t.count).padStart(2)}  ${t.name}${t.count === 0 ? '  ⚠️ 孤儿（0 篇）' : ''}`)
 line(`\n判据 ②（最大频次 < 1/3）：最大 = ${maxTag.count}/${total} = ${(maxTag.count / total).toFixed(3)} → ${maxTag.count / total < 1 / 3 ? '✅ PASS' : '❌ FAIL'}（「${maxTag.name}」）`)
 line(`判据 ①（连通分量 = 1）：${comp.count}（规模 ${comp.sizes.join(',')}）→ ${comp.count === 1 ? '✅ PASS' : '❌ FAIL'}`)
-line(`正文完整性（只改 Tag 行）：${bodyDrift.length === 0 ? '✅ 20/20 逐字节一致' : '❌ 漂移：' + bodyDrift.join(',')}`)
+line(`正文完整性（只改 Tag 行）：${bodyDrift.length === 0
+  ? `✅ ${before.size}/${before.size} 篇逐字节一致（本轮改写 ${rewrittenSet.size} 篇${untouched ? `，未动 ${untouched} 篇` : ''}）`
+  : `❌ 漂移 ${bodyDrift.length}/${before.size}：${bodyDrift.join(',')}${driftInScope.length ? `（其中本轮改写篇 ${driftInScope.length}）` : ''}`}`)
 line(`写入结果：${results.filter((r) => r.ok).length}/${results.length} 成功`)
 
 const readings = {
@@ -270,13 +339,18 @@ const readings = {
   folder: FOLDER,
   dshHome: process.env.DSH_HOME ?? null,
   dbPath,
-  plan: PLAN,
+  planSource: PLAN_FILE || '(builtin)',
+  planCap: PLAN_CAP,
+  only: ONLY,
+  mapPath: MAP_PATH,
+  plan: ACTIVE_PLAN,
   results,
   files: total,
   tagFrequency: freq2,
   maxFreqRatio: maxTag.count / total,
   components: comp,
   bodyDrift,
+  rewritten: [...rewrittenSet],
 }
 const outDir = join(ROOT, '.scratch', 'retag')
 mkdirSync(outDir, { recursive: true })

@@ -17,3 +17,4 @@ lib/
 .scratch/tagvec/
 .scratch/corpus-governance-0926/07-sandbox-residue.txt
 .scratch/corpus-governance-0926/05-dry-run.log
+.scratch/head-baseline/

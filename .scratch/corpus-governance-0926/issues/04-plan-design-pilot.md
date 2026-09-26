@@ -31,8 +31,23 @@
 **Blocked by:** 02（先堵 Tag 复现环，否则新词汇表会以同一路径漂回枢纽）。
 若要看效果而提前做：票面须标注「复现环未堵的临时态」，并在票 05 之后重跑一次 max freq 观察漂移。
 
-**Status:** 待办 — 2026-09-26
+**Status:** done（设计+试跑阶段）— commit `__C4__`；全量 apply 属票 05
 
 - [ ] 脚本支持 `--plan`
 - [ ] 81 篇主题聚类 → 词表 + 分配表（JSON + 设计说明）
 - [ ] 15 篇试跑三项读数 + 探针 before/after
+
+---
+
+## 主代理独立复核（2026-09-26，不靠子代理自证）
+
+1. **PLAN 静态复核**（从 `plan-dsh-memo-river.json` 直接重算，不用子代理的模拟器）：81 篇覆盖 0 缺口、
+   每篇 3–4 个、34 个新内容词 + 旧 19 词各留 1 篇 = 53 个 Tag、跨篇 top `注入时序:22`、Tag 长度 max 13、
+   共现图连通分量 = 1；同义闸门预演（真嵌入）新×旧最高 0.8309、新×新最高 0.6822，**超 0.92 者 0**。
+2. **`--plan` 代码路径实跑**：`DSH_HOME=/home/h/.dsh node scripts/retag-content-tags.mjs --plan <PLAN>` →
+   **81/81 覆盖、53 词、最大跨篇 22（cap 25）、22/81=0.272、✅ 计划自检通过**，生产桶零写入
+   （跑前后 81 files/81 chunks/19 tags/261 file_tags，sqlite mtime 未变）。这是对 `_folder` 路由 + 外置表 +
+   `PLAN_CAP=25` + 硬线（`planMax < nFiles/3`）四条新逻辑的端到端验证。
+3. **复核补丁**：`PLAN_CAP = Number(argOf('--max-per-tag', …))` 在 `--max-per-tag abc` 时得 NaN，
+   而 `c > NaN` 恒 false ⇒ **cap 静默失效**（硬线仍拦得住，但预算数字会撒谎）。已加显式拒绝：
+   `❌ --max-per-tag 须是正整数（收到「abc」）` + exit 2；补后重跑干跑仍 **✅ PASS**、语法 `node --check` ✓。
