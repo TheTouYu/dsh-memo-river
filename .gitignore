@@ -3,3 +3,12 @@ lib/
 *.tsbuildinfo
 *.tgz
 .selftest/
+
+# 证据/工作副本（体积大、可复跑重建；只跟踪其中的文本读数）
+.scratch/backup-*/
+.scratch/tmp/
+.scratch/anchor-probe/
+.scratch/morph-probe/
+.scratch/retag/
+.scratch/corpus-governance-0926/neg/*/
+.scratch/corpus-governance-0926/snap/

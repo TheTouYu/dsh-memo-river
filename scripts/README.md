@@ -10,6 +10,7 @@
 | `acceptance-update.mjs` | memo_update 原地改写 + 闸门 | 真端点（`EMBED_STUB=1` 进桩） | ~1.5min |
 | `acceptance-title-gate.mjs` / `acceptance-patrol.mjs` / `acceptance-delegation-guidance.mjs` / `acceptance-write-prompts.mjs` | 各票机制 | 离线/桩（各自内建） | 秒级 |
 | `acceptance-hub-gate.mjs`、`acceptance-adaptivek.mjs`、`acceptance-selection-weights.mjs`、`acceptance-draft-scope.mjs` | 各票机制 | 各自内建 | 秒级 |
+| `acceptance-corpus.mjs` | 语料治理五判据（连通分量/最大频次/孤儿/正文完整性/闸门口径） | 无嵌入（纯本地） | 秒级 |
 | `probe-anchor-trace.mjs` / `retag-content-tags.mjs` | 锚（证据分级）逐候选判读探针 / 内容词 Tag 重构器（缺省 `--dry`） | 真端点 | 秒级 / ~1min |
 
 ## 嵌入桩（`lib/embed-stub.mjs`）——0916 固化资产
