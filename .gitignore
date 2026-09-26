@@ -13,3 +13,5 @@ lib/
 .scratch/corpus-governance-0926/neg/*/
 .scratch/corpus-governance-0926/snap/
 .scratch/plan-design/
+.scratch/genprompt-dry/
+.scratch/tagvec/
