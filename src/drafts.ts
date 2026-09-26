@@ -684,7 +684,11 @@ export async function precheckDrafts(workspace: WorkspaceRuntime, dedupCosine: n
       reason: j.reason,
       reusableTags: j.tags,
       nearDup: j.nearDup,
-      tagKnn: j.knn,
+      /* 票02 复核补（2026-09-26，T-6 腿实测抓到）：**嵌入不可用的结果不落缓存**——
+       * `knnTagsForDraft` 的缓存命中只看 mtime，若把「嵌入未配置/失败」也写进去，一次端点抖动
+       * 就会把这篇草稿钉成「需人工」直到草稿本身被改动，与文档承诺的「嵌入恢复后下一轮自动复判」相反。
+       * 空词表/命中不足是**确定性结论**（确定性来自库内容而非端点），仍然缓存（T-4 腿按此断言）。 */
+      tagKnn: j.knn && /嵌入(未配置|失败)/.test(j.knn.reason) ? null : j.knn,
       checkedAt,
     }
     try {

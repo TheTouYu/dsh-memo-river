@@ -16,7 +16,7 @@
  *
  * 用法：TMPDIR=$PWD/.scratch/tmp DSH_HOME=$PWD/.selftest/dsh-home node scripts/acceptance-draft-tags.mjs
  */
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { startEmbedStub } from './embed-stub.mjs'
 
@@ -352,6 +352,88 @@ try {
       `轮2 状态文件：state=${stC2?.state} tagKnn.mtimeMs=${stC2?.tagKnn?.mtimeMs}（与轮1 同键 ⇒ 复用）；reason：${stC2?.reason}`,
       `轮3 状态文件：tagKnn.mtimeMs=${stC3?.tagKnn?.mtimeMs}（应 ≠ 轮1 键）`,
     ])
+
+  /* ── 腿⑤（票 07 窗口补）：空词表桶 ⇒ 内容判定拿不到 Tag ⇒ memo_approve **跳过** ──
+   *  T-4 已证「空词表桶 ⇒ 预审恒 manual」，这条把**批准入口**那半也钉住：不写库、草稿留在 pending。
+   *  主套件 #14 的边界样本正是照这条路径改写的（旧前提「建议 Tag ∩ 词汇表 < 3」在非空桶不可构造）；
+   *  主套件当前被 SIGBUS 环境族堵着，故在快套件里把该前提取到读数。 */
+  const emptyDraft = join(pathsC.pendingDir, '2026-09-26-空词表样本-t20.md')
+  writeFileSync(emptyDraft, [
+    '# 候选草稿（等确认，未入库）',
+    '',
+    '- 会话：session-empty-t20',
+    '- 回合：20 @ 2026-09-26T10:00:20.000Z',
+    `- 桶：${BUCKET_C}`,
+    '',
+    '## 本轮用户',
+    '空词表桶里的一篇草稿',
+    '',
+    '## 本轮助手',
+    '结论：这个桶里一条日记都没有，内容判定无从命中。',
+    '',
+    '## 建议 Tag（内容判定）',
+    '(待守护轮填写)',
+    '',
+    '## 相关旧日记',
+    '(无)',
+    '',
+    '> 本文件是**草稿**：确认后用 memo_write 显式入库（会走 Tag 校验与枢纽闸门）。',
+  ].join('\n'), 'utf8')
+  const filesCBefore = wsC.store.files(BUCKET_C).length
+  const approveEmptyOut = String(await byName('memo_approve').execute({ all: true, bucket: BUCKET_C }, execAt(CWD_C, 'sess-empty-approver')))
+  const emptySkipOk =
+    approveEmptyOut.includes('跳过') &&
+    !approveEmptyOut.includes('✅') &&
+    wsC.store.files(BUCKET_C).length === filesCBefore &&
+    existsSync(emptyDraft)
+  check('T-5', '空词表桶 ⇒ 内容判定无 Tag ⇒ memo_approve 跳过（不写库、草稿留 pending）', emptySkipOk, [
+    `回执：${(approveEmptyOut.split('\n').find((l) => l.includes('跳过')) ?? approveEmptyOut.split('\n')[0] ?? '').trim().slice(0, 140)}`,
+    `库内篇数：${filesCBefore} → ${wsC.store.files(BUCKET_C).length}（应不变）`,
+    `草稿仍在 pending：${existsSync(emptyDraft) ? '✅' : '❌'}`,
+  ])
+
+  /* ── 腿⑥（票 07 窗口补）：**嵌入失败** ⇒ 内容判定不可用 ⇒ 预审 manual（且不落缓存，下轮复判） ──
+   *  这是「Tag 不足」的另一条可达路径（第一条见 T-5 的空词表）。主套件 #36 的边界样本正走这条，
+   *  理由：旧样本「恰好两个可复用 Tag」在票02 后不可构造，而嵌入故障是真实运维里会发生的那种。 */
+  const failDraft = join(pathsC.pendingDir, '2026-09-26-嵌入失败样本-t21.md')
+  writeFileSync(failDraft, [
+    '# 候选草稿（等确认，未入库）',
+    '',
+    '- 会话：session-embed-down-t21',
+    '- 回合：21 @ 2026-09-26T10:00:21.000Z',
+    `- 桶：${BUCKET_C}`,
+    '',
+    '## 本轮用户',
+    '嵌入失败样本问一句',
+    '',
+    '## 本轮助手',
+    '结论：嵌入失败时内容判定不可用 ⇒ 需人工。',
+    '',
+    '## 建议 Tag（内容判定）',
+    '(待守护轮填写)',
+    '',
+    '## 相关旧日记',
+    '(无)',
+    '',
+    '> 本文件是**草稿**：确认后用 memo_write 显式入库（会走 Tag 校验与枢纽闸门）。',
+  ].join('\n'), 'utf8')
+  const prevEmbed = wsC.embed.embed.bind(wsC.embed)
+  wsC.embed.embed = async (texts, opts) => {
+    if (texts.some((t) => String(t).includes('嵌入失败'))) throw new Error('stub-embed-down')
+    return prevEmbed(texts, opts)
+  }
+  await precheckDrafts(wsC, config.write.dedupCosine)
+  const stFail = readDraftStatus(failDraft)
+  const embedDownOk =
+    stFail?.state === 'manual' &&
+    stFail.reusableTags.length === 0 &&
+    String(stFail.reason).includes('嵌入失败') &&
+    stFail.tagKnn === null
+  check('T-6', '嵌入失败 ⇒ 内容判定不可用 ⇒ 预审 manual（失败不落缓存，下轮自动复判）', embedDownOk, [
+    `状态：state=${stFail?.state} reusableTags=${stFail?.reusableTags.length} 个`,
+    `reason：${String(stFail?.reason).slice(0, 110)}`,
+    `tagKnn 缓存：${stFail?.tagKnn === null ? '✅ 未落缓存（下轮复判）' : '❌ 落了缓存'}`,
+  ])
 
   exitCode = 0
 } catch (e) {
