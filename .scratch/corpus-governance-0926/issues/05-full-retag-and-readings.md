@@ -133,3 +133,22 @@
 旧词计数 = 计划保留的 1 篇 + 未计划篇各自持有，仍应 <1/3；**连通分量**同理——我改 D91 时留下的
 `枢纽Tag泛化`（当前 0 篇的孤立 Tag）会被 PLAN 挂到 5 篇上 ⇒ apply 后分量回 1（但**只有全量 apply 才成立**，
 跑 `--only` 分批的中间态会看到分量 ≠1，别误判为失败）。
+
+### apply 后的取证 runbook（写好待用）
+
+**before 读数用冻结快照，不用活桶**（活桶在写，`cp -a` 会拷到半个事务）：
+`PROBE_SRC=.scratch/backup-<ts>-pre05/6c8bcf85fe1b56e1` ← 打生产前的整桶备份，天然是 before。
+after 用活桶：`PROBE_SRC=/home/h/.dsh/memo-river/6c8bcf85fe1b56e1`。
+两跑同一命令形状，4 个查询（干跑验证 / 推送闸门脏增量 / profile清单校验 / 为什么嵌入端点变慢了）：
+
+```
+bash scripts/build.sh
+for q in 干跑验证 推送闸门脏增量 profile清单校验 为什么嵌入端点变慢了; do
+  PROBE_SRC=<before|after 桶目录> node scripts/probe-anchor-trace.mjs "$q" 6c8bcf85fe1b56e1
+done
+```
+
+其余判据（都是只读）：
+- `node scripts/acceptance-corpus.mjs --bucket dsh-memo-river`（**不设** DSH_HOME ⇒ 解析生产根）：①分量=1 ②top1<1/3 ③孤儿=0 ④正文 ⑤口径
+- 打生产那个批次脚本自己的收尾块：`grep -E "判据 ①|判据 ②|正文完整性|写入结果" .scratch/corpus-governance-0926/05-apply.log`
+- 主套件：#2 应转绿（票 08 A 落地），其余红集应与基线 16 项同（票 02 双盲归因已记）
