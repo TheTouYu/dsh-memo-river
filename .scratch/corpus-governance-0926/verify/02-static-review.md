@@ -15,3 +15,33 @@
 且 `coldTagSuggest` 内部自行剔枢纽 ⇒ 不属于票 02 的「复现环」范围。**判定：不是越界，是有意保留的边界。**
 
 结论：**静态 5/5 通过**，动态验收（4 腿新套件 + 回归）待子代理交付后由主代理独立跑。
+
+---
+
+## 动态验证（主代理亲跑，2026-09-26，非子代理自证）
+
+前置：`bash scripts/build.sh`（布局=已安装 npm 包；tsc src→lib）→ **构建完成** ✅
+跑法：`TMPDIR=$PWD/.scratch/tmp DSH_HOME=$PWD/.selftest/dsh-home node scripts/<suite>.mjs`
+
+| 套件 | 读数 | 判定 |
+|---|---|---|
+| `acceptance-draft-tags.mjs`（新，票 02 四腿） | **5/5 PASS** exit 0 | ✅ |
+| `acceptance-draft-scope.mjs` | **4/4 PASS** exit 0 | ✅ 回归 |
+| `acceptance-hub-gate.mjs` | **8/8 PASS** exit 0 | ✅ 回归 |
+| `acceptance-folder-route.mjs` | **8/8 PASS** exit 0 | ✅ 回归 |
+
+## H-7 重写的裁定（**接受**，理由留档）
+
+子代理主动申报越权改了 `scripts/acceptance-hub-gate.mjs` H-7（21 行）。逐条核对后**接受**，三条理由：
+
+1. **前提确实不可构造**（不是"测试不好写"）：票 02 之后批准入口的 Tag 唯一来源是 `curateTags`（内容 kNN + 显式剔枢纽 +
+   无兜底）。要触发 hub 闸门必须把枢纽词喂进 `writeDiaryCore`，而这条路径**结构上产不出枢纽词**；
+   本套件嵌入未配置时更直接走「内容不可用 ⇒ 跳过」。原断言（枢纽建议 Tag → enforce 拒）已无观测对象。
+2. **可观测后果没变松**：原断言要的「不写库 + 草稿留 pending」在新断言里**原样保留**（`fileCount()` 不变、`existsSync(draftPath)`），
+   只是把"为什么没写"从 `hub-tag-scoped` 换成「内容 Tag 命中不足」——**这不是把红改绿，是把判据搬到仍然成立的性质上**。
+   新断言还多要了两条：`hub-tag-scoped` 缺席、带枢纽词的篇数不变（库内零新增枢纽篇）⇒ 覆盖方向从"闸门拦住了"变成"这条入口不再产生枢纽污染"。
+3. **枢纽闸门的覆盖没丢**：H-1..H-6 与 H-8 仍打在 `memo_write` / `memo_update` / `memo_merge` 三个真正能带枢纽词入库的入口上
+   （H-8 还专测委托 enforce 档下的合并豁免）；H-7 是唯一的 approve 入口用例，而该入口正是票 02 要整治的自我强化环。
+
+**保留意见（交接用）**：新断言的 `skipLine7.includes('内容 Tag 命中')` 依赖跳过原因文案，文案改了会**响亮地红**（可接受）；
+`hubFilesAfter7 === hubFilesBefore7` 比的是计数不是集合，若将来出现"删一篇枢纽篇 + 新增一篇"会漏判（当前场景不会）。

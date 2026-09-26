@@ -71,6 +71,16 @@ export function scanTagAxis(dir: string, window = 12): TagScan | null {
   return { files: briefs.length, freq, recent: briefs.slice(0, window) }
 }
 
+/**
+ * 枢纽判据（**唯一实现**）：跨篇频次 `freq ≥ 3` 且 `freq ≥ files/3`。
+ * 绝对下限（≥3）防小桶误判：1-2 篇的桶里 freq=1 就占 100%，那是「年轻桶」不是枢纽污染。
+ * 票02（corpus-governance-0926）起本谓词被草稿 Tag 内容化（drafts.ts curateTags）复用——
+ * 两处必须同口径，故导出；`coldTagSuggest` 内部同调此函数（行为逐字不变）。
+ */
+export function isHubTag(freq: number, files: number): boolean {
+  return freq >= 3 && files > 0 && freq >= files / 3
+}
+
 export interface ColdTagResult {
   tags: string[]
   /** 被剔除的枢纽 Tag（诊断用）。 */
@@ -88,7 +98,7 @@ export function coldTagSuggest(
   scan: TagScan,
   limit = 4,
 ): ColdTagResult {
-  const isHub = (f: number): boolean => f >= 3 && scan.files > 0 && f >= scan.files / 3
+  const isHub = (f: number): boolean => isHubTag(f, scan.files)
   const kept: string[] = []
   const droppedHub: string[] = []
   for (const t of suggested) {

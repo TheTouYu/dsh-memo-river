@@ -363,6 +363,13 @@ export function apply(ctx: AppContext, config: MemoRiverConfig): void {
       if (!config.maintenance.drafts) return
       const agent = payload.agent
       const state = getSession(agent.session.id, agent.session?.header?.cwd ?? null)
+      /* 票02：本回合已经 memo_write 过就不再收草稿——收出来的那份必然与刚落盘的日记同题，
+       * 批准出去就是复读（D10 样本二：13 分钟内三连同题）。时钟由写工具侧回填
+       * （injector pre-step 观测 memo_write 工具调用 → lastDiaryWriteTurn），不靠模型自觉。 */
+      if (state.lastDiaryWriteTurn === payload.turn) {
+        log('info', `draft-skip reason=wrote-this-turn turn=${payload.turn} session=${state.sessionId}`)
+        return
+      }
       const messages = agent.session.deriveMessages() ?? []
       // 从后往前找**最后一条有正文的**该角色消息：
       //  · 工具结果也走 user 角色（正文为空）——停在它上面会产出「本轮用户：(空)」的草稿
@@ -396,15 +403,19 @@ export function apply(ctx: AppContext, config: MemoRiverConfig): void {
         }
         return ''
       }
-      const suggested = new Set<string>()
+      /* 票02：召回命中只作**展示**（recalledTags），不再当建议 Tag —— 那条路是自我强化环：
+       * 召回枢纽词 → 草稿建议枢纽词 → 一键批写回枢纽词 → 枢纽更强。内容判定在
+       * drafts.ts 的 curateTags（预审与批准共用），此处恒置空。 */
+      const recalled = new Set<string>()
       for (const candidate of state.lastCandidates) {
-        for (const tag of candidate.matchedTags) suggested.add(tag)
+        for (const tag of candidate.matchedTags) recalled.add(tag)
       }
       const draft: PendingDraft = {
         turn: payload.turn,
         userText: textOf('user'),
         assistantText: textOf('assistant'),
-        suggestedTags: [...suggested].slice(0, 8),
+        suggestedTags: [],
+        recalledTags: [...recalled].slice(0, 8),
         relatedIds: state.lastCandidates.slice(0, 3).map((c) => c.id),
         at: Date.now(),
       }
@@ -413,12 +424,15 @@ export function apply(ctx: AppContext, config: MemoRiverConfig): void {
       state.lastDraftSummary = {
         turn: payload.turn,
         at: draft.at,
-        suggestedTags: draft.suggestedTags.slice(0, 5),
+        /* 票02：nudge 的冷门 Tag 建议仍吃召回命中做种子（`coldTagSuggest` 内部剔枢纽、
+         * 只补词汇表内的非枢纽词）——换掉它等于顺手动掉票03/票11 的 nudge 文案输入，
+         * 那是别的票的地盘；草稿的「建议 Tag」与它无关（已置空 + 内容化）。 */
+        suggestedTags: draft.recalledTags.slice(0, 5),
         digest: firstNonEmptyLine(draft.assistantText || draft.userText).slice(0, 80),
         // 小轮判别：回合以实质汇报收尾（≥ SUBSTANTIVE_REPORT_CHARS 字）才计入汇报轮锚。
         substantive: (draft.assistantText ?? '').length >= SUBSTANTIVE_REPORT_CHARS,
       }
-      log('info', `draft-collected session=${state.sessionId} turn=${payload.turn} tags=${draft.suggestedTags.join(',') || '-'}`)
+      log('info', `draft-collected session=${state.sessionId} turn=${payload.turn} recalled=${draft.recalledTags.join(',') || '-'}`)
     } catch (e) {
       log('warn', `draft-collect-failed: ${String((e as Error)?.message ?? e)}`)
     }

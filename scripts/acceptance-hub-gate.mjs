@@ -259,7 +259,13 @@ try {
     `改写无枢纽篇新挂：${r6b.includes('hub-tag-scoped') ? '✅ 被拒' : `❌ ${r6b.split('\n')[0]?.slice(0, 60)}`}`,
   ])
 
-  /* ── H-7 memo_approve：场景内批草稿（建议 Tag 含枢纽）→ 拒且草稿留 pending ── */
+  /* ── H-7（票02 corpus-governance-0926 重写）：批准入口**不再能把枢纽 Tag 写进库** ──
+   * 票02 把批准路径的 Tag 来源从「草稿的建议 Tag（= 被动召回命中的转写）」换成
+   * **内容 kNN + 剔枢纽**（`src/drafts.ts` curateTags），于是 hub 闸门在这个入口
+   * 结构性不可触发：要么内容命中 <TAG_MIN 被跳过（本套件嵌入未配置 ⇒ 即此，
+   * 票02 明写「不回落召回词」），要么入库的 Tag 里**不可能**有枢纽词。
+   * 判据相应改为断言这条更强的性质：收据不带 hub-tag-scoped、库内零新增枢纽篇、
+   * 草稿不被误吞。原判据（枢纽建议 Tag → enforce 拒）在票02 后无法构造。 */
   mkdirSync(ws.paths.pendingDir, { recursive: true })
   const draftPath = join(ws.paths.pendingDir, '2026-09-16-机械批准样本-t12.md')
   writeFileSync(draftPath, [
@@ -273,12 +279,17 @@ try {
     '> 本文件是**草稿**：确认后用 memo_write 显式入库（会走 Tag 校验与枢纽闸门）。',
   ].join('\n'), 'utf8')
   const before7 = fileCount()
+  const hubFilesBefore7 = ws.store.files(BUCKET).filter((f) => ws.store.fileTags(f.id).some((t) => t.name === HUB)).length
   const r7 = String(await exec(approveTool, { ids: ['机械批准样本'] }, delExec('sess-child-approve')))
+  const skipLine7 = r7.split('\n').find((l) => l.includes('⏭') || l.includes('❌')) ?? ''
+  const hubFilesAfter7 = ws.store.files(BUCKET).filter((f) => ws.store.fileTags(f.id).some((t) => t.name === HUB)).length
   const t7 =
-    r7.includes('❌') && r7.includes('hub-tag-scoped') && fileCount() === before7 && existsSync(draftPath)
-  check('H-7', 'memo_approve 场景内：草稿建议 Tag 含枢纽词 → enforce 拒、草稿留 pending', t7, [
-    `批凖回执：${(r7.match(/· ❌[^\n]*/) ?? ['(未找到)'])[0].slice(0, 110)}`,
-    `库内篇数不变：${fileCount() === before7 ? '✅' : `❌ ${before7}→${fileCount()}`}；草稿留 pending：${existsSync(draftPath) ? '✅' : '❌'}`,
+    !r7.includes('hub-tag-scoped') && fileCount() === before7 && hubFilesAfter7 === hubFilesBefore7 &&
+    existsSync(draftPath) && skipLine7.includes('内容 Tag 命中')
+  check('H-7', '票02 后：批准入口不再能把枢纽 Tag 写进库（内容判定剔枢纽 ⇒ 库内零新增枢纽篇）', t7, [
+    `批凖回执：${skipLine7.slice(0, 130)}`,
+    `hub 闸门未触发（hub-tag-scoped 缺席）：${!r7.includes('hub-tag-scoped') ? '✅' : '❌'}`,
+    `库内篇数不变：${fileCount() === before7 ? '✅' : `❌ ${before7}→${fileCount()}`}；带「${HUB}」的篇 ${hubFilesBefore7}→${hubFilesAfter7}（应不变）；草稿留 pending：${existsSync(draftPath) ? '✅' : '❌'}`,
   ])
 
   /* ── H-8 memo_merge 豁免：委托 enforce 档合并两篇枢纽日记 → 放行 ── */

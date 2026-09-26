@@ -25,7 +25,11 @@ export interface PendingDraft {
   turn: number
   userText: string
   assistantText: string
+  /** 票02：**不再**来自被动召回命中（内容判定在 drafts.ts curateTags）——恒为空数组，
+   *  保留字段只因草稿 md/解析器/DraftRecord 三处共用一个形状。 */
   suggestedTags: string[]
+  /** 票02：本轮被动召回的 matchedTags（草稿 md 单列一节「非建议 Tag」，只作参考）。 */
+  recalledTags: string[]
   relatedIds: number[]
   at: number
 }

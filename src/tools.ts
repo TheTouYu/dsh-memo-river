@@ -1303,7 +1303,11 @@ export function installTools(
           lines.push(`· ${basename(r.path)}  桶=${r.bucket}  回合${r.turn}  [${st ? PRECHECK_LABELS[st.state] : '未审'}]`)
           if (st) lines.push(`    预审：${PRECHECK_LABELS[st.state]}——${st.reason}`)
           lines.push(`    用户/助手：${head}`)
-          lines.push(`    建议 Tag：${r.suggestedTags.join(', ') || '(无)'}`)
+          /* 票02：建议 Tag 走内容判定（结果在伴随状态文件里）；召回命中单列且明确标注「非建议 Tag」。 */
+          const knn = st?.tagKnn ?? null
+          lines.push(`    建议 Tag（内容判定）：${knn?.tags.join(', ') || r.suggestedTags.join(', ') || '（待守护预审）'}`)
+          if (knn) lines.push(`      ${knn.reason}`)
+          if (r.recalledTags.length > 0) lines.push(`    被动召回命中（非建议 Tag）：${r.recalledTags.join(', ')}`)
         }
         if (list.length > limit) lines.push(`· …还有 ${list.length - limit} 篇（提高 limit 查看）`)
         lines.push('· 批准：memo_approve { ids: ["文件名子串"] } 或 { all: true }；丢弃：memo_discard（同参数）。')
@@ -1357,9 +1361,11 @@ export function installTools(
           if (!workspace) {
             return `· ⏭ ${basename(record.path)}：工作区缺 workspace.json（cwd 未知），跳过`
           }
-          const tags = curateTags(record, workspace)
+          /* 票02：curateTags 改为**内容 kNN**（async：草稿正文嵌入 → 与词汇表向量比对 →
+           * 剔枢纽），命中 <TAG_MIN 即跳过；缓存取自草稿旁 `.status.json`（与守护预审同一份）。 */
+          const tags = await curateTags(record, workspace)
           if (tags.length < TAG_MIN) {
-            return `· ⏭ ${basename(record.path)}：可复用 Tag 仅 ${tags.length} 个（${tags.join(', ') || '无'}）< ${TAG_MIN}，待人工 memo_write 撰写后 memo_discard 本草稿`
+            return `· ⏭ ${basename(record.path)}：内容 Tag 命中 ${tags.length} 个（${tags.join(', ') || '无'}）< ${TAG_MIN}，待人工 memo_write 撰写后 memo_discard 本草稿`
           }
           const { title, content } = composeDiary(record)
           const date = /^\d{4}-\d{2}-\d{2}/.test(record.at) ? record.at.slice(0, 10) : new Date().toISOString().slice(0, 10)

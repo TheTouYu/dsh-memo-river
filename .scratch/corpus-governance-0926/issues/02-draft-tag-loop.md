@@ -40,7 +40,7 @@
 
 **Blocked by:** 01（改 `src/` 的三张票同批 build + 同一次重启窗口）。
 
-**Status:** 待办 — 2026-09-26
+**Status:** done — 2026-09-26（子代理实现 + 主代理独立验证；见 `verify/02-static-review.md`：静态 5/5、动态 draft-tags 5/5、回归 draft-scope 4/4 + hub-gate 8/8 + folder-route 8/8；H-7 重写经复核接受，理由与保留意见在该文件）
 
 - [ ] 守卫 + recalledTags 改名 + suggestedTags 置空
 - [ ] curateTags 内容化（kNN + 枢纽剔除 + mtime 缓存 + 无兜底）

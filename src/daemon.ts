@@ -12,7 +12,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Config } from './config.js'
 import { candidateReportPath, writeCandidateReport } from './consolidation.js'
-import { precheckDrafts, type PrecheckSummary } from './drafts.js'
+import { precheckDrafts, SECTION_RECALLED, SECTION_SUGGESTED, type PrecheckSummary } from './drafts.js'
 import { formatHealth, healthReport } from './health.js'
 import { excerpt } from './render.js'
 import type { PendingDraft } from './session.js'
@@ -255,8 +255,12 @@ export class WorkspaceDaemon {
           `## 本轮助手`,
           draft.assistantText ? excerpt(draft.assistantText, 900) : '(空)',
           '',
-          `## 建议 Tag（来自本轮被动召回的 matchedTags，须经 memo_tags 复核后复用）`,
-          draft.suggestedTags.length > 0 ? draft.suggestedTags.join(', ') : '(无)',
+          `## ${SECTION_RECALLED}`,
+          draft.recalledTags.length > 0 ? draft.recalledTags.join(', ') : '(无)',
+          '',
+          `## ${SECTION_SUGGESTED}`,
+          // 票02：落盘时还没有内容判定（kNN 在守护预审里跑）→ 占位符，结果见伴随 .status.json
+          '(待守护预审按内容 kNN 判定；结果见本篇旁的 .status.json 的 reusableTags)',
           '',
           `## 相关旧日记`,
           draft.relatedIds.length > 0 ? draft.relatedIds.map((id) => `D${id}`).join(' ') : '(无)',
