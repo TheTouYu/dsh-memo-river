@@ -737,13 +737,13 @@ hr('#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ a
   const xExec = byName('memo_discard').execute.bind(byName('memo_discard'))
   const ctx14 = { agent: createAgent('sess-draft', DRAFT_CWD, []) }
 
-  const draftBody = (turn, user, assistant, tags) =>
+  const draftBody = (turn, user, assistant, tags, bucketName = ws.paths.bucket) =>
     [
       '# 候选草稿（等确认，未入库）',
       '',
       `- 会话：session-draft-${turn}`,
       `- 回合：${turn} @ 2026-09-12T10:00:0${turn}.000Z`,
-      `- 桶：${ws.paths.bucket}`,
+      `- 桶：${bucketName}`,
       '',
       '## 本轮用户',
       user,
@@ -770,23 +770,35 @@ hr('#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ a
   )
   const seedOk = seed.includes('✅ 已写入')
 
-  // ② 造两篇草稿：A 建议 Tag 含 3 个既有词（应批准，多余建议词被滤掉）；
-  //    B 建议 Tag 全新（可复用 0 个 < 3 ⇒ 必须跳过，留在 pending）
+  /* ② 造两篇草稿（**票02 后的语义**，样本随之改写）：
+   *    A 落在有词汇表的桶 → Tag 由 `curateTags` 内容 kNN 判定，命中 3 个既有词 ⇒ 应批准；
+   *    B 落在**空词汇表**的桶 → 内容判定拿不到 ≥3 个词 ⇒ 必须跳过、留在 pending。
+   * 为什么 B 不能留在原桶：票02 前那条判据「建议 Tag ∩ 词汇表 < 3 ⇒ 跳过」**已不可构造**——
+   * 非空桶必有 ≥3 个 Tag（写日记本身就要求 3–5 个），而 `curateTags` 无余弦地板
+   * （词表里最近的几个总会被取到）；草稿的「建议 Tag」一栏自票02 起**不参与判定**（只作展示）。 */
   mkdirSync(ws.paths.pendingDir, { recursive: true })
   writeFileSync(
     join(ws.paths.pendingDir, '2026-09-12-渲染还是卡-t8.md'),
     draftBody(8, '渲染还是卡，怎么办', '结论：阴影贴图分辨率过大导致，降一档即可。', '草稿渲染, 草稿卡顿, 草稿复盘, 不存在的新Tag'),
   )
+  const EMPTY_CWD = join(tmpdir(), `memo-river-draft-empty-${process.pid}`)
+  const emptyPaths = workspacePaths(EMPTY_CWD, '草稿测试空桶')
+  rmSync(EMPTY_CWD, { recursive: true, force: true })
+  rmSync(emptyPaths.root, { recursive: true, force: true })
+  mkdirSync(EMPTY_CWD, { recursive: true })
+  const wsEmpty = acquireWorkspace(EMPTY_CWD, makeConfig({ bucket: '草稿测试空桶' }))
+  wsEmpty.store.counts() // 建库建表：桶要能被 listBuckets / discard 扫到
+  mkdirSync(wsEmpty.paths.pendingDir, { recursive: true })
   writeFileSync(
-    join(ws.paths.pendingDir, '2026-09-12-turn-t9.md'),
-    draftBody(9, '', '纯工具回合的文本。', '全新概念甲, 全新概念乙'),
+    join(wsEmpty.paths.pendingDir, '2026-09-12-turn-t9.md'),
+    draftBody(9, '', '纯工具回合的文本。', '全新概念甲, 全新概念乙', '草稿测试空桶'),
   )
 
   // ③ 列队（all=true 扫全部工作区——必须能看到本临时工作区的两篇）
   const listOut = await dExec({ all: true, limit: 200 }, ctx14)
   const listOk = listOut.includes('渲染还是卡') && listOut.includes('turn-t9')
 
-  // ④ 批准（bucket 过滤到本测试桶——绝不碰真实桶的草稿）
+  // ④ 批准（bucket 过滤到本测试桶——绝不碰真实桶的草稿）：A 入库；B 在空词表桶被判「内容不足」跳过
   const before14 = ws.store.counts()
   const approveOut = await aExec({ all: true, bucket: ws.paths.bucket }, ctx14)
   const after14 = ws.store.counts()
@@ -795,40 +807,44 @@ hr('#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ a
     approveOut.includes('approved/') &&
     after14.files === before14.files + 1 &&
     existsSync(join(ws.paths.root, 'approved', '2026-09-12-渲染还是卡-t8.md'))
+  const approveEmptyOut = await aExec({ all: true, bucket: wsEmpty.paths.bucket }, ctx14)
   const skipOk =
-    approveOut.includes('跳过') &&
-    existsSync(join(ws.paths.pendingDir, '2026-09-12-turn-t9.md')) &&
-    !existsSync(join(ws.paths.root, 'approved', '2026-09-12-turn-t9.md'))
+    approveEmptyOut.includes('跳过') &&
+    wsEmpty.store.counts().files === 0 &&
+    existsSync(join(wsEmpty.paths.pendingDir, '2026-09-12-turn-t9.md')) &&
+    !existsSync(join(wsEmpty.paths.root, 'approved', '2026-09-12-turn-t9.md'))
 
   // ⑤ 丢弃 B → rejected/（不入库、pending 清空）。
   //    ids 子串按设计跨全部桶扫描 + 歧义保护（bucket 过滤只作用于 all=true 模式）——
   //    2026-09-14 实锤：共享桶里并行会话的同名 turn-t9 真实草稿触发歧义保护。
   //    测试必须用含日期的全唯一子串，绝不与真实桶撞名。
-  const filesBeforeDiscard = ws.store.counts().files
+  const filesBeforeDiscard = ws.store.counts().files + wsEmpty.store.counts().files
   const discardOut = await xExec({ ids: ['2026-09-12-turn-t9'] }, ctx14)
   const discardOk =
     discardOut.includes('rejected/') &&
-    ws.store.counts().files === filesBeforeDiscard &&
-    existsSync(join(ws.paths.root, 'rejected', '2026-09-12-turn-t9.md')) &&
-    !existsSync(join(ws.paths.pendingDir, '2026-09-12-turn-t9.md'))
+    ws.store.counts().files + wsEmpty.store.counts().files === filesBeforeDiscard &&
+    existsSync(join(wsEmpty.paths.root, 'rejected', '2026-09-12-turn-t9.md')) &&
+    !existsSync(join(wsEmpty.paths.pendingDir, '2026-09-12-turn-t9.md'))
 
   check(
     14,
-    '草稿消费通道：批准入库走 memo_write 同一闸门 + 文件出队；Tag 不足 3 个跳过；丢弃可追溯',
+    '草稿消费通道：批准入库走 memo_write 同一闸门 + 文件出队；空词表（内容判定不足 3 个）跳过；丢弃可追溯',
     seedOk && listOk && approvedOk && skipOk && discardOk,
     [
       `① 种子词汇：${seedOk ? '✅' : '❌'}（空库 3-Tag 写入，供草稿 Tag 策展）`,
-      `② memo_drafts all=true 列队：${listOk ? '✅ 两篇都列出' : '❌'}（输出 ${listOut.length} 字符）`,
+      `② memo_drafts all=true 列队：${listOk ? '✅ 两篇都列出（分属两桶）' : '❌'}（输出 ${listOut.length} 字符）`,
       `③ memo_approve（bucket=${ws.paths.bucket}）：${approvedOk ? '✅ 入库 +1 且移入 approved/' : '❌'}`,
       `   ${approveOut.split('\n').filter((l) => l.startsWith('·')).join(' ⏎ ').slice(0, 320)}`,
-      `④ 可复用 Tag < 3 的草稿：${skipOk ? '✅ 跳过且留在 pending/' : '❌'}`,
+      `④ 空词表桶（bucket=${wsEmpty.paths.bucket}）的草稿：${skipOk ? '✅ 内容判定不足 ⇒ 跳过且留在 pending/' : '❌'} ${approveEmptyOut.split('\n').filter((l) => l.startsWith('·')).join(' ⏎ ').slice(0, 160)}`,
       `⑤ memo_discard：${discardOk ? '✅ 移入 rejected/ 不入库' : '❌'} ${discardOut.split('\n')[0]}`,
-      `   库规模：${before14.files} → ${after14.files} 篇（批准后）；丢弃后仍 ${ws.store.counts().files} 篇`,
+      `   库规模：主桶 ${before14.files} → ${after14.files} 篇（批准后）；空桶 ${wsEmpty.store.counts().files} 篇；丢弃后两桶合计不变`,
     ],
   )
 
   rmSync(draftPaths.root, { recursive: true, force: true })
   rmSync(DRAFT_CWD, { recursive: true, force: true })
+  rmSync(emptyPaths.root, { recursive: true, force: true })
+  rmSync(EMPTY_CWD, { recursive: true, force: true })
 }
 
 /* ══════════════════════ #15–#18 自主态节律注入（PLAN-2026-09-13 第一刀） ══════════════════════ */
@@ -1836,7 +1852,15 @@ hr('#36 守护预审三态：垃圾稳定「建议丢弃」；Tag 边界「需�
   let embedCalls = 0
   ws36.embed.embed = async (texts) => {
     embedCalls += 1
-    return texts.map((t) => (t.includes('孪生') ? twinVec : hashVec(t)))
+    /* 票02：内容判定（kNN）是 Tag 的**唯一**来源，故「Tag 不足 ⇒ 需人工」只剩两条可达路径——
+     * 空词表，或**嵌入不可用**。这里用后者：对含「嵌入失败」的文本抛错，走 `knnTagsForDraft`
+     * 的 catch 分支（`src/drafts.ts:380-382`）⇒ tags=[] ⇒ manual。
+     * 旧判据「建议 Tag ∩ 词汇表 < 3」在非空桶已**不可构造**：非空桶必有 ≥3 个 Tag，
+     * 而 `curateTags` 无余弦地板（词表里最近的几个总会被取到）。 */
+    return texts.map((t) => {
+      if (t.includes('嵌入失败')) throw new Error('stub-embed-down')
+      return t.includes('孪生') ? twinVec : hashVec(t)
+    })
   }
   Object.defineProperty(ws36.embed, 'configured', { get: () => true, configurable: true })
 
@@ -1850,7 +1874,9 @@ hr('#36 守护预审三态：垃圾稳定「建议丢弃」；Tag 边界「需�
   )
   const seedOk = seed36.includes('✅ 已写入')
 
-  /* ② 四类样本草稿（junk 是 D10 红线样本：空用户+空助手，但 Tag 够 3 个——机械批准时代它会入库污染） */
+  /* ② 四类样本草稿（junk 是 D10 红线样本：空用户+空助手，但 Tag 够 3 个——机械批准时代它会入库污染）。
+   *   票02 后「Tag 边界」样本改走**嵌入不可用**路径（见上面的桩）：assistant 文本带「嵌入失败」标记
+   *   ⇒ 内容判定拿不到 Tag ⇒ manual；仍保留四态分布 {ok:1, manual:2, discard:1}。 */
   const draftBody36 = (turn, user, assistant, tags) =>
     [
       '# 候选草稿（等确认，未入库）',
@@ -1881,7 +1907,7 @@ hr('#36 守护预审三态：垃圾稳定「建议丢弃」；Tag 边界「需�
     twin: join(pc.pendingDir, '2026-09-15-孪生样本-t13.md'),
   }
   writeFileSync(P.ok, draftBody36(10, '预审怎么分级', '结论：垃圾丢、Tag 不足人工、其余看过近重复再放行。', '预审渲染, 预审卡顿, 预审复盘'))
-  writeFileSync(P.bnd, draftBody36(11, '边界样本问一句', '结论：恰好两个可复用 Tag。', '预审渲染, 预审卡顿'))
+  writeFileSync(P.bnd, draftBody36(11, '边界样本问一句', '结论：嵌入失败时内容判定不可用 ⇒ 需人工。', '预审渲染, 预审卡顿'))
   writeFileSync(P.junk, draftBody36(12, '', '', '预审渲染, 预审卡顿, 预审复盘'))
   writeFileSync(P.twin, draftBody36(13, '孪生问题再问一遍', '结论：与种子同途的孪生复述，应当被指认。', '预审渲染, 预审卡顿, 预审复盘'))
   writeFileSync(join(pc.pendingDir, '孤儿检验.md.status.json'), '{"state":"ok"}\n') // 孤儿状态文件：对应 .md 不存在 → 本轮被清扫
@@ -1944,7 +1970,7 @@ hr('#36 守护预审三态：垃圾稳定「建议丢弃」；Tag 边界「需�
     '守护预审三态：discard 稳定/边界 manual/可批 ok/近重复 manual；纯只读；面板+列表+出队联动',
     seedOk && statesOk && junkStable && !!twinReason && roundFieldOk && logLineOk && sweepOk && readonlyOk && uncheckedOk && entryOk && htmlOk && draftsOk && moveOk && afterOk,
     [
-      `(a) 三态判定=${statesOk ? '✅ ok→ok、2Tag→manual、junk→discard、孪生→manual' : `❌ ${JSON.stringify(Object.fromEntries(Object.entries(st).map(([k, v]) => [k, v?.state ?? null])))}`}`,
+      `(a) 三态判定=${statesOk ? '✅ ok→ok、嵌入失败→manual、junk→discard、孪生→manual' : `❌ ${JSON.stringify(Object.fromEntries(Object.entries(st).map(([k, v]) => [k, v?.state ?? null])))}`}`,
       `(b) D10 红线（垃圾稳定丢弃，Tag 够也拦）=${junkStable ? `✅ ${st.junk?.reason.slice(0, 40)}…` : `❌ ${JSON.stringify(st.junk)}`}`,
       `(c) 近重复指认=${twinReason ? `✅ score=${st.twin?.nearDup?.score.toFixed(4)} twin=${st.twin?.nearDup?.path.slice(-40)}` : `❌ ${JSON.stringify(st.twin)}`}`,
       `(d) GuardianRound/日志=${roundFieldOk && logLineOk ? `✅ ${JSON.stringify(round1.draftPrecheck)}` : `❌ ${JSON.stringify(round1.draftPrecheck)}`}（嵌入批调用=${embedCalls} 次）`,
