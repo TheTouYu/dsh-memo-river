@@ -193,6 +193,27 @@ export { name, inject, Config, apply } from 'file:///home/h/app/dsh-memo-river/l
 
 > ⚠️ 该段文本**编译期常量**，运行时不得拼接任何变量（含日期、计数、Ω 值）。
 
+#### 6.1.1 role 字段的**可达性**（2026-09-26 实测，票 01 / corpus-governance-0926）
+
+契约段描述了四个 role，但实现上只有两个能出现——**这不是 bug，是形态闸门的语义**：
+
+- `role` 由 `queryMode` 决定：`rivermemo_topology_v3.rs:2231` `direct_answer = mode != "atomic" && …`、
+  `:2238` `mode == "atomic"` ⇒ `atomic_concept`（后段只可能把它晋升成 `direct_answer`，或把
+  `structural_explanation` 降级成 `thematic_neighbor`）。**atomic 模式下 `structural_explanation`
+  结构性不可达**。
+- `queryMode` **由图拓扑派生，与查询措辞无关**：logits 由 `shallow_energy_ratio` /
+  `energy_concentration` / `effective_depth` / `chainness` / `branching` … 算出（`:2088-2100`），
+  `confidence = sqrt((1-e^{-nodes/8})(1-e^{-edges/8})) × completeness`（`:2077-2086`），
+  `weights = confidence·softmax(logits) + (1-confidence)·[⅓,⅓,⅓]`（`:2109-2113`），
+  平局归 atomic（`:2114`）。
+- **实测**（`scripts/probe-query-morphology.mjs`，10 种查询形态含 3 种 ≥40 字长句，artifact 29 节点）：
+  **10/10 `queryMode=atomic`**，atomicW 0.45–0.58、propW/narrW 0.20–0.33，confidence 0.48–0.87，
+  `effectiveDepth` 恒 0.02–0.04 ——观测图始终是**浅星形**，所以 atomic logit 恒胜。
+  ⇒ 当前语料规模下实际只会看到 `atomic_concept` 与 `direct_answer` 两种 role。
+- 取证通道：`src/recall.ts` 的召回 `diagnostics` 已透出 `queryMode` 与 `queryMorphology`
+  （Rust 侧 `NativeOutput.query_morphology` 一直随结果序列化，字段见 `:2122-2138`；此前 TS 只消费了
+  `queryMode` 字符串）。要看形态分量，读 `diagnostics.queryMorphology` 即可，**无需重建 vexus-lite**。
+
 ### 6.2 尾注入格式（每轮，追加为消息）
 
 ```

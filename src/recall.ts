@@ -698,6 +698,14 @@ export async function recall(
         // 票 04：权重执行留痕（on/recencyBoosted/exposurePenalized/maxPenalty/tagDemotions）
         selectionWeights: selection.weights,
         readoutDiagnostics: readout.diagnostics ?? null,
+        /* 票 01（corpus-governance-0926）：查询形态取证。
+         * Rust 侧 `query_morphology` 一直随结果序列化（rivermemo_topology_v3.rs:2835，字段见 :2122-2138），
+         * 但 TS 只消费了 `queryMode` 字符串 —— 形态**是图拓扑派生的**（logits 由 shallow_energy_ratio /
+         * energy_concentration / effective_depth / chainness… 算出，:2088-2100，与查询文本措辞无关），
+         * 而 `queryMode == "atomic"` 时 `structural_explanation` 结构性不可达（:2231/:2238）。
+         * 透出权重与各分量，才能在**不重建 vexus-lite** 的前提下判读「三级证据为何只到两级」。 */
+        queryMode: (readout.queryMode as string | undefined) ?? null,
+        queryMorphology: readout.queryMorphology ?? null,
         fieldTrusted: (meta.diagnostics as Record<string, unknown> | undefined)?.fieldTrusted ?? null,
         fieldEntropy: (meta.diagnostics as Record<string, unknown> | undefined)?.fieldEntropy ?? null,
         enhancedVectorCos: 0,
