@@ -32,3 +32,16 @@
 - [ ] 整桶备份 + before 读数
 - [ ] 全量改写（含 EROFS 处置与零残留核对）
 - [ ] after 读数 + 独立正文复核 + 漂移观察项登记
+
+---
+
+## 预检（2026-09-26，主代理）
+
+- **裸 Tag 行 = 0**：用票 07 第 3 项的扫描口径跑 `dsh-memo-river` 生产根（81 篇）⇒ 0 命中
+  ⇒ 全量 retag 不会遇到「正文里手写 Tag 列表」的遗留问题（`deepseek-harness` 那边有 4 篇，属票 07 第 3 项）。
+- **计划来源**：PLAN 由票 04 产出（`.scratch/corpus-governance-0926/plan-dsh-memo-river.json`），
+  `retag-content-tags.mjs --plan` 为外置入口；执行前须先 `cp -a` 生产根到工作区（`/home/h/.dsh/**` 在沙箱下 EROFS，
+  见 `scripts/README.md` 状态纪律）。
+- **执行后必跑**：`DSH_HOME=/home/h/.dsh node scripts/acceptance-corpus.mjs --bucket dsh-memo-river`
+  （腿②应从 0.358 落到 <1/3、连通分量仍 1、孤儿 0）＋ `scripts/probe-anchor-trace.mjs`（`PROBE_SRC=` 指副本）
+  取 4 个查询的 anchor/Ω before-after。
