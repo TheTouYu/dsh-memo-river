@@ -152,3 +152,47 @@ done
 - `node scripts/acceptance-corpus.mjs --bucket dsh-memo-river`（**不设** DSH_HOME ⇒ 解析生产根）：①分量=1 ②top1<1/3 ③孤儿=0 ④正文 ⑤口径
 - 打生产那个批次脚本自己的收尾块：`grep -E "判据 ①|判据 ②|正文完整性|写入结果" .scratch/corpus-governance-0926/05-apply.log`
 - 主套件：#2 应转绿（票 08 A 落地），其余红集应与基线 16 项同（票 02 双盲归因已记）
+
+---
+
+## 生产执行读数（2026-09-26，用户批准后执行；**已完成**）
+
+**执行**：新鲜整桶备份 `.scratch/backup-20260926-104457-pre05/`（`integrity_check=ok`，回滚可用）→
+`DSH_HOME=/home/h/.dsh node scripts/retag-content-tags.mjs --apply --plan …/plan-dsh-memo-river.json --only <每批3篇>`
+× **27 批** ⇒ **失败 0，用时 310s**。中途 **3 次 `Bus error`(SIGBUS)** 被「失败重试一次」救回（`--only` 幂等 + `file-map-dsh-memo-river.json` 兜底 chunk id 变更）——分批策略有效。
+**末态**：`81 files / 81 chunks / **53 tags** / **277 file_tags**`（= PLAN 的 277 个挂载点，一比一）。
+
+**脚本自证（最后一批尾部）**：
+```
+判据 ②（最大频次 < 1/3）：最大 = 22/81 = 0.272 → ✅ PASS（「注入时序」）
+判据 ①（连通分量 = 1）：1（规模 53）→ ✅ PASS
+正文完整性（只改 Tag 行）：✅ 81/81 篇逐字节一致（本轮改写 3 篇，未动 78 篇）
+```
+
+**旧三枢纽全部降到 1 篇**（改前 归因错误 29 / 写入去重 29 / 被动召回 27）：`归因错误 = 1 / 写入去重 = 1 / 被动召回 = 1`。
+
+**独立复核**（`DSH_HOME=/home/h/.dsh node scripts/acceptance-corpus.mjs --bucket dsh-memo-river`，只读）：
+```
+桶 = dsh-memo-river@6c8bcf85fe1b56e1（root /home/h/.dsh/…）篇数 = 81　Tag = 53
+最大频次「注入时序」×22（0.272）　孤儿 = 0　连通分量 = 1　→ **4/4 PASS**（④ SKIP，未给 --baseline）
+memo_stats 同源输出：① 分量=1（规模 53）② 22/81=27.2% ③ Ω 近 41 次均值 0.506 ④ 未覆盖率 1/81 ⇒ **✅ 四项体检全部通过**
+```
+
+**探针 before → after**（4 查询；before 用打生产前的**冻结快照** `PROBE_SRC=.scratch/backup-…-pre05/…`，after 用生产活桶）：
+
+| 查询 | Ω | queryMode | 超阈候选 | promoted |
+|---|---|---|---|---|
+| 干跑验证 | 0.733 → **0.9439** | atomic → atomic | 2 → 5 | false → false |
+| 推送闸门脏增量 | 0.8543 → **0.9120** | atomic → atomic | 5 → 7 | false → false |
+| profile清单校验 | 0.7164 → **0.9286** | **atomic → narrative** | 2 → 4 | true → false |
+| 为什么嵌入端点变慢了 | 0.5848 → **0.7417** | atomic → atomic | 8 → 1 | **false → true** |
+
+**怎么读这张表（诚实结论）**：
+1. **Ω 全线上升**（观测图变密：Tag 节点 19 → 53，边更实），这是本票的直接目标；
+2. **形态学主闸松动了**：`profile清单校验` 从 `atomic` 变成 **`narrative`** ⇒ 票 07 判定的「`structural_explanation` 结构性不可达」**不再成立**
+   （role 分支见 `rivermemo_topology_v3.rs:2231/:2238`）——这是数据手术能翻的东西，原先以为翻不动；
+3. **晋升不是单调改善**：4 查询里 promoted 前后各 1 真，但**换了对象**（profile清单校验 true→false、为什么嵌入端点变慢了 false→true）。
+   机理：`contrast = strongest >= 2.0 × second` 这条**相对**判据在词汇表变富、竞争者变多后更难满足。
+   ⇒ 后续票可考虑从 JS 侧覆写 `anchorFrontierContrast` / `anchorActivationZ`（`NativeConfig` 无 deny_unknown_fields，`src/native.ts:454-492` 目前一个字都没传 config）。
+
+**回滚路径**：`cp -a .scratch/backup-20260926-104457-pre05/6c8bcf85fe1b56e1/. /home/h/.dsh/memo-river/6c8bcf85fe1b56e1/`（或只恢复 `knowledge_base.sqlite`）。
