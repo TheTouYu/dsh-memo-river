@@ -63,3 +63,23 @@
   再跑 `node scripts/gen-prompt.mjs` 重生成 ⇒ `#2` 转绿、常量与文本自洽。代价：前缀缓存破**一次**
   （与票 03 的契约改动合批，只破一次）。
 - **(B) 以 DESIGN 为准**：回退上线文本，丢掉 ⑧ 与四 role 描述 —— 等于撤掉已生效的改进，不推荐。
+
+---
+
+## 路径 A 干跑（scratch 演练，2026-09-26 —— 仓库文件一字未动）
+
+在 `.scratch/genprompt-dry/` 复刻 `DESIGN.md` + `scripts/gen-prompt.mjs` + `src/` 的最小布局，
+把 **上线文本**（2025B）逐字填进 §6.1 围栏，跑 `node .scratch/genprompt-dry/scripts/gen-prompt.mjs`：
+
+```
+旧围栏 : 1597 bytes sha b08590b5533a
+上线文本: 2025 bytes sha b52602374b1f
+wrote src/prompt.ts — 2025 bytes, sha256=b52602374b1f1cb8b59943e9aefe2b32cc2b11b84e6f903b9674a847d707e282
+重生成文本 === 上线 FIXED_CONTRACT_TEXT : true
+重生成常量 === sha(重生成文本)          : true
+```
+
+⇒ **A 路径可一键落地**：把上线文本写回 `DESIGN.md` §6.1 围栏（唯一改动点）→ 跑 `node scripts/gen-prompt.mjs`
+→ `src/prompt.ts` 与常量自洽、`acceptance.mjs` #2 的两条断言（`registered === designText`、
+`FIXED_CONTRACT_SHA256 === sha(registered)`）**同时转绿**，文本本身与当前上线文本**逐字节相同**
+（⇒ 若与票 03 合批，前缀缓存只因票 03 的契约改动破一次，不因这次对齐破）。
