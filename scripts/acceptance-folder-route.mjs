@@ -18,7 +18,7 @@ import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
 /* ── 自建自净环境：DSH_HOME 必须在 import lib 之前指好（动态 import） ── */
-const TMP = mkdtempSync('/var/tmp/memo-river-route-')
+const TMP = mkdtempSync(join(process.env.TMPDIR || '/var/tmp', 'memo-river-route-'))
 process.env.DSH_HOME = join(TMP, 'dsh-home')
 const { apply, Config: ConfigSchema } = await import('../lib/index.js')
 const { startEmbedStub } = await import('./embed-stub.mjs')
