@@ -72,3 +72,13 @@
 
 **执行前提**：PLAN 里 34 个新 Tag 都是**首次入库** ⇒ 每篇 memo_update 都必须带 `newTagReason`
 （写侧闸门硬性要求），retag 脚本已按此传参（复核时确认一次）。
+
+### 执行前置（已就位，2026-09-26）
+
+- **新 Tag 闸门的 newTagReason 已复核**：`retag-content-tags.mjs:131-133` 在 `--plan` 模式下有**非空兜底文案**
+  （PLAN 里没有 `_reason` 元数据也不影响）⇒ 34 个首次入库的新 Tag 不会被 `unconfirmed-new-tags` 拒。
+- **执行前备份已就位**：`.scratch/backup-<ts>/6c8bcf85fe1b56e1/`（路径记在同一目录的 `05-backup-path.txt`），
+  校验：81 files / 81 chunks / 19 tags / 每篇 file_tags 齐全 —— 失败可整体回滚。
+- **落地命令（照票面）**：
+  `DSH_HOME=/home/h/.dsh node scripts/retag-content-tags.mjs --apply --plan .scratch/corpus-governance-0926/plan-dsh-memo-river.json`
+  （先 `--dry` 一轮看计划自检：条数/长度/跨篇频次三闸；`/home/h/.dsh/**` 需一次性全权限，见 scripts/README 状态纪律）
