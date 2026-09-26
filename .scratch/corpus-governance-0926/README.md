@@ -22,6 +22,7 @@
 | 本项目自己的桶同款病理 | `dsh-memo-river` 81 篇 / 19 Tag 全是流程词，三枢纽超 1/3（归因错误 29、写入去重 29、被动召回 27） | 04 / 05 |
 | 治理判据散落在一次性脚本里 | max freq / 连通分量 / 孤儿 Tag / 正文完整性 | 06 |
 | 收尾项 | 草稿队列 7 篇、hub 闸门档位、`deepseek-harness` 4 篇裸 Tag 行、两桶分叉 | 07 |
+| 契约源头分叉 | `DESIGN.md` §6.1（1597B、规范 ①–⑦、sha `b08590b5…`）≠ 上线 `FIXED_CONTRACT_TEXT`（2025B、四 role + 规范 ⑧、sha `b5260237…`），而常量记的是 **DESIGN 侧**哈希 ⇒ `acceptance.mjs` #2 算术上必红（票 01 执行途中发现，非本轮引入） | 08 |
 
 ## 三、依赖图
 
@@ -29,7 +30,22 @@
 01 ──> 02 ──> 04 ──> 05 ──> 07
  └───> 03 ────────────┘
 06（独立，可与 01 并行）
+08（独立，但必须先于 03 —— 改契约之前先让源头自洽）
 ```
+
+## 三点五、执行途中新增的证据（2026-09-26）
+
+- **复现环已在生产活起来**：`deepseek-harness` 桶 retag 后长到 **22 篇**，新增两篇（file id 43/45）仍复用流程词
+  `上游同步` ⇒ 该词 **7/22 = 0.318**，正逼近 1/3 判据位。这正是票 02（草稿建议 Tag 取自被动召回命中）
+  ＋票 03（nudge 教「优先复用词汇表」）要堵的那条路。
+- **票 01 定论**：`queryMode` 由**观测图拓扑**派生，与查询措辞无关；10 种形态（含 3 种 ≥40 字长句）**10/10 atomic**，
+  `effectiveDepth` 恒 0.02–0.04 ⇒ `structural_explanation` 在当前语料规模下结构性不可达（记入 `DESIGN.md` §6.1.1）。
+- **沙箱会话的两个环境坑（不是产品问题，但会让「回归」假红）**：
+  1. `/var/tmp` 在 workspace-write 沙箱里不可写 ⇒ 套件 `mkdtempSync` 报 EROFS（已修：改走 `TMPDIR`，commit `927e23d`）；
+  2. 主套件用**环境里的 `DSH_HOME`** 建/清自净桶，会话若跑在沙箱根（`.compat/rehearsal/browser`）会在 cleanup 阶段
+     EROFS 崩在 `scripts/acceptance.mjs:514` ⇒ 必须显式 `DSH_HOME=<workspace>/.selftest/dsh-home`。
+  标准跑法：`TMPDIR=$PWD/.scratch/tmp DSH_HOME=$PWD/.selftest/dsh-home node scripts/acceptance.mjs`
+
 
 ## 四、执行纪律（本仓既有红线 + 本系列新增）
 
