@@ -97,3 +97,21 @@
 - **生产执行命令（票 05 第 2 步，待 04 试跑判绿）**：
   `DSH_HOME=/home/h/.dsh node scripts/retag-content-tags.mjs --apply --plan .scratch/corpus-governance-0926/plan-dsh-memo-river.json`
   —— `--folder` 由 PLAN 的 `_folder="dsh-memo-river"` 接管，别手动传（打错桶的第一道闸就是它）。
+
+### 生产干跑读数（2026-09-26，`DSH_HOME=/home/h/.dsh`，**未加 --apply**）
+
+```
+桶 = dsh-memo-river　PLAN 来源 = .scratch/corpus-governance-0926/plan-dsh-memo-river.json（81 篇）
+篇数（计划覆盖）= 81　Tag 种类 = 53　最大跨篇 = 22（cap 25）
+判据 ②（最大频次 < 1/3）：需 < 27.00；本计划 22/81 = 0.272
+✅ 计划自检通过（3–5 个/篇、≤20 字、跨篇 ≤25、22/81 < 1/3）
+── 逐篇打印 81/81 条 old→new 映射（402 行日志，本地 .scratch/…/05-dry-run.log，已 gitignore）
+（未加 --apply，未写任何东西。）
+```
+
+**结论**：生产桶侧**四项前置全部绿灯**——① 计划自检 PASS（81/81 覆盖、53 词、max 22 ≤ cap 25、22/81 < 1/3）；
+② 写侧同义闸门预演 0/34 与 0/561 超 0.92（round 2，真嵌入）；③ `newTagReason` 非空兜底；④ 备份 81/81/19/261 + 原子副本。
+⇒ 待票 04 试跑判绿后，**唯一还差的是 `/home/h/.dsh/**` 的写权限**（workspace-write 下 EROFS），
+那一步会弹一次全权限确认——**那一刻就是「真打生产」的确认点**。
+
+**生产桶零写入证据**：干跑前后 `81 files / 81 chunks / 19 tags / 261 file_tags`，`knowledge_base.sqlite` mtime 仍是 `2026-09-17 22:19:18`。
