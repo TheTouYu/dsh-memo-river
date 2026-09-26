@@ -69,6 +69,19 @@ REAL_EMBED=1 node scripts/setup-selftest.mjs && REAL_EMBED=1 node scripts/accept
   写 `.md`/sqlite 报 `EROFS ... open '/home/h/.dsh/...'`（写前先 `cp -a` 备份到工作区内）。
   EROFS 发生在**盘上文件写入**这一步、DB 事务之前——实测桶内零残留（20 chunks/8 tags 不变），
   但每次失败都要按这个句式去核，别假设原子。
+- **沙箱会话跑套件要显式设两个环境变量，缺一会假红**（2026-09-26 实测）：
+  `TMPDIR=$PWD/.scratch/tmp`（`acceptance-folder-route.mjs`/`acceptance-hub-gate.mjs` 曾硬编码
+  `mkdtempSync('/var/tmp/…')`，workspace-write 沙箱下直接 `EROFS: mkdtemp`——已改为
+  `process.env.TMPDIR || '/var/tmp'`，commit `927e23d`）；
+  `DSH_HOME=$PWD/.selftest/dsh-home`（任何自建自净桶的套件——主套件 `acceptance.mjs`、
+  `acceptance-write-prompts.mjs` 的 T-4/T-5——都会用**环境里的** `DSH_HOME` 建/清桶；
+  若它指向会话沙箱根（工作区之外），会在 cleanup 阶段 `EROFS`/`ENOENT mkdir` 崩在
+  `acceptance.mjs:514` 或 `lib/workspace.js:171`，看起来像「一堆验收项失败」）。
+  标准跑法：`TMPDIR=$PWD/.scratch/tmp DSH_HOME=$PWD/.selftest/dsh-home node scripts/acceptance.mjs`
+- **主套件 2026-09-26 已知红（干净 HEAD 同刻复现，与改动无关）**：`#1/#2/#4/#5/#8/#10/#13`
+  （其中 `#2` 是**真实既有缺陷**：`DESIGN.md` §6.1 文本 ≠ 上线 `FIXED_CONTRACT_TEXT` 且 sha 常量
+  记的是 DESIGN 侧哈希 ⇒ 前缀缓存回归线失效，见 `.scratch/corpus-governance-0926/issues/08-*`），
+  HEAD 侧另多 `#15–#19` 后 SIGBUS。归因方法：`git stash -- <改动文件>` → 同刻复跑 → 失败集逐项比对。
 - `retag-content-tags.mjs` 的 D 编号是 **chunk id 口径**，而 `memo_update` 的 `id` 是
   **file-id 优先解析**（本桶 chunk 18 → file 17，存在无 file 对应的 chunk id 空档）；
   且改写会**换 chunk id**。脚本因此落 `file-map.json` 并把 fileId 传给工具——
