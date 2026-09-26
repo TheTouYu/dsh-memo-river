@@ -27,7 +27,7 @@
 
 **Blocked by:** None — 可立即开工。
 
-**Status:** done — 2026-09-26（选定 (i)：诊断透出 + DESIGN §6.1.1 判据说明，契约未动；形态表 10/10 atomic）
+**Status:** done — 2026-09-26，commit `3ba1ba9`（选定 (i)：诊断透出 + DESIGN §6.1.1 判据说明，契约未动；形态表 10/10 atomic，探针 `scripts/probe-query-morphology.mjs`）
 
 - [x] 探针建成并跑出形态表（10 形态 / 10 atomic / effectiveDepth 0.02–0.04）
 - [x] 定因证据落票面（图拓扑派生；「低置信度默认档」只对一半）
