@@ -149,19 +149,21 @@ const exec = (args) => writeTool.execute(args, execStub(CWD))
     content: '# 第二篇近重复\n\n高度相似的正文：与第一篇同向量（桩），应触发并入引导而非静默新开。\n\nTag: ' + TAGS,
   }))
   const t4 = rA.includes('质量四要素') && rB.includes('最相似 D') && rB.includes('memo_update 并入')
-  check('T-4', '真实 memo_write：四要素行常在；近重复出现「memo_update 并入」引导', t4, [
+    && rA.includes('Tag 自检') && rA.includes('写内容词') // 票03：写前回注 Tag 自检行
+  check('T-4', '真实 memo_write：四要素行 + Tag 自检行常在；近重复出现「memo_update 并入」引导', t4, [
+    `A Tag 自检行：${(rA.match(/【写前回注】Tag 自检[^\n]*/) ?? ['(无)'])[0].slice(0, 58)}…`,
     `A 四要素行：${(rA.match(/【写前回注】质量四要素[^\n]*/) ?? ['(无)'])[0].slice(0, 50)}…`,
     `B 引导行：${(rB.match(/【写前回注】最相似[^\n]*/) ?? ['(无)'])[0].slice(0, 60)}…`,
     `B 结局：${rB.includes('被拒绝') ? '近重复被拒（引导先行，闸门兜底——符合设计）' : '写入成功'}`,
   ])
 
   const schemaStr = JSON.stringify(writeTool)
-  const addLines = [...rA.matchAll(/【写前回注】(质量四要素|最相似)[^\n]*/g)].map((m) => m[0])
-    .concat([...rB.matchAll(/【写前回注】(质量四要素|最相似)[^\n]*/g)].map((m) => m[0]))
+  const addLines = [...rA.matchAll(/【写前回注】(质量四要素|最相似|Tag 自检)[^\n]*/g)].map((m) => m[0])
+    .concat([...rB.matchAll(/【写前回注】(质量四要素|最相似|Tag 自检)[^\n]*/g)].map((m) => m[0]))
   const t5 = schemaStr.includes('四要素') && addLines.every((l) => l.length <= 160) && addLines.reduce((s, l) => s + l.length, 0) / 2 <= 300
   check('T-5', 'schema 描述含四要素 + 回注新增行 ≤300 字符（预算红线）', t5, [
     `schema 含四要素：${schemaStr.includes('四要素') ? '✅' : '❌'}`,
-    `单篇新增行字符：${[...rA.matchAll(/【写前回注】(质量四要素|最相似)[^\n]*/g)].map((m) => m[0].length).join('+') || 0} ≤300`,
+    `单篇新增行字符：${[...rA.matchAll(/【写前回注】(质量四要素|最相似|Tag 自检)[^\n]*/g)].map((m) => m[0].length).join('+') || 0} ≤300`,
   ])
 }
 

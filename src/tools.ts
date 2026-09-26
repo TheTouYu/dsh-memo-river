@@ -306,11 +306,17 @@ async function composeReinjection(
     top && top.score >= MERGE_SUGGEST_KNN
       ? `【写前回注】最相似 D${top.id}《${top.title}》knn=${top.score.toFixed(2)}——同一主题的延续优先 memo_update 并入，别新开复读篇。`
       : ''
+  /* 票03（corpus-governance-0926）：写前最后一句话——Tag 自检。上面那条 hubWarn 说的是**库的当前状态**，
+   * 这条说的是**你该怎么写**：枢纽词会被写侧闸门拦下或警告（enforce 档硬拒 / 交互档软警告，见票 06 hubGateMode），
+   * 不确定就写内容词（与 render.ts 的 nudge 内容词规则同口径）。计入回注 ≤300 字符预算（T-5 实测）。 */
+  const tagSelfCheck =
+    '【写前回注】Tag 自检：跨篇 ≥1/3 的枢纽词会被写侧闸门拦下或警告；不确定就写内容词（主题/机制/对象/判据）。'
   return [
     ...lead,
     `【写前回注】旧 Tag 词汇表（top ${Math.min(30, freq.length)}）：${reinjectTop}`,
     `【写前回注】语义相关旧日记：${relatedStr || '(无)'}`,
     `【写前回注】${hubWarn}；当前连通分量 = ${pre.components}（判据 =1）`,
+    tagSelfCheck,
     qualityAnchor,
     ...(mergeHint ? [mergeHint] : []),
   ].join('\n')
