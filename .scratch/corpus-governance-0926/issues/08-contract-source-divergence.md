@@ -29,7 +29,7 @@
 
 **Blocked by:** 无（但**必须先于票 03 完成**：票 03 要改契约，改之前得先让源头自洽，否则会把手抄差异一起带进新版本）。
 
-**Status:** 待用户裁定 — 2026-09-26（定因与 A 路径干跑均已入票面 `6e2d9ed`/`eb0943e`；A=以上线文本为准写回 DESIGN §6.1 再 gen-prompt（推荐），B=回退上线文本）
+**Status:** done（用户裁定 **A**）— commit `__C8H__`：DESIGN §6.1 写回上线文本 + 票 03 的 ②③ 补丁同批落地，gen-prompt 重生成，sha256 `5a5d65e2…`（2266B）
 
 - [ ] 分叉点定位（git log）
 - [ ] 权威侧判定 + 用户确认
@@ -83,3 +83,17 @@ wrote src/prompt.ts — 2025 bytes, sha256=b52602374b1f1cb8b59943e9aefe2b32cc2b1
 → `src/prompt.ts` 与常量自洽、`acceptance.mjs` #2 的两条断言（`registered === designText`、
 `FIXED_CONTRACT_SHA256 === sha(registered)`）**同时转绿**，文本本身与当前上线文本**逐字节相同**
 （⇒ 若与票 03 合批，前缀缓存只因票 03 的契约改动破一次，不因这次对齐破）。
+
+---
+
+## A 路径落地记录（2026-09-26，用户裁定 A：以上线文本为准）
+
+1. **写回逐字**：把 `DESIGN.md` §6.1 围栏（原 1597B / sha `b08590b5…`）替换为**上线文本 + 票 03 的 ②③ 补丁**
+   （干跑产物 `.scratch/genprompt-dry/DESIGN.md` 的围栏，2266B / sha `5a5d65e26d8b592e8e003cf6276142d87b2932415a39decf57ca38a5cfc633f7`）。
+2. **重生成**：`node scripts/gen-prompt.mjs` → `wrote src/prompt.ts — 2266 bytes, sha256=5a5d65e2…`；
+   `FIXED_CONTRACT_SHA256` 同步为 `5a5d65e2…`（常量与文本自洽）。
+3. **零漂移证据（关键）**：`git diff src/prompt.ts` **只有 4 行**（+/- 各 2：sha 与 bytes 注释、常量行），
+   正文里**只改了 ②③ 两条**——若写回有任何一个字节的偏差，整行 `FIXED_CONTRACT_TEXT` 都会重写。
+   ⇒ 「以上线文本为准」是**逐字**做到位的，不是近似对齐。
+4. **前缀缓存**：这一次 gen-prompt 与票 03 的契约补丁是**同一次**（DESIGN 先写回、补丁再叠加、只生成一次）⇒ 缓存只破一次。
+   生效需**重启 DSH**（运行中的插件内存里还是旧契约）。

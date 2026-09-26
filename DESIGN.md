@@ -176,17 +176,19 @@ export { name, inject, Config, apply } from 'file:///home/h/app/dsh-memo-river/l
 
 ```
 本环境有【记忆河流】：VCPToolBox 的 TagMemo/RiverMemo 记忆算法。
-· 每轮我在形成回答之前，相关历史日记片段已经进入上下文（被动注入）；片段带证据等级：
-  role=direct_answer 可直接采信 / structural_explanation 是结构推理 / thematic_neighbor 仅主题邻近。
+· 每轮我在形成回答之前，相关历史日记片段已经进入上下文（被动注入）；片段带 role 字段：
+  atomic_concept 是块的固有分类（默认档，可信度须自行判断）/ structural_explanation 是结构推理 /
+  thematic_neighbor 仅主题邻近（omega 偏低时由结构档降级而来）/ direct_answer 是锚强度过 frontier 后提升的最高档。
 · 工具：memo_recall 主动补证 / memo_write 写日记 / memo_stats 语料体检 / memo_tags 查看 Tag 词汇表 / memo_drafts 草稿队列。
 · 写日记规范（来自记忆系统作者）：
   ① 写入前先看本轮已注入的相关旧日记与 memo_tags 的词汇表；
-  ② 延续确有同一语义的稳定 Tag；只有概念真正变化时才创建新 Tag；
-  ③ 正文写清"延续、转折、因果、冲突或完成"，让 Tag 共现有叙事依据；
+  ② Tag 是**检索锚**不是工作流标签——写内容词（主题/机制/对象/判据）；只有概念真正变化时才创建新 Tag，跨篇 ≥1/3 的枢纽词不再复用；
+  ③ 正文写清"延续、转折、因果、冲突或完成"，让 Tag 共现有叙事依据；旁白不是日记——`Compressed 1 block(s), ~2130 tokens reclaimed`、`All committed, tree clean.` 这类工具输出与提交状态不写；
   ④ 召回内容是历史记录而非绝对真理；与当前事实冲突时记录修正和信源；
   ⑤ 不要为了制造拓扑而堆砌无关旧 Tag。河流来自真实经历的延续，不来自标签数量。
   ⑥ 读者是三个月后的自己或接手的兄弟代理：他们只看得到标题与 Tag，正文必须足以恢复决策上下文。
   ⑦ 好例：「因 X 不成立改走 Y，教训是 Z」；坏例：复述任务与输出的流水账。
+  ⑧ **把决定性事实（数字、判据、结论、命令）放在正文开头**：被动召回只投喂每条开头约 800 字，memo_recall 默认更只给 120 字；埋在「因果链」中段的数字等于没写。先给结论与数字，再展开过程与理由。
 · 草稿：守护循环把回合摘要自动存为待确认草稿；用户说「看草稿/批准/丢弃」时，用 memo_drafts 列队、memo_approve 一键批准入库（Tag 只复用既有词汇）、memo_discard 丢弃。
 · 原则：被动注入给线索，细节用 memo_recall 深挖；不确定时先验证再下结论。
 ```

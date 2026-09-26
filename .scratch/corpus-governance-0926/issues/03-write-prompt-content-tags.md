@@ -33,7 +33,7 @@
 
 - [x] 三处文案落地（nudge `43bc2b4` / 回注 `4ead60f` / 契约段待票 08）
 - [x] 形态快照 + 预算红线读数（套件 5/5；末行 85→215、回注新增 59+59 ≤300）
-- [ ] sha256 更新 + 回归绿（等契约段落地）
+- [x] sha256 更新（`5a5d65e2…`，与常量自洽）+ 用户裁定票 08 A 后与写回同批落地；主套件 #2 待构建后验
 
 ---
 
@@ -75,3 +75,11 @@
 - `scripts/acceptance-write-prompts.mjs`：T-4 增「Tag 自检行在场 + 含『写内容词』」断言（并打印该行），T-5 的预算正则把新行纳入计量（`(质量四要素|最相似|Tag 自检)`）⇒ 预算红线不会因新增行而失真。
 - 实测（`TMPDIR=$PWD/.scratch/tmp DSH_HOME=$PWD/.selftest/dsh-home node scripts/acceptance-write-prompts.mjs`）：**5/5 PASS**，
   `单篇新增行字符：59+59 ≤300`（红线 300）。
+
+### 契约段已落地（与票 08 A 路径同批，commit `__C3H__`）
+
+- `DESIGN.md` §6.1 围栏 = 上线文本 + ②③ 补丁（2266B）；`node scripts/gen-prompt.mjs` 重生成 `src/prompt.ts`
+  （sha `5a5d65e26d8b592e8e003cf6276142d87b2932415a39decf57ca38a5cfc633f7`，`FIXED_CONTRACT_SHA256` 同步）。
+- 行数 **16 → 16（Δ0 ≤2 ✓）**、字节 2025 → 2266（Δ+241）；`git diff src/prompt.ts` 仅 4 行 ⇒ 写回零漂移。
+- **预算与断言**：`acceptance.mjs` #2（`registered === designText` 与 `FIXED_CONTRACT_SHA256 === sha(registered)`）
+  从「算术必红」转为可绿，待构建后跑主套件取读数（见票据 08 记录）。
