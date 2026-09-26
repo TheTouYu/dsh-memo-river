@@ -82,3 +82,18 @@
 - **落地命令（照票面）**：
   `DSH_HOME=/home/h/.dsh node scripts/retag-content-tags.mjs --apply --plan .scratch/corpus-governance-0926/plan-dsh-memo-river.json`
   （先 `--dry` 一轮看计划自检：条数/长度/跨篇频次三闸；`/home/h/.dsh/**` 需一次性全权限，见 scripts/README 状态纪律）
+
+### 脚本 flag 语义（2026-09-26 实测确认，执行前必读）
+
+- **写入门 = `--apply` 一个字面量**（`retag-content-tags.mjs:48` `const APPLY = argv.includes('--apply')`）。
+  没有 `--apply` ⇒ 任何调用都是干跑：`:256` 的 `if (!APPLY) { … line('（未加 --apply，未写任何东西。）') }` 早退，
+  **连读数 JSON 都不写**。实测：我误把 `--help` 当帮助（脚本**没有** `--help`），它按缺省参数跑了一遍内置表计划
+  （打印「桶 = deepseek-harness 篇数 20」），生产桶零变化（81/81/19/261，mtime 仍是 09-17 22:19）
+  ⇒ 这是一个**好的安全默认**，但也意味着「命令打错」不会报错、只会静默干跑。
+- `--dry` **不是一个 flag**（只看 `--apply`）；干跑仍会**打开目标桶**（`:170` 注释：要报「实际」频次）⇒ 需要读权限，不写。
+- 其它真 flag：`--folder`（缺省 `deepseek-harness`；`--plan` 的 `_folder` 在未显式传时接管）、`--plan <json>`、
+  `--max-per-tag N`（内置表缺省 5、外置表缺省 25，硬校验 `< 篇数/3`）、`--only 1,2,3`（**部分补做**：中途失败后不必全跑）。
+- 真写模式落读数：`.scratch/retag/readings-<ts>.json`（含 plan/results/tagFrequency/maxFreqRatio/components/bodyDrift）。
+- **生产执行命令（票 05 第 2 步，待 04 试跑判绿）**：
+  `DSH_HOME=/home/h/.dsh node scripts/retag-content-tags.mjs --apply --plan .scratch/corpus-governance-0926/plan-dsh-memo-river.json`
+  —— `--folder` 由 PLAN 的 `_folder="dsh-memo-river"` 接管，别手动传（打错桶的第一道闸就是它）。

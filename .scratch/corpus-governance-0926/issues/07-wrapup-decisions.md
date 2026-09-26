@@ -107,3 +107,7 @@
 **判据（清哪些）**：`workspace.json` 存在但 dailynote ≤3 篇 ⇒ 套件残留（可清）；判据不靠目录名，靠**真桶白名单**——
 上面 6 个之外一律可清。清理命令（待点头，**先 dry 再实删**）：
 `find <沙箱根> -maxdepth 1 -mindepth 1 -type d` 减去白名单 6 个 → `rm -rf`。
+
+**清理清单已生成**（本地，`.gitignore` 已忽略）：`.scratch/corpus-governance-0926/07-sandbox-residue.txt` =
+626 行绝对路径，生成时用**真桶白名单**做集合校验（`assert not (residue & keep)` 通过）。
+不提交进仓的理由：路径是本机沙箱专属、无常驻价值；**规则与计数**已在本票面，清单可随时用同一段 python 重生成。
