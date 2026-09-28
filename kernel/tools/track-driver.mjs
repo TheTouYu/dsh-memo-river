@@ -23,7 +23,7 @@ const VCP_ROOT = process.env.VCP_ROOT || '/home/h/app/VCPToolBox';
 
 // modelSig 只影响 artifactSig 字符串，不影响数值（已实证：WSL 有 config.env、本机没有，
 // 双方输出仍 bit-exact）。钉死常量保证本机跨次运行确定。
-const MODEL_SIG = 'differential-fixed@relayrouter';
+const MODEL_SIG = 'gemini-embedding-2-preview@relayrouter'; // 语料 pairwise 表的真实 sig——钉假 sig 会让 semantic_gain 全程走 fallback
 
 const die = (status, detail) => {
   fs.writeFileSync(OUT_PATH, JSON.stringify({ label: LABEL, status, detail, queries: [] }, null, 2));

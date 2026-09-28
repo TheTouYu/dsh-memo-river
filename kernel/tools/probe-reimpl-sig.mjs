@@ -13,7 +13,7 @@ import { createRequire } from 'node:module';
 const HERE = import.meta.url.startsWith('file:') ? path.dirname(new URL(import.meta.url).pathname) : '.';
 const KERNEL = path.resolve(HERE, '..');
 const VCP_ROOT = process.env.VCP_ROOT || '/home/h/app/VCPToolBox';
-const MODEL_SIG = 'differential-fixed@relayrouter';
+const MODEL_SIG = 'gemini-embedding-2-preview@relayrouter'; // 语料 pairwise 表的真实 sig——钉假 sig 会让 semantic_gain 全程走 fallback
 
 const require = createRequire(import.meta.url);
 const Database = require(path.join(VCP_ROOT, 'node_modules', 'better-sqlite3'));
