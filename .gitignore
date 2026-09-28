@@ -4,6 +4,11 @@ lib/
 *.tgz
 .selftest/
 
+# kernel/（vexus-lite 复刻子项目）构建产物
+kernel/target/
+kernel/*.node
+kernel/tools/diff-report/
+
 # 证据/工作副本（体积大、可复跑重建；只跟踪其中的文本读数）
 .scratch/backup-*/
 .scratch/tmp/

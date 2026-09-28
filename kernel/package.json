@@ -1,0 +1,7 @@
+{
+  "name": "memo-kernel",
+  "version": "0.1.0",
+  "description": "vexus-lite 记忆内核复刻（dsh-memo-river 子项目）——行为等价，差分对账判据",
+  "main": "index.js",
+  "private": true
+}
