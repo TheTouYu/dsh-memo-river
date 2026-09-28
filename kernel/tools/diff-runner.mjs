@@ -157,6 +157,58 @@ function compareRanked(name, a, b, issues) {
   }
 }
 
+// 阶段级对账（票 08）：EPA / 金字塔 / 融合选择 / 双场收敛——比端到端更可定位。
+// 计时字段（*_ms）不比；Tag 名集合化（去重序不定）。
+function compareStageMeta(qa, qb, issues, meta) {
+  const qid = qa.queryId;
+  const num = (a, b, name, tol = 1e-9) => {
+    const d = Math.abs((a ?? 0) - (b ?? 0));
+    meta.stageMaxDiff = Math.max(meta.stageMaxDiff ?? 0, d);
+    if (d > tol) issues.push(`${qid}: ${name} 差 ${d.toExponential(2)}（${a} vs ${b}）`);
+  };
+  const ea = qa.epa, eb = qb.epa;
+  if (ea && eb) {
+    num(ea.logicDepth, eb.logicDepth, 'epa.logicDepth');
+    num(ea.entropy, eb.entropy, 'epa.entropy');
+    num(ea.resonance, eb.resonance, 'epa.resonance', 1e-9);
+    const la = (ea.dominantAxes || []).map((a) => a.label).join('|');
+    const lb = (eb.dominantAxes || []).map((a) => a.label).join('|');
+    if (la !== lb) issues.push(`${qid}: EPA 主轴不一致（${la} vs ${lb}）`);
+  }
+  const pa = qa.pyramid, pb = qb.pyramid;
+  if (pa && pb) {
+    for (const k of ['depth', 'coverage', 'novelty', 'coherence', 'activation']) num(pa.features?.[k], pb.features?.[k], `pyramid.features.${k}`);
+    const levelsA = pa.levels || [], levelsB = pb.levels || [];
+    if (levelsA.length !== levelsB.length) issues.push(`${qid}: 金字塔层数 ${levelsA.length} vs ${levelsB.length}`);
+    for (let i = 0; i < Math.min(levelsA.length, levelsB.length); i++) {
+      const idsA = (levelsA[i].tags || []).map((t) => t.id).join(',');
+      const idsB = (levelsB[i].tags || []).map((t) => t.id).join(',');
+      if (idsA !== idsB) issues.push(`${qid}: 金字塔 L${i} Tag 序不一致（${idsA} vs ${idsB}）`);
+      num(levelsA[i].energyExplained, levelsB[i].energyExplained, `pyramid.L${i}.energyExplained`);
+    }
+  }
+  const da = qa.diagnostics, db = qb.diagnostics;
+  if (da && db) {
+    const fa = da.fusion, fb = db.fusion;
+    if (fa && fb) {
+      const idsA = (fa.selectedTagIds || []).join(',');
+      const idsB = (fb.selectedTagIds || []).join(',');
+      if (idsA !== idsB) issues.push(`${qid}: 融合选择集不一致（${idsA.slice(0, 80)} vs ${idsB.slice(0, 80)}）`);
+      for (const k of ['requestedCount', 'foundCount', 'deduplicatedCount', 'emergentCount']) {
+        if (fa[k] !== fb[k]) issues.push(`${qid}: fusion.${k} ${fa[k]} vs ${fb[k]}`);
+      }
+    }
+    const dfa = da.dualField, dfb = db.dualField;
+    if (dfa && dfb) {
+      for (const k of ['iterations', 'localConverged', 'transferConverged']) {
+        if (dfa[k] !== dfb[k]) issues.push(`${qid}: dualField.${k} ${dfa[k]} vs ${dfb[k]}`);
+      }
+      num(dfa.localResidual, dfb.localResidual, 'dualField.localResidual', 1e-9);
+      num(dfa.transferResidual, dfb.transferResidual, 'dualField.transferResidual', 1e-9);
+    }
+  }
+}
+
 function compareLeg(a, b) {
   const issues = [];
   const meta = { queries: 0, scoreMaxDiff: 0, omegaMaxDiff: 0, enhancedMinCos: Infinity, notImplemented: 0, payloadMaxDiff: 0, payloadMismatches: 0 };
@@ -184,6 +236,7 @@ function compareLeg(a, b) {
       issues.push(`${qid}: 轨道错误 ${err}`);
       continue;
     }
+    compareStageMeta(qa, qb, issues, meta);
     if (JSON.stringify(qa.knnOrder) !== JSON.stringify(qb.knnOrder)) issues.push(`${qid}: KNN 基线序不一致（语料副本漂移？）`);
     if (qa.dtsc?.ranked && qb.dtsc?.ranked) {
       compareRanked(`${qid}/dtsc`, qa.dtsc.ranked, qb.dtsc.ranked, issues);
