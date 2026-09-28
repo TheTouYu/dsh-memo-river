@@ -1,0 +1,22 @@
+{
+  "name": "zcode-memo-river",
+  "version": "0.1.0",
+  "description": "记忆河流向量记忆（与 dsh 共享数据）：memo_recall/write/tags/stats 四工具 + 每条消息被动召回注入 + 写入节律提醒",
+  "author": {
+    "name": "TheTouYu"
+  },
+  "license": "BSD-3-Clause",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": {
+    "memo-river": {
+      "command": "node",
+      "args": [
+        "/home/h/dsh-plugins/dsh-memo-river/zcode-adapter/mcp-server.mjs"
+      ],
+      "env": {
+        "MEMO_RIVER_CWD": "/home/h/dsh-plugins/dsh-memo-river"
+      }
+    }
+  },
+  "skills": "./skills"
+}

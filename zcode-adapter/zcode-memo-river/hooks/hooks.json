@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node /home/h/dsh-plugins/dsh-memo-river/zcode-adapter/hook-submit.mjs" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node /home/h/dsh-plugins/dsh-memo-river/zcode-adapter/hook-stop.mjs" }
+        ]
+      }
+    ]
+  }
+}

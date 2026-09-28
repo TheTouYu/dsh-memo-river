@@ -1,0 +1,15 @@
+{
+  "name": "memo-river-dev",
+  "plugins": [
+    {
+      "name": "zcode-memo-river",
+      "source": "./zcode-memo-river",
+      "version": "0.1.0",
+      "description": "记忆河流向量记忆（与 dsh 共享 ~/.dsh/memo-river 桶数据）",
+      "displayName": "Memo River (ZCode)",
+      "displayName_i18n": { "zh-CN": "记忆河流（ZCode 版）" },
+      "description_i18n": { "zh-CN": "记忆河流向量记忆：memo_* 四工具 + 被动召回注入 + 写入节律，与 dsh 共享同一份记忆数据" },
+      "category": "productivity"
+    }
+  ]
+}
