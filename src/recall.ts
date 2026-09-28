@@ -410,6 +410,12 @@ export async function recall(
   const guIdx = gateUserAnchor && gateUserAnchor !== trimmedQuery ? batchTexts.push(gateUserAnchor) - 1 : -1
   const gaIdx =
     gateAssistantAnchor && gateAssistantAnchor !== trimmedQuery ? batchTexts.push(gateAssistantAnchor) - 1 : -1
+  /* 空库短路提前到 embed 之前（2026-09-28）：① 省一次注定无效的 embed 往返；
+   * ② embed 间歇超时窗口下 fallbackReason 语义正确——验收 #11 曾在空库上报
+   * embed-timeout 而非 empty-corpus。快照窗口变宽（embed 往返期间的新写入本拍
+   * 不可见，下一拍可见）——recall 本就跑在快照语义上，可接受。 */
+  const chunks = store.chunks().filter((c) => c.vector !== null)
+  if (chunks.length === 0) return empty('empty-corpus')
   let vectors: Float32Array[]
   const embedCallOpts = (options.embedTimeoutMs ?? 0) > 0 ? { timeoutMs: options.embedTimeoutMs } : undefined
   try {
@@ -425,8 +431,6 @@ export async function recall(
   if (!queryVector) return empty('embed-empty')
 
   /* KNN 基线（决定门控与低基数门限） */
-  const chunks = store.chunks().filter((c) => c.vector !== null)
-  if (chunks.length === 0) return empty('empty-corpus')
   const owners = store.chunkOwners()
   const knn = chunks
     .map((c) => ({ id: c.id, score: cosine(queryVector, c.vector!.subarray(0, dimension)) }))
