@@ -21,7 +21,7 @@ import { apply, Config as ConfigSchema } from '../lib/index.js'
 import { acquireWorkspace } from '../lib/workspace.js'
 import { workspacePaths } from '../lib/runtime.js'
 
-const ROOT = '/home/h/app/dsh-memo-river'
+const ROOT = new URL('..', import.meta.url).pathname
 const CWD = join(tmpdir(), `memo-river-title-${process.pid}`)
 const BUCKET = '标题闸门测试'
 const TAGS = '标题闸门, 写入测试, 种子语料'

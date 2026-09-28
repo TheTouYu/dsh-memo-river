@@ -18,7 +18,7 @@ import { WorkspaceDaemon } from '../lib/daemon.js'
 import { acquireWorkspace } from '../lib/workspace.js'
 import { workspacePaths } from '../lib/runtime.js'
 
-const ROOT = '/home/h/app/dsh-memo-river'
+const ROOT = new URL('..', import.meta.url).pathname
 const VCP = '/home/h/app/VCPToolBox'
 // 写入测试桶：草稿与体检日志都落在这里，不碰河流语料的对照基准
 const WS = join(ROOT, '.selftest', '教室建模写入测试')

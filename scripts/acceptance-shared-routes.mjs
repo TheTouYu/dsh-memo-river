@@ -162,7 +162,7 @@ if (!existsSync(HOST_WS)) {
    Node 的 ESM 缓存**按 URL 键** ⇒ 两个模块实例。池若放在模块作用域，两份池互相看不见，
    第二次挂载照样撞 webserver 的进程级路由表。故池必须挂在进程全局（Symbol.for）。
    本判据用 `?inst=1/2` 显式造出两个实例，等价复刻这两条 URL。 */
-const LIB = '/home/h/app/dsh-memo-river/lib/index.js'
+const LIB = new URL('../lib/index.js', import.meta.url).pathname
 const ws5 = createWebServer()
 let instError = null
 try {

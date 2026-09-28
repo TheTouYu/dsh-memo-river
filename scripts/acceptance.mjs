@@ -23,7 +23,7 @@ import { buildQueryField } from '../lib/recall.js'
 import { peekSession } from '../lib/session.js'
 import { BLOCK_CLOSE, BLOCK_OPEN } from '../lib/render.js'
 
-const ROOT = '/home/h/app/dsh-memo-river'
+const ROOT = new URL('..', import.meta.url).pathname
 const VCP = '/home/h/app/VCPToolBox'
 const WS_RIVER = join(ROOT, '.selftest', '教室建模归档')
 const WS_ISLAND = join(ROOT, '.selftest', '教室建模孤岛')

@@ -19,7 +19,7 @@ import { workspacePaths } from '../lib/runtime.js'
 import { WorkspaceDaemon } from '../lib/daemon.js'
 import { candidateReportPath, consolidationCandidates, writeCandidateReport } from '../lib/consolidation.js'
 
-const ROOT = '/home/h/app/dsh-memo-river'
+const ROOT = new URL('..', import.meta.url).pathname
 const VCP = '/home/h/app/VCPToolBox'
 const WS = join(ROOT, '.selftest', '教室建模写入测试')
 const BUCKET = '教室建模写入测试'

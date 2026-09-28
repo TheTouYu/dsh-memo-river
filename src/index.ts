@@ -351,8 +351,13 @@ export function apply(ctx: AppContext, config: MemoRiverConfig): void {
     }
   }
 
-  ctx.on('agent/session-start', (payload: { agent: AgentLike }) => onAgentReady('agent/session-start', payload))
-  ctx.on('agent/created', (payload: { agent: AgentLike }) => onAgentReady('agent/created', payload))
+  /* 0.1.7-rc.2：'agent/session-start' 已并入 'agent/created'（payload.source 区分
+   * fresh/resume/clear/compaction），旧事件名从类型里移除——两处监听合一，
+   * seenAgents 去重语义不变。 */
+  ctx.on('agent/created', (payload) => {
+    onAgentReady('agent/created', payload)
+    return undefined
+  })
 
   /**
    * 回合边界：**只产出候选草稿，不落库**（DESIGN §4 回合边界 / §8.3）。

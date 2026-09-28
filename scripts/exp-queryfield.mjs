@@ -27,7 +27,7 @@ import { join } from 'node:path'
 
 // 注意：不能用 URL.pathname——它不做百分号解码，中文路径会被编码成另一个哈希，
 // 结果在一个"看起来正常"的空工作区里跑（实测踩过：造出垃圾目录 7e724b750444d46e）。
-const ROOT = '/home/h/app/dsh-memo-river'
+const ROOT = new URL('..', import.meta.url).pathname
 const WS = join(ROOT, '.selftest', '教室建模归档')
 const BUCKET = '教室建模归档'
 const DIM = 3072

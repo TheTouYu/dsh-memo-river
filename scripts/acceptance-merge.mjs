@@ -20,7 +20,7 @@ import { workspacePaths } from '../lib/runtime.js'
 import { startEmbedStub } from './embed-stub.mjs'
 import { KV_USAGE } from '../lib/health.js'
 
-const ROOT = '/home/h/app/dsh-memo-river'
+const ROOT = new URL('..', import.meta.url).pathname
 const VCP = '/home/h/app/VCPToolBox'
 const WS = join(ROOT, '.selftest', '教室建模写入测试')
 const BUCKET = '教室建模写入测试'

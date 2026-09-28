@@ -30,10 +30,17 @@ if [ -z "$CHECKOUT" ]; then
   done
 fi
 
-# 已安装布局优先（见上文理由）。
+# 已安装布局优先（见上文理由）。npm i -g 装到 ~/.local 时 dsh 是符号链接，
+# command -v 只给链接所在目录——readlink -f 解析真实 bin 路径再回退两级才是包根。
+DSH_BIN_REAL="$(readlink -f "$(command -v dsh)" 2>/dev/null || true)"
+DSH_PKG_REAL=""
+if [ -n "$DSH_BIN_REAL" ]; then
+  DSH_PKG_REAL="$(cd "$(dirname "$DSH_BIN_REAL")/.." 2>/dev/null && pwd || true)"
+fi
 INSTALLED=""
 for candidate in \
   "$(command -v dsh >/dev/null 2>&1 && cd "$(dirname "$(command -v dsh)")" && pwd)/node_modules/@deepseek-ai/dsh" \
+  "$DSH_PKG_REAL" \
   "$(npm root -g 2>/dev/null || true)/@deepseek-ai/dsh" \
   "$HOME/.npm-dlabal/lib/node_modules/@deepseek-ai/dsh"
 do
@@ -49,6 +56,9 @@ fi
 TSC=""
 if [ -n "$CHECKOUT" ] && [ -x "$CHECKOUT/node_modules/.bin/tsc" ]; then
   TSC="$CHECKOUT/node_modules/.bin/tsc"
+elif [ -x "$ROOT/node_modules/.bin/tsc" ]; then
+  # 仓库自身装了 typescript（devDependency）——比借用外部环境可复现。
+  TSC="$ROOT/node_modules/.bin/tsc"
 elif command -v tsc >/dev/null 2>&1; then
   TSC="$(command -v tsc)"
 fi

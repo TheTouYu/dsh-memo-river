@@ -20,7 +20,7 @@ const BACKUP = join(VCP, 'sandbox', 'classroom-flow', 'tag-river-backup.json')
 
 const args = new Map()
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i].replace(/^--/, ''), process.argv[i + 1])
-const OUT = args.get('out') || '/home/h/app/dsh-memo-river/.selftest/island-corpus'
+const OUT = args.get('out') || new URL('../.selftest/island-corpus', import.meta.url).pathname
 
 const backup = JSON.parse(readFileSync(BACKUP, 'utf8'))
 mkdirSync(OUT, { recursive: true })

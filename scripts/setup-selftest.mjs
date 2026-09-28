@@ -11,13 +11,15 @@
  * 只清理这三个工作区对应的 `~/.dsh/memo-river/<hash>` 目录，不动其它工作区数据。
  */
 import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import { workspacePaths } from '../lib/runtime.js'
 import { KnowledgeStore } from '../lib/store.js'
 
-const ROOT = '/home/h/app/dsh-memo-river'
+/* 仓库根按脚本自身位置解析（迁移后仓库不在 /home/h/app/dsh-memo-river 了）。 */
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const VCP = '/home/h/app/VCPToolBox'
 const RIVER_SRC = join(VCP, 'dailynote', '教室建模归档')
 const ISLAND_SRC = join(ROOT, '.selftest', 'island-corpus')

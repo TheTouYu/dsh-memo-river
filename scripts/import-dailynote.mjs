@@ -37,7 +37,7 @@ for (let i = 2; i < process.argv.length; i++) {
 }
 
 const SRC = args.get('src') || '/home/h/app/VCPToolBox/dailynote/教室建模归档'
-const CWD = args.get('cwd') || '/home/h/app/dsh-memo-river/.selftest/classroom'
+const CWD = args.get('cwd') || new URL('../.selftest/classroom', import.meta.url).pathname
 const BUCKET = args.get('bucket') || basename(SRC)
 const FORCE = flags.has('force')
 
