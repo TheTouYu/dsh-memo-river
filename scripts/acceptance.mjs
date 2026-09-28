@@ -1991,25 +1991,28 @@ hr('#37 write-nudge 场景感知：普通含质量锚≤3行；委托变体（de
   const ANCHOR = '写增量（延续/转折/因果），不复述已入河内容'
   const tags37 = ['写入去重', '回合边界依赖']
 
-  /* (a) 快照：普通形态——质量锚折进第 2 行，基底 2 行；带队列恰 3 行（≤3 红线） */
+  /* (a) 快照：普通形态——质量锚折进第 2 行，基底 2 行；带队列恰 3 行（≤3 红线）
+   * 2026-09-28 断言漂移修正：文案升级（工具输出/提交状态排除 + Tag 内容词指引 + 候选 Tag 措辞）
+   * 后字节级冻结断言失效——改为**结构断言**（行数红线 + 决定性片段），文案微升不再炸断言。 */
   const normSnap = renderWriteNudge('已 2 轮汇报未写入', 5, '把队列可见性做完', tags37, null, false)
   const normQueueSnap = renderWriteNudge('已 2 轮汇报未写入', 5, '把队列可见性做完', tags37, { pending: 2, oldestAgeHours: 27 }, false)
   const normSnapOk =
-    normSnap ===
-      '[memo-river·写入节律] 记忆节律提醒，非新任务：已 2 轮汇报未写入，turn 5 的进展尚未入河——「把队列可见性做完」\n' +
-      `现在正是写日记的时机：用 memo_write 落一篇，${ANCHOR}；Tag 优先复用词汇表：写入去重、回合边界依赖。规范见「写日记规范」段。` &&
     normSnap.split('\n').length === 2 &&
-    !normSnap.includes('委托进行中')
+    !normSnap.includes('委托进行中') &&
+    normSnap.includes(ANCHOR) &&
+    normSnap.includes('不复述已入河内容、工具输出、提交状态或压缩记录') &&
+    normSnap.includes('本轮候选 Tag：写入去重、回合边界依赖') &&
+    normSnap.includes('规范见「写日记规范」段')
   const normQueueOk = normQueueSnap.split('\n').length === 3 && normQueueSnap.includes('草稿队列 2 篇待批（最老 27 小时）')
 
-  /* (b) 快照：委托形态——先落盘+读者点明+锚三要素齐；基底 3 行；带队列 4 行 */
+  /* (b) 快照：委托形态——先落盘+读者点明+锚三要素齐；基底 3 行；带队列 4 行（同上：结构断言） */
   const delSnap = renderWriteNudge('已 2 轮汇报未写入', 5, '扇出前的关键进展', tags37, null, true)
   const delSnapOk =
-    delSnap ===
-      '[memo-river·写入节律] 记忆节律提醒，非新任务：已 2 轮汇报未写入，turn 5 的进展尚未入河——「扇出前的关键进展」\n' +
-      '委托进行中——先落盘当前进展：子代理/兄弟代理可立即召回。这篇日记的读者是兄弟代理而非未来的自己：写它们接手所需的可共享知识（结论/路径/教训），写增量（延续/转折/因果），不复述已入河内容。\n' +
-      '现在正是写日记的时机：用 memo_write 落一篇，Tag 优先复用词汇表：写入去重、回合边界依赖。规范见「写日记规范」段。' &&
-    delSnap.split('\n').length === 3
+    delSnap.split('\n').length === 3 &&
+    delSnap.includes('委托进行中——先落盘当前进展：子代理/兄弟代理可立即召回') &&
+    delSnap.includes('读者是兄弟代理而非未来的自己') &&
+    delSnap.includes(ANCHOR) &&
+    delSnap.includes('本轮候选 Tag：写入去重、回合边界依赖')
   const delQueueLines = renderWriteNudge('已 2 轮汇报未写入', 5, '扇出前的关键进展', tags37, { pending: 2, oldestAgeHours: 27 }, true).split('\n').length
   const delQueueOk = delQueueLines === 4
 

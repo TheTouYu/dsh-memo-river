@@ -1311,11 +1311,31 @@ export function installTools(
     const ids = Array.isArray(args.ids) ? (args.ids as unknown[]).map(String) : []
     if (ids.length === 0) return { targets: [], error: '给 ids（memo_drafts 列出的文件名子串）或 all: true。', scope, currentBucket }
     const { ok, errors } = matchDrafts(listing, ids)
-    if (ok.length === 0 && errors.length > 0) {
-      errors.push(`提示：草稿匹配只查${explicitBucket ? `指定桶（${scope}）` : `本桶（${currentBucket}）`}；跨桶操作须显式传 bucket`)
+    if (errors.length === 0) return { targets: ok, error: null, scope, currentBucket }
+    /* #14 接口缺口修补：ids 在本桶未命中时不再让用户两步走（先 memo_drafts 看桶、再传 bucket）——
+     * 镜像 memo_drafts 的 ids 跨桶扫描 + 歧义保护：全部 ids 都在**同一个**其它桶里**无歧义**
+     * 命中 → 自动解析到该桶（scope 随之切换，approve/discard 输出自带 ⚠️ 跨桶操作行）；
+     * 命中跨多个桶或任何歧义 → 报错列出候选桶，要求显式 bucket。
+     * 作用域不对称原则（2026-09-16 事故后立）不破：all=true 仍窄缺省本桶，显式 bucket 仍硬指定。 */
+    if (!explicitBucket && ok.length === 0) {
+      const others = full.filter((r) => r.bucket !== scope)
+      const cross = matchDrafts(others, ids)
+      const crossBuckets = [...new Set(cross.ok.map((r) => r.bucket))]
+      if (cross.ok.length > 0 && cross.errors.length === 0 && crossBuckets.length === 1) {
+        return { targets: cross.ok, error: null, scope: crossBuckets[0]!, currentBucket }
+      }
+      if (crossBuckets.length > 1) {
+        errors.push(`提示：ids 命中跨多个桶（${crossBuckets.join('、')}）——请显式传 bucket 收窄`)
+      } else if (cross.ok.length > 0) {
+        errors.push('提示：跨桶命中有歧义或未全命中——请显式传 bucket 后重试')
+      }
     }
-    if (errors.length > 0) return { targets: [], error: errors.join('；'), scope, currentBucket }
-    return { targets: ok, error: null, scope, currentBucket }
+    if (ok.length === 0 && errors.length > 0) {
+      errors.push(
+        `提示：草稿匹配只查${explicitBucket ? `指定桶（${scope}）` : `本桶（${currentBucket}）`}；跨桶 ids 无歧义时自动解析，其余须显式传 bucket`,
+      )
+    }
+    return { targets: ok, error: errors.join('；'), scope, currentBucket }
   }
 
   ctx.tools.register(
@@ -1379,7 +1399,7 @@ export function installTools(
         '批准后草稿移入 approved/（可追溯）。批量按有界并行执行（缺省 5 并发，MEMO_APPROVE_CONCURRENCY 可调，' +
         '=1 即串行）：N 篇耗时 ≈ ⌈N/并发⌉ × 单篇；单篇失败/跳过不影响其余，结果逐篇回报。',
       parameters: {
-        ids: { type: 'array', items: { type: 'string' }, description: '草稿文件名子串列表（memo_drafts 列出的文件名）。' },
+        ids: { type: 'array', items: { type: 'string' }, description: '草稿文件名子串列表（memo_drafts 列出的文件名；跨桶 ids 无歧义命中单一桶时自动解析并明示）。' },
         all: { type: 'boolean', description: '批准本桶全部草稿（缺省只作用本工作区桶；跨桶须显式 bucket）。' },
         bucket: { type: 'string', description: '显式目标桶名：跨桶操作必须给出（缺省=本工作区桶，不再缺省全部桶——2026-09-16 事故后收紧）。' },
       },
@@ -1491,7 +1511,7 @@ export function installTools(
       description:
         '丢弃待确认草稿：移入 rejected/（不删文件、不入库，可追溯）。用于不值得入库的回合摘要，或人工 memo_write 撰写后清理原草稿。',
       parameters: {
-        ids: { type: 'array', items: { type: 'string' }, description: '草稿文件名子串列表。' },
+        ids: { type: 'array', items: { type: 'string' }, description: '草稿文件名子串列表（跨桶 ids 无歧义命中单一桶时自动解析并明示）。' },
         all: { type: 'boolean', description: '丢弃本桶全部草稿（缺省只作用本工作区桶；跨桶须显式 bucket）。' },
         bucket: { type: 'string', description: '显式目标桶名：跨桶操作必须给出（缺省=本工作区桶，不再缺省全部桶——2026-09-16 事故后收紧）。' },
       },
