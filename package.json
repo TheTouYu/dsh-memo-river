@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-memo-river",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "把 VCPToolBox 的 TagMemo/RiverMemo 记忆算法（Tag 河流 + Rust 原生 DTSC/Topology V3 读出）接进 DSH：工作区级知识库 + 守护自维护 + 写作前注入旧 Tag 词汇",
   "private": true,
   "type": "module",
