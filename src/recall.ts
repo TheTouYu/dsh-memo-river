@@ -102,6 +102,8 @@ export interface RecallCandidate {
   /** §2.2 规则 4：KNN 低于门限 → 不发放结构奖励。 */
   rewardSuppressed: boolean
   body: string
+  /** 桶继承（federate）：该条目来自哪个父桶；本桶条目缺省（渲染不标注）。 */
+  srcBucket?: string
 }
 
 export interface RecallOutcome {

@@ -90,6 +90,10 @@ hook 进程 **cwd = 会话工作目录**、stdin 收事件 JSON、stdout 回 `{"
   助手消息）不可得，单 gU 锚判 `gateThreshold=0.55`；查询场窗口也只含当前 prompt
   （等价 `queryLookback` 窗口长度为 1 的退化情形，见 `lib/config.ts`
   `gateOnCurrentMessage` 的判别力说明）。
+- **桶继承与 dsh 侧同一份实现**：`lib/federate.js`（src/federate.ts）被
+  `headless.injectRecall` 与 dsh 侧 `buildTailInjection` 共用；配置命令是仓库根的
+  `scripts/memo-inherit.mjs`（无 MCP 工具，不占上下文）。去重键在两侧都已按
+  `桶名:id` 命名空间化——各桶 id 独立自增，裸 id 会撞车。
 
 ## 验证（本目录开发时实际跑过的三条）
 

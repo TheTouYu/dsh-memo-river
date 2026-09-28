@@ -25,7 +25,8 @@ import { formatHealth, healthReport, HUB_RATIO_LIMIT, recordOmega, recordUsage }
 import { continuationTail, renderInjection, renderSkipNotice } from '../lib/render.js';
 import { loadEnvFile, workspacePaths, workspaceHash } from '../lib/runtime.js';
 import { formatRecallResult, parseTagLine, writeDiaryCore } from '../lib/tools.js';
-import { acquireBucketRuntime, acquireWorkspace, releaseAllWorkspaces, resolveBucket } from '../lib/workspace.js';
+import { acquireBucketRuntime, acquireWorkspace, openInheritedBuckets, releaseAllWorkspaces, resolveBucket } from '../lib/workspace.js';
+import { federatedRecall } from '../lib/federate.js';
 import { pendingQueueStats } from '../lib/drafts.js';
 
 /* ────────────── 配置组装 ────────────── */
@@ -209,19 +210,25 @@ export async function injectRecall({ cwd, prompt }) {
         gateAssistantText: '',
         embedTimeoutMs: config.inject.embedTimeoutMs,
     };
-    const outcome = await workspace.recall(text, options);
-    /* §7.3 ③④：Ω 与召回足迹记进 kv_store（体检素材），无论是否注入。 */
+    /* 桶继承（inherit-0928）：与 dsh 侧 buildTailInjection 同一口径——主桶全管线，
+     * 父桶（workspace.json inherit 字段，CLI：scripts/memo-inherit.mjs）各过自己门控后轮转补位。 */
+    const inheritParents = openInheritedBuckets(workspace, config);
+    const fed = await federatedRecall(workspace, inheritParents, text, options);
+    const outcome = fed.outcome;
+    /* §7.3 ③④：Ω 与召回足迹记进 kv_store（体检素材），无论是否注入——继承链逐桶记账。 */
     try {
-        recordOmega(workspace.store, outcome.omega, outcome.regime ?? '');
-        if (outcome.injected)
-            recordUsage(workspace.store, outcome.selected.map((c) => c.fileId), 'passive');
+        for (const part of fed.parts) {
+            recordOmega(part.workspace.store, part.outcome.omega, part.outcome.regime ?? '');
+            if (part.injectedFileIds.length > 0)
+                recordUsage(part.workspace.store, part.injectedFileIds, 'passive');
+        }
     } catch { /* 观测失败不阻塞注入 */ }
     const block = renderInjection(outcome, workspace.paths.bucket);
     if (!block) {
         workspace.logger.info(`${renderSkipNotice(outcome, workspace.paths.bucket)} source=zcode-hook`);
         return { text: null, outcome, reason: outcome.fallbackReason, workspace };
     }
-    workspace.logger.info(`inject source=zcode-hook bucket=${workspace.paths.bucket} ids=${outcome.selected.map((c) => `D${c.id}`).join(',')} omega=${outcome.omega === null ? 'n/a' : outcome.omega.toFixed(3)} chars=${block.length} elapsedMs=${outcome.elapsedMs}`);
+    workspace.logger.info(`inject source=zcode-hook bucket=${workspace.paths.bucket} ids=${outcome.selected.map((c) => (c.srcBucket ? `D${c.id}@${c.srcBucket}` : `D${c.id}`)).join(',')} inherited=${outcome.selected.filter((c) => c.srcBucket).length} omega=${outcome.omega === null ? 'n/a' : outcome.omega.toFixed(3)} chars=${block.length} elapsedMs=${outcome.elapsedMs}`);
     return { text: block, outcome, reason: null, workspace };
 }
 

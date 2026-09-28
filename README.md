@@ -104,8 +104,27 @@ dev_install_package /home/h/app/dsh-memo-river
     ├── memo-river.log             # 本工作区日志
     ├── health.log                 # 四项体检逐轮追加
     ├── dailynote/<bucket>/        # memo_write 落盘的日记（人可读）
+    ├── workspace.json             # 工作区↔哈希映射；可选 `inherit` 字段（见下）
     └── pending/                   # 守护循环产出的候选草稿（等确认）
 ```
+
+### 桶继承（umbrella 工作区联邦父桶记忆）
+
+伞目录（比如 `~/dsh-plugins` 是几个插件仓库的上级）的**被动注入**可以联邦若干
+插件项目桶的记忆——主桶照常全管线，父桶各过**自己桶的门控**后按「桶间轮转、
+桶内分数序」补位（每父桶 ≤2 条，父桶数 ≤4），注入块里父桶条目标注
+`D<id>@<父桶>`、头部带 `+继承=N(桶×n)`：
+
+```bash
+node scripts/memo-inherit.mjs --cwd <伞目录> add <父桶名|16位哈希>...   # 配置（写 workspace.json 的 inherit 字段）
+node scripts/memo-inherit.mjs --cwd <伞目录> list                       # 查看继承链
+node scripts/memo-inherit.mjs --cwd <伞目录> remove <父桶>...           # 移除
+```
+
+口径：只作用于被动注入（主动补证的 `folder` 参数本来就真路由任意桶）；写入永不落
+父桶（伞工作区日记写自己桶）；只取一层不递归；未配置/解析失败时行为与单桶逐字一致。
+dsh 侧（`lib/injector.js`）与 ZCode 适配层（`zcode-adapter/headless.mjs`）走**同一份**
+`lib/federate.js` 实现。实现细节见 `src/federate.ts` 头注。
 
 ---
 

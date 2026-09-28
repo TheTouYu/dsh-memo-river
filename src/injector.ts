@@ -38,11 +38,12 @@ import { recordOmega, recordUsage } from './health.js'
 import { BLOCK_CLOSE, continuationTail, DelegationExtras, renderInjection, renderSkipNotice, renderWriteNudge } from './render.js'
 import { coldTagSuggest, sameAxisHit, scanTagAxis } from './nudge-guide.js'
 import { buildQueryField, type RecallOptions } from './recall.js'
+import { federatedRecall } from './federate.js'
 import { tuningValues } from './tuning.js'
 import { getSession, peekSession, type SessionState } from './session.js'
 import { workspacePaths, type Logger } from './runtime.js'
 import { pendingQueueStats, type PendingQueueStats } from './drafts.js'
-import type { WorkspaceRuntime } from './workspace.js'
+import { openInheritedBuckets, type WorkspaceRuntime } from './workspace.js'
 
 /** 内容块 → 文本（只取带 text 的块；其它块类型忽略）。 */
 export function messageText(message: unknown): string {
@@ -299,7 +300,12 @@ export async function buildTailInjection(
     return null
   }
 
-  const outcome = await workspace.recall(
+  /* 桶继承（inherit-0928）：主桶照常全管线，父桶同一份 options 各自过自己门控后轮转补位。
+   * 解析失败/无配置 → parents 为空，行为与单桶逐字一致。 */
+  const inheritParents = openInheritedBuckets(workspace, deps.config)
+  const fed = await federatedRecall(
+    workspace,
+    inheritParents,
     queryField,
     recallOptions(
       deps.config,
@@ -308,11 +314,14 @@ export async function buildTailInjection(
       gateAssistantText,
     ),
   )
+  const outcome = fed.outcome
 
-  // §7.3 ③④：把 Ω 与召回足迹记进 kv_store（体检素材），无论是否注入。
+  // §7.3 ③④：把 Ω 与召回足迹记进 kv_store（体检素材），无论是否注入——继承链上每桶各自记账。
   try {
-    recordOmega(workspace.store, outcome.omega, outcome.regime ?? '')
-    if (outcome.injected) recordUsage(workspace.store, outcome.selected.map((c) => c.fileId), 'passive')
+    for (const part of fed.parts) {
+      recordOmega(part.workspace.store, part.outcome.omega, part.outcome.regime ?? '')
+      if (part.injectedFileIds.length > 0) recordUsage(part.workspace.store, part.injectedFileIds, 'passive')
+    }
   } catch (e) {
     logger.warn(`record-health-failed: ${String((e as Error)?.message ?? e)}`)
   }
@@ -333,9 +342,10 @@ export async function buildTailInjection(
   // 但跳过有个前提：旧块还在上下文里。注入块会随会话日志一直留着，可**压缩会把它
   // 折进摘要** —— 那时再跳过就等于静默丢记忆（§1 不变量 6）。故加 dedupeRefreshTurns：
   // 即使集合没变，隔了这么多回合也强制重注一次。
+  // 桶继承：键必须带桶名命名空间——各桶 id 独立自增，D1@本桶与 D1@父桶是两篇日记。
   const selectionKey = outcome.selected
-    .map((c) => c.id)
-    .sort((a, b) => a - b)
+    .map((c) => (c.srcBucket ? `${c.srcBucket}:${c.id}` : String(c.id)))
+    .sort()
     .join(',')
   const refreshDue =
     compactionFired ||
@@ -352,7 +362,7 @@ export async function buildTailInjection(
     state.lastFallbackReason = 'identical-selection'
     logger.info(
       `inject-skip bucket=${workspace.paths.bucket} reason=identical-selection ` +
-        `ids=${outcome.selected.map((c) => `D${c.id}`).join(',')} chars=${text.length} ` +
+        `ids=${outcome.selected.map((c) => (c.srcBucket ? `D${c.id}@${c.srcBucket}` : `D${c.id}`)).join(',')} chars=${text.length} ` +
         `sinceLastInject=${turn - state.lastInjectTurn} turns injectMode=${isTurnStart ? 'interactive' : 'autonomous'} session=${sessionId}`,
     )
     return null
@@ -376,9 +386,10 @@ export async function buildTailInjection(
     at: Date.now(),
   })
   logger.info(
-    `inject bucket=${workspace.paths.bucket} ids=${outcome.selected.map((c) => `D${c.id}`).join(',')} ` +
+    `inject bucket=${workspace.paths.bucket} ids=${outcome.selected.map((c) => (c.srcBucket ? `D${c.id}@${c.srcBucket}` : `D${c.id}`)).join(',')} ` +
       `omega=${outcome.omega === null ? 'n/a' : outcome.omega.toFixed(3)} regime=${outcome.regime ?? '-'} ` +
       `mode=${outcome.mode} chars=${text.length} candidates=${outcome.candidateCount} dropped=${outcome.dropped.length} ` +
+      `inherited=${outcome.selected.filter((c) => c.srcBucket).length} ` +
       `injectMode=${isTurnStart ? 'interactive' : 'autonomous'}${compactionFired ? ' trigger=compaction' : ''} ` +
       `session=${sessionId} gate={passed:${outcome.gate.passed},maxKnn:${outcome.gate.maxKnn.toFixed(4)},` +
       `threshold:${outcome.gate.threshold},gateVector:${outcome.gate.gateVector},retrievalMaxKnn:${outcome.gate.retrievalMaxKnn.toFixed(4)}} ` +

@@ -340,6 +340,54 @@ export function acquireBucketRuntime(entry: BucketEntry, config: Config): Worksp
   return runtime
 }
 
+/* ────────────── 桶继承（inherit-0928）：伞工作区被动注入联邦父桶记忆 ──────────────
+ *
+ * 配置形态：workspace.json 可选字段 `inherit: string[]`（桶名或 16 位哈希，与 folder 真路由
+ * 同一套 resolveBucket 解析）。**只作用于被动注入**（初始上下文）——主动补证已有 folder
+ * 真路由，不需要继承；写入永不落父桶（伞工作区的日记写自己桶，父桶只读）。
+ * CLI：scripts/memo-inherit.mjs（add/remove/list）。联邦合并规则见 src/federate.ts。
+ *
+ * 设计约束：
+ *   · 只取一层：父桶自己的 inherit 不递归跟进（防环、行为可预测）；
+ *   · 父桶数上限 INHERIT_MAX_PARENTS（配置得再多也只取前 N 个，防注入块失控）；
+ *   · 解析失败（桶不存在 / 无库 / 同名歧义）只记日志跳过——继承是增强，不是依赖。 */
+
+/** 桶继承：父桶数量上限（超出部分记警告后截断）。 */
+export const INHERIT_MAX_PARENTS = 4
+
+/** 读 manifest 的 inherit 字段（缺省 / 畸形 → 空数组；只认非空字符串）。 */
+export function readInheritConfig(root: string): string[] {
+  const manifest = readJsonSafe<{ inherit?: unknown }>(join(root, 'workspace.json'), {})
+  return Array.isArray(manifest.inherit)
+    ? manifest.inherit.filter((x): x is string => typeof x === 'string' && x.trim() !== '')
+    : []
+}
+
+/** 打开继承链上的父桶运行时（注册表复用；解析失败记日志跳过，永不抛）。只取一层。 */
+export function openInheritedBuckets(primary: WorkspaceRuntime, config: Config): WorkspaceRuntime[] {
+  const names = readInheritConfig(primary.paths.root)
+  const out: WorkspaceRuntime[] = []
+  if (names.length === 0) return out
+  if (names.length > INHERIT_MAX_PARENTS) {
+    primary.logger.warn(
+      `inherit-truncated bucket=${primary.paths.bucket} configured=${names.length} took=${INHERIT_MAX_PARENTS}（超出部分忽略）`,
+    )
+  }
+  const seen = new Set<string>([primary.paths.hash])
+  for (const raw of names.slice(0, INHERIT_MAX_PARENTS)) {
+    const name = raw.trim()
+    const res = resolveBucket(name)
+    if (!res.ok) {
+      primary.logger.warn(`inherit-skip bucket=${primary.paths.bucket} parent=${name}：${res.error.split('\n')[0]}`)
+      continue
+    }
+    if (seen.has(res.entry.hash)) continue // 自继承 / 重复项
+    seen.add(res.entry.hash)
+    out.push(acquireBucketRuntime(res.entry, config))
+  }
+  return out
+}
+
 /** 读 VCP 的 KnowledgeBaseManager（体检报告里带上算法版本，便于溯源）。 */
 export function algorithmVersion(vcpRoot: string): string {
   const kbm = loadKnowledgeBaseManager(vcpRoot)

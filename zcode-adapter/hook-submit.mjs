@@ -77,10 +77,11 @@ async function main() {
         emit({});
         return;
     }
-    /* 入选集合去重（dedupeSelection：同一组日记连续注入没有新信息） */
+    /* 入选集合去重（dedupeSelection：同一组日记连续注入没有新信息）。
+     * 桶继承（inherit-0928）：键带桶名命名空间——各桶 id 独立自增，裸 id 会撞车。 */
     const sessions = state.sessions ?? {};
     const prev = sessions[sessionId] ?? {};
-    const selectionKey = outcome.selected.map((c) => c.id).sort((a, b) => a - b).join(',');
+    const selectionKey = outcome.selected.map((c) => (c.srcBucket ? `${c.srcBucket}:${c.id}` : String(c.id))).sort().join(',');
     const promptCount = (prev.promptCount ?? 0) + 1;
     const refreshDue = promptCount - (prev.lastInjectPromptCount ?? -Infinity) >= DEDUPE_REFRESH_PROMPTS;
     if (selectionKey && selectionKey === prev.lastSelectionKey && !refreshDue) {

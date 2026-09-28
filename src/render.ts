@@ -57,6 +57,22 @@ function tagsText(c: RecallCandidate): string {
   return c.matchedTags.length > 0 ? c.matchedTags.slice(0, 6).join(',') : '-'
 }
 
+/** 继承条目的 id 串：父桶条目带 @桶名（跨桶 id 不互斥——D1@x 与 D1@y 是两篇不同日记）。 */
+function idText(c: RecallCandidate, bucket: string): string {
+  return c.srcBucket && c.srcBucket !== bucket ? `D${c.id}@${c.srcBucket}` : `D${c.id}`
+}
+
+/** 头部继承摘要：`+继承=3(dsh-memo-river×2,dsh-preset-composer×1)`；无继承条目则空串。 */
+function inheritNote(selected: RecallCandidate[], bucket: string): string {
+  const counts = new Map<string, number>()
+  for (const c of selected) {
+    if (c.srcBucket && c.srcBucket !== bucket) counts.set(c.srcBucket, (counts.get(c.srcBucket) ?? 0) + 1)
+  }
+  if (counts.size === 0) return ''
+  const detail = [...counts.entries()].map(([b, n]) => `${b}×${n}`).join(',')
+  return ` | +继承=${[...counts.values()].reduce((a, b) => a + b, 0)}(${detail})`
+}
+
 /**
  * 渲染尾注入块。
  *
@@ -70,11 +86,11 @@ export function renderInjection(outcome: RecallOutcome, bucket: string): string 
   const regime = outcome.regime ? ` ${outcome.regime}` : ''
   const header =
     `${BLOCK_OPEN}\n` +
-    `[记忆河流·被动召回 | 本桶=${bucket} | ${omega}${regime} | mode=${outcome.mode} | 动态K×${outcome.dynamicK}]`
+    `[记忆河流·被动召回 | 本桶=${bucket} | ${omega}${regime} | mode=${outcome.mode} | 动态K×${outcome.dynamicK}]${inheritNote(outcome.selected, bucket)}`
 
   const lines: string[] = [header]
   for (const c of outcome.selected) {
-    lines.push(`D${c.id}「${c.title}」 role=${c.role}  ${rewardText(c)}  tags=${tagsText(c)}`)
+    lines.push(`${idText(c, bucket)}「${c.title}」 role=${c.role}  ${rewardText(c)}  tags=${tagsText(c)}`)
     const body = excerpt(c.body)
     if (body) lines.push(`  ${body}`)
   }
