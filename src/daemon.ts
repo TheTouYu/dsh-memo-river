@@ -16,6 +16,7 @@ import { precheckDrafts, SECTION_RECALLED, SECTION_SUGGESTED, type PrecheckSumma
 import { formatHealth, healthReport } from './health.js'
 import { excerpt } from './render.js'
 import type { PendingDraft } from './session.js'
+import type { KnowledgeStore } from './store.js'
 import type { WorkspaceRuntime } from './workspace.js'
 
 export interface GuardianRound {
@@ -89,8 +90,12 @@ export class WorkspaceDaemon {
     return Math.round(base * factor)
   }
 
-  /** 跑一轮守护。永不抛。 */
+  /** 跑一轮守护。永不抛。整段持工作区串行闸（SIGBUS 防护：体检读写与 ensureArtifact 不得交错）。 */
   async runOnce(): Promise<GuardianRound> {
+    return this.options.workspace.withDb(() => this.runOnceLocked())
+  }
+
+  private async runOnceLocked(): Promise<GuardianRound> {
     const t0 = Date.now()
     const at = t0
     this.round += 1
@@ -319,25 +324,30 @@ export function pruneArtifactGenerations(
   workspace: WorkspaceRuntime,
   keep: number = ARTIFACT_GC_KEEP,
 ): number {
-  const db = workspace.store.db
-  const hasTable = db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rivermemo_artifacts'")
-    .get()
-  if (!hasTable || keep <= 0) return 0
-  const schemas = db
-    .prepare('SELECT DISTINCT schema_version FROM rivermemo_artifacts')
-    .all() as Array<{ schema_version: string }>
+  const store = workspace.store
+  if (keep <= 0 || !storeHasTable(store, 'rivermemo_artifacts')) return 0
+  const schemas = store.allRows(
+    'SELECT DISTINCT schema_version FROM rivermemo_artifacts',
+  ) as Array<{ schema_version: string }>
   let removed = 0
   for (const { schema_version } of schemas) {
-    const res = db
-      .prepare(
-        `DELETE FROM rivermemo_artifacts WHERE schema_version = ? AND artifact_sig NOT IN (
+    const res = store.run(
+      `DELETE FROM rivermemo_artifacts WHERE schema_version = ? AND artifact_sig NOT IN (
            SELECT artifact_sig FROM rivermemo_artifacts
            WHERE schema_version = ? ORDER BY updated_at DESC, artifact_sig ASC LIMIT ?
          )`,
-      )
-      .run(schema_version, schema_version, keep)
+      schema_version,
+      schema_version,
+      keep,
+    )
     removed += Number(res.changes ?? 0)
   }
   return removed
+}
+
+function storeHasTable(store: KnowledgeStore, table: string): boolean {
+  for (const row of store.allRows("SELECT name FROM sqlite_master WHERE type = 'table'")) {
+    if (String((row as { name?: unknown }).name) === table) return true
+  }
+  return false
 }

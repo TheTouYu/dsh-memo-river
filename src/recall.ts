@@ -513,7 +513,8 @@ export async function recall(
   let pipelineElapsedMs = 0
   try {
     const observed = await engine.runExclusive(async () => {
-      if (!engine.isLoaded) await engine.load()
+      // 临界区内只走 *Locked 变体（锁序纪律：Q2 内不得再拿 Q1，见 native.ts 死锁注释）。
+      if (!engine.isLoaded) await engine.loadLocked()
       await engine.ensureArtifactLocked()
       const pipe = await engine.runPipeline(
         options.queryId,

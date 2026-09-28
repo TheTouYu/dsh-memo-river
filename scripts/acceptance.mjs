@@ -542,7 +542,7 @@ hr('#6 写入契约（memo_write 拒绝条件不静默）')
   const r2 = tooMany.includes('too-many-tags')
   const r3 = newTagNoReason.includes('unconfirmed-new-tags')
   const r4 = newTagWithReason.includes('✅ 已写入')
-  const counts = ws.store.counts()
+  const counts = await ws.readSync(() => ws.store.counts())
   check(6, '无 Tag 行 → 拒绝；新 Tag 无 reason → 拒绝；有 reason → 写入', r1 && r2 && r3 && r4, [
     `① 无 Tag 行 → ${r1 ? '✅ 拒绝' : '❌ 未拒绝'}：${(noTagLine.match(/❌ memo_write 被拒绝：[^\n]*/) ?? ['(无)'])[0]}`,
     `② 6 个 Tag → ${r2 ? '✅ 拒绝' : '❌ 未拒绝'}：${(tooMany.match(/❌ memo_write 被拒绝：[^\n]*/) ?? ['(无)'])[0]}`,
@@ -575,7 +575,7 @@ hr('#11 闭环：空库(0 篇) → memo_write 写一篇 → 被动注入把它�
   const execCtx = { agent: createAgent('sess-loop-w', LOOP_CWD, []) }
 
   // ① 写之前：库空 ⇒ 必须**显式**报 empty-corpus，而不是静默不注入（§1 不变量 6）
-  const before = ws.store.counts()
+  const before = await ws.readSync(() => ws.store.counts())
   const d0 = await runPreStep(h, createAgent('sess-loop-a', LOOP_CWD, []), 1, [textMsg('user', Q)])
   const skipLine = logs.filter((l) => l.includes('inject-skip')).pop() ?? '(无 skip 日志)'
   const preReason = (skipLine.match(/reason=([a-z-]+)/) ?? [])[1] ?? null
@@ -603,7 +603,7 @@ hr('#11 闭环：空库(0 篇) → memo_write 写一篇 → 被动注入把它�
   const d1 = await runPreStep(h, createAgent('sess-loop-b', LOOP_CWD, []), 1, [textMsg('user', Q)])
   const injected = d1.messages.map(msgText).filter((t) => t.includes(BLOCK_CLOSE))
   const hit = injected.some((t) => t.includes(TITLE))
-  const after = ws.store.counts()
+  const after = await ws.readSync(() => ws.store.counts())
 
   // ⑫ 入选集合去重：连续多轮同一条 query，入选集合必然重复 —— 重复时必须跳过。
   //    去重的键是 **chunk id 集合**，不是块文本：实测 `ids=D1,D2,D4` 在 40 分钟里
@@ -787,7 +787,7 @@ hr('#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ a
   rmSync(emptyPaths.root, { recursive: true, force: true })
   mkdirSync(EMPTY_CWD, { recursive: true })
   const wsEmpty = acquireWorkspace(EMPTY_CWD, makeConfig({ bucket: '草稿测试空桶' }))
-  wsEmpty.store.counts() // 建库建表：桶要能被 listBuckets / discard 扫到
+  await wsEmpty.readSync(() => wsEmpty.store.counts()) // 建库建表：桶要能被 listBuckets / discard 扫到
   mkdirSync(wsEmpty.paths.pendingDir, { recursive: true })
   writeFileSync(
     join(wsEmpty.paths.pendingDir, '2026-09-12-turn-t9.md'),
@@ -799,9 +799,9 @@ hr('#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ a
   const listOk = listOut.includes('渲染还是卡') && listOut.includes('turn-t9')
 
   // ④ 批准（bucket 过滤到本测试桶——绝不碰真实桶的草稿）：A 入库；B 在空词表桶被判「内容不足」跳过
-  const before14 = ws.store.counts()
+  const before14 = await ws.readSync(() => ws.store.counts())
   const approveOut = await aExec({ all: true, bucket: ws.paths.bucket }, ctx14)
-  const after14 = ws.store.counts()
+  const after14 = await ws.readSync(() => ws.store.counts())
   const approvedOk =
     approveOut.includes('✅') &&
     approveOut.includes('approved/') &&
@@ -810,7 +810,7 @@ hr('#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ a
   const approveEmptyOut = await aExec({ all: true, bucket: wsEmpty.paths.bucket }, ctx14)
   const skipOk =
     approveEmptyOut.includes('跳过') &&
-    wsEmpty.store.counts().files === 0 &&
+    (await wsEmpty.readSync(() => wsEmpty.store.counts())).files === 0 &&
     existsSync(join(wsEmpty.paths.pendingDir, '2026-09-12-turn-t9.md')) &&
     !existsSync(join(wsEmpty.paths.root, 'approved', '2026-09-12-turn-t9.md'))
 
@@ -818,11 +818,11 @@ hr('#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ a
   //    ids 子串按设计跨全部桶扫描 + 歧义保护（bucket 过滤只作用于 all=true 模式）——
   //    2026-09-14 实锤：共享桶里并行会话的同名 turn-t9 真实草稿触发歧义保护。
   //    测试必须用含日期的全唯一子串，绝不与真实桶撞名。
-  const filesBeforeDiscard = ws.store.counts().files + wsEmpty.store.counts().files
+  const filesBeforeDiscard = (await ws.readSync(() => ws.store.counts())).files + (await wsEmpty.readSync(() => wsEmpty.store.counts())).files
   const discardOut = await xExec({ ids: ['2026-09-12-turn-t9'] }, ctx14)
   const discardOk =
     discardOut.includes('rejected/') &&
-    ws.store.counts().files + wsEmpty.store.counts().files === filesBeforeDiscard &&
+    (await ws.readSync(() => ws.store.counts())).files + (await wsEmpty.readSync(() => wsEmpty.store.counts())).files === filesBeforeDiscard &&
     existsSync(join(wsEmpty.paths.root, 'rejected', '2026-09-12-turn-t9.md')) &&
     !existsSync(join(wsEmpty.paths.pendingDir, '2026-09-12-turn-t9.md'))
 
@@ -837,7 +837,7 @@ hr('#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ a
       `   ${approveOut.split('\n').filter((l) => l.startsWith('·')).join(' ⏎ ').slice(0, 320)}`,
       `④ 空词表桶（bucket=${wsEmpty.paths.bucket}）的草稿：${skipOk ? '✅ 内容判定不足 ⇒ 跳过且留在 pending/' : '❌'} ${approveEmptyOut.split('\n').filter((l) => l.startsWith('·')).join(' ⏎ ').slice(0, 160)}`,
       `⑤ memo_discard：${discardOk ? '✅ 移入 rejected/ 不入库' : '❌'} ${discardOut.split('\n')[0]}`,
-      `   库规模：主桶 ${before14.files} → ${after14.files} 篇（批准后）；空桶 ${wsEmpty.store.counts().files} 篇；丢弃后两桶合计不变`,
+      `   库规模：主桶 ${before14.files} → ${after14.files} 篇（批准后）；空桶 ${(await wsEmpty.readSync(() => wsEmpty.store.counts())).files} 篇；丢弃后两桶合计不变`,
     ],
   )
 
@@ -1917,7 +1917,7 @@ hr('#36 守护预审三态：垃圾稳定「建议丢弃」；Tag 边界「需�
   const uncheckedOk = snapPre?.precheck.unchecked === 4 && snapPre?.precheck.ok === 0
   const bytesBefore = Object.fromEntries(Object.entries(P).map(([k, p]) => [k, readFileSync(p, 'utf8')]))
   const mtimesBefore = Object.fromEntries(Object.entries(P).map(([k, p]) => [k, statSync(p).mtimeMs]))
-  const countsBefore = JSON.stringify(ws36.store.counts())
+  const countsBefore = JSON.stringify(await ws36.readSync(() => ws36.store.counts()))
 
   /* ③ 守护轮 ×2：落伴随 .status.json、随轮刷新、判定稳定（垃圾两轮都建议丢弃） */
   const logs36 = []
@@ -1942,7 +1942,7 @@ hr('#36 守护预审三态：垃圾稳定「建议丢弃」；Tag 边界「需�
   /* ④ 只读红线：.md 字节/mtime 不动、库计数不变（不写库/不改正文/不动体检资产） */
   const readonlyOk =
     Object.entries(P).every(([k, p]) => readFileSync(p, 'utf8') === bytesBefore[k] && statSync(p).mtimeMs === mtimesBefore[k]) &&
-    JSON.stringify(ws36.store.counts()) === countsBefore
+    JSON.stringify(await ws36.readSync(() => ws36.store.counts())) === countsBefore
 
   /* ⑤ 面板/草稿列表的三态分布展示 */
   const snapPost = tuningSnapshot(config, {}, () => []).draftQueue.find((b) => b.hash === pc.hash)

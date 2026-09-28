@@ -58,6 +58,9 @@ export class KnowledgeStore {
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA foreign_keys = ON')
     this.db.exec('PRAGMA busy_timeout = 5000')
+    // node26 下 node:sqlite .all() 走 mmap 读页，与 rust keepalive 连接并发写/截断 WAL 时
+    // 页被回收 → BUS_ADRERR（SIGBUS）。mmap_size=0 强制走 read() 拷贝路径，绕开 mmaps。
+    this.db.exec('PRAGMA mmap_size = 0')
     // 幂等建表：参考 DDL 全部为 CREATE ...（IF NOT EXISTS 由本处兜底判定）
     for (const stmt of SCHEMA_STATEMENTS) {
       try {
@@ -75,6 +78,75 @@ export class KnowledgeStore {
       this.db.close()
     } catch {
       /* 关闭失败静默 */
+    }
+  }
+
+  /* ────────────── SIGBUS 安全闸（2026-09-28 崩因修复） ──────────────
+   *
+   * 崩因：node 内嵌 sqlite 与 rust-vexus-lite 内嵌 rusqlite 是两份独立编译的 sqlite
+   * 实例，各持独立进程全局态——POSIX fcntl 锁按进程计，同进程内两份库互相看不见对方
+   * 的锁。WAL 的 wal-index（-shm 文件，无条件 mmap，不受 mmap_size 控制）被两侧并发
+   * 读写 → node 侧 .all() 拿过期 wal-index 读到越界地址 → BUS_ADRERR（SIGBUS）。
+   * 复现：/tmp/sigbus-repro2.mjs（node 主线程读写 × rust AsyncTask 线程池，双侧真实写）。
+   *
+   * 闸门：WorkspaceRuntime 安装 accessGuard——rust AsyncTask 在飞（nativeBusy>0）时，
+   * store 任何方法调用立即抛错（把崩溃变成可归因的异常）。正常路径不会被绊到：
+   * 所有流程经 workspace.withDb 串行化，native 窗口内主线程不做 store 访问。 */
+
+  private accessGuard: (() => void) | null = null
+
+  /** 安装/卸载访问闸（workspace 构造时安装；check 抛错=拒绝访问）。幂等。 */
+  setAccessGuard(check: (() => void) | null): void {
+    this.accessGuard = check
+  }
+
+  /** 原生 SQL 通道：历史直连 `store.db.prepare(...)` 的调用点（合并/清理）改走这里，
+   * 与其余方法吃同一道闸。 */
+  exec(sql: string): void {
+    this.#guardCheck()
+    this.db.exec(sql)
+  }
+
+  /** 原生 SQL 通道（带参 run）。 */
+  run(sql: string, ...params: unknown[]): { changes: number; lastInsertRowid: number | bigint } {
+    this.#guardCheck()
+    const r = this.db.prepare(sql).run(...(params as [])) as unknown as {
+      changes: number
+      lastInsertRowid: number | bigint
+    }
+    return { changes: Number(r.changes), lastInsertRowid: r.lastInsertRowid }
+  }
+
+  /** 原生 SQL 通道（泛型 SELECT，全部行）。 */
+  allRows(sql: string, ...params: unknown[]): Array<Record<string, unknown>> {
+    this.#guardCheck()
+    const stmt = this.db.prepare(sql)
+    const rows = (params.length > 0 ? stmt.all(...(params as [])) : stmt.all()) as unknown as Array<Record<string, unknown>>
+    return rows
+  }
+
+  #guardCheck(): void {
+    if (this.accessGuard) this.accessGuard()
+  }
+
+  /** 把原型上全部公有方法包上闸检查（实例级遮蔽）。close() 不设闸——关停路径不吃异常。 */
+  static installGuard(store: KnowledgeStore, check: () => void): void {
+    store.setAccessGuard(check)
+    const proto = KnowledgeStore.prototype as unknown as Record<string, unknown>
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      if (name === 'constructor' || name === 'close' || name === 'setAccessGuard') continue
+      const desc = Object.getOwnPropertyDescriptor(proto, name)
+      if (!desc || typeof desc.value !== 'function') continue
+      const orig = desc.value as (this: KnowledgeStore, ...a: unknown[]) => unknown
+      Object.defineProperty(store, name, {
+        value(this: KnowledgeStore, ...args: unknown[]) {
+          this.#guardCheck()
+          return orig.call(this, ...args)
+        },
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      })
     }
   }
 

@@ -263,17 +263,21 @@ async function relatedDiaries(
     // 票 03：写路径嵌入预算（15s + 重试 1 次）——回注查询不再共用注入路径的 60s 宽松超时。
     const [vec] = await workspace.embed.embed([content.slice(0, 2000)], WRITE_EMBED_OPTIONS)
     if (!vec) return []
-    const chunks = workspace.store.chunks().filter((c) => c.vector !== null)
-    const owners = workspace.store.chunkOwners()
-    return chunks
-      .map((c) => ({ id: c.id, score: cosine(vec, c.vector!.subarray(0, workspace.resolved.dimension)) }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
-      .map((c) => {
-        const owner = owners.get(c.id)
-        const title = owner ? (owner.path.replace(/\\/g, '/').split('/').pop() ?? '').replace(/\.[^.]+$/, '') : `D${c.id}`
-        return { id: c.id, title, score: c.score }
-      })
+    /* SIGBUS 防护：本函数作为 preamble 在闸外并行在飞——store 读走 readSync 自旋
+     * （不排队：闸内持有者可能正在 await 本 promise，入闸=循环等待死锁）。 */
+    return workspace.readSync(() => {
+      const chunks = workspace.store.chunks().filter((c) => c.vector !== null)
+      const owners = workspace.store.chunkOwners()
+      return chunks
+        .map((c) => ({ id: c.id, score: cosine(vec, c.vector!.subarray(0, workspace.resolved.dimension)) }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+        .map((c) => {
+          const owner = owners.get(c.id)
+          const title = owner ? (owner.path.replace(/\\/g, '/').split('/').pop() ?? '').replace(/\.[^.]+$/, '') : `D${c.id}`
+          return { id: c.id, title, score: c.score }
+        })
+    })
   } catch {
     return []
   }
@@ -289,11 +293,13 @@ async function composeReinjection(
   lead: string[],
   bucket: string,
 ): Promise<string> {
-  const freq = workspace.store.tagFrequency()
-  const total = workspace.store.files().length
+  /* SIGBUS 防护：本函数作为 preamble 在闸外并行在飞——store 读走 readSync 自旋
+   * （不排队，防循环等待死锁）；嵌入 await 天然在闸外（票 03 的并行墙钟优化保留）。 */
+  const freq = await workspace.readSync(() => workspace.store.tagFrequency())
+  const total = await workspace.readSync(() => workspace.store.files().length)
   const reinjectTop = freq.slice(0, 30).map((t) => `${t.name}×${t.count}`).join(', ') || '(空库)'
   const related = await relatedDiaries(workspace, content)
-  const pre = healthReport(workspace.store, bucket)
+  const pre = await workspace.readSync(() => healthReport(workspace.store, bucket))
   const hubWarn =
     pre.hub && pre.hub.ratio >= HUB_RATIO_LIMIT
       ? `⚠️ 枢纽警告：「${pre.hub.name}」已出现 ${pre.hub.count}/${total} 篇（≥1/3），再堆它会让直接锚泛化`
@@ -427,6 +433,15 @@ export interface WriteDiaryResult {
 }
 
 export async function writeDiaryCore(
+  workspace: WorkspaceRuntime,
+  input: WriteDiaryInput,
+): Promise<WriteDiaryResult> {
+  // SIGBUS 防护：write/update/merge/approve 四入口全走这里，整段持工作区串行闸
+  // （store 写 + embed await + rust 重建都在闸内；同工作区并发操作排队）。
+  return workspace.withDb(() => writeDiaryCoreLocked(workspace, input))
+}
+
+async function writeDiaryCoreLocked(
   workspace: WorkspaceRuntime,
   input: WriteDiaryInput,
 ): Promise<WriteDiaryResult> {
@@ -671,8 +686,22 @@ export async function writeDiaryCore(
     )
   }
 
-  /* ⑤ 返回体检增量（异步重建资产，不阻塞本次返回） */
-  void (async () => {
+  /* ⑤ 先算体检增量（同步快照，此刻无 AsyncTask 在飞），**再**放异步重建——顺序反了
+   * 会让重建链的 ensureLoaded→recoverFromSqlite 抬高 nativeBusy，把下面的同步 store 读
+   * 炸成 store-busy（实测：首写工作区，fire-and-forget 的同步前缀先跑）。
+   * 快照语义不变：healthReport 读 files/file_tags，重建只写 rivermemo_artifacts，互不相干。 */
+  const post = healthReport(workspace.store, bucket)
+  const inRiver = workspace.store
+    .files()
+    .filter((f) => f.id !== written.fileId)
+    .map((f) => ({ id: f.id, tags: new Set(workspace.store.fileTags(f.id).map((t) => t.name)) }))
+    .filter((f) => tags.some((t) => f.tags.has(t)))
+    .map((f) => `D${f.id}`)
+
+  /* 异步重建资产（fire-and-forget，不阻塞本次返回）：走 workspace.background
+   * 脱离本函数的 ALS 闸上下文——否则其内部 engine 自闸经 ALS 直通，闸释放后
+   * 变成闸外裸跑，与下一个持闸操作交错（护栏炸 store-busy）。 */
+  workspace.background(async () => {
     try {
       if (await workspace.ensureLoaded()) {
         // ⚠ 顺序要紧：**先刷新原生日记索引，再重建资产**。
@@ -687,16 +716,7 @@ export async function writeDiaryCore(
     } catch (e) {
       logger.warn(`memo_write artifact-rebuild-failed: ${String((e as Error)?.message ?? e)}`)
     }
-  })()
-
-  const post = healthReport(workspace.store, bucket)
-  const inRiver = workspace.store
-    .files()
-    .filter((f) => f.id !== written.fileId)
-    .map((f) => ({ id: f.id, tags: new Set(workspace.store.fileTags(f.id).map((t) => t.name)) }))
-    .filter((f) => tags.some((t) => f.tags.has(t)))
-    .map((f) => `D${f.id}`)
-
+  })
   return {
     status: 'written',
     chunkId: written.chunkId,
@@ -792,31 +812,34 @@ export function installTools(
         }
         const outcome = await target.recall(query, options)
         // timeRange 过滤保留（在目标桶结果集上做，避免改原生载荷；folder 过滤随真路由消亡）
+        // SIGBUS 防护：recall 的闸已随其返回释放，尾部 chunkOwners 读 + 台账写自行持目标桶闸。
         const range = parseTimeRange(typeof args.timeRange === 'string' ? args.timeRange : undefined)
-        if (range) {
-          const owners = target.store.chunkOwners()
-          const keep = (id: number): boolean => {
-            const owner = owners.get(id)
-            if (!owner) return false
-            const d = dateOf(owner.path)
-            return Boolean(d && d >= range.from && d <= range.to)
+        await target.withDb(async () => {
+          if (range) {
+            const owners = target.store.chunkOwners()
+            const keep = (id: number): boolean => {
+              const owner = owners.get(id)
+              if (!owner) return false
+              const d = dateOf(owner.path)
+              return Boolean(d && d >= range.from && d <= range.to)
+            }
+            outcome.candidates = outcome.candidates.filter((c) => keep(c.id))
+            outcome.selected = outcome.selected.filter((c) => keep(c.id))
+            outcome.candidateCount = outcome.candidates.length
           }
-          outcome.candidates = outcome.candidates.filter((c) => keep(c.id))
-          outcome.selected = outcome.selected.filter((c) => keep(c.id))
-          outcome.candidateCount = outcome.candidates.length
-        }
-        // 正文长度由 formatRecallResult 按「是否显式 truncate:false」决定；
-        // 原来这里也截一次 120，与渲染端叠加后参数永远无效（见其调用点注释）。
-        // 使用台账（票 01）：主动补证也是「使用」——只记工具**刻意呈现**的 selected（与被动注入同
-        // 口径、同为预算内 k 条）。不记 candidates 列表：那是诊断溢出，11 篇语料下会把全库扫成
-        // 「用过」，主动信号就失去「努力提取」的语义（testing effect 只认刻意检索）。
-        // 票 01（recall-quality-0916）：跨桶召回的台账记在**目标桶**（target.store）——
-        // 在哪条河里被捞起，足迹就留在哪条河。
-        try {
-          if (outcome.selected.length > 0) recordUsage(target.store, outcome.selected.map((c) => c.fileId), 'active')
-        } catch {
-          /* 台账失败静默：观测不能伤害补证 */
-        }
+          // 正文长度由 formatRecallResult 按「是否显式 truncate:false」决定；
+          // 原来这里也截一次 120，与渲染端叠加后参数永远无效（见其调用点注释）。
+          // 使用台账（票 01）：主动补证也是「使用」——只记工具**刻意呈现**的 selected（与被动注入同
+          // 口径、同为预算内 k 条）。不记 candidates 列表：那是诊断溢出，11 篇语料下会把全库扫成
+          // 「用过」，主动信号就失去「努力提取」的语义（testing effect 只认刻意检索）。
+          // 票 01（recall-quality-0916）：跨桶召回的台账记在**目标桶**（target.store）——
+          // 在哪条河里被捞起，足迹就留在哪条河。
+          try {
+            if (outcome.selected.length > 0) recordUsage(target.store, outcome.selected.map((c) => c.fileId), 'active')
+          } catch {
+            /* 台账失败静默：观测不能伤害补证 */
+          }
+        })
         const text = formatRecallResult(target, outcome, query, args.truncate === false)
         return target === workspace
           ? text
@@ -833,21 +856,24 @@ export function installTools(
       parameters: { limit: { type: 'number', description: '返回条数（缺省 30）。' } },
       output: TEXT_OUTPUT,
       isConcurrencySafe: () => true,
-      execute(args: Record<string, unknown>, exec: unknown) {
+      async execute(args: Record<string, unknown>, exec: unknown) {
         const { cwd } = viewerOf(exec)
         const workspace = deps.getWorkspace(cwd)
         const limit = typeof args.limit === 'number' && args.limit > 0 ? args.limit : 30
-        const freq = workspace.store.tagFrequency()
-        const total = workspace.store.files().length
-        const lines = [`【记忆河流·memo_tags】桶=${workspace.paths.bucket} 共 ${freq.length} 个 Tag / ${total} 篇日记`]
-        for (const t of freq.slice(0, limit)) {
-          const ratio = total > 0 ? t.count / total : 0
-          const flag = ratio >= HUB_RATIO_LIMIT ? '  ⚠️枢纽(≥1/3)' : ''
-          lines.push(`· ${t.name}  ×${t.count}${flag}`)
-        }
-        if (freq.length > limit) lines.push(`· …还有 ${freq.length - limit} 个（提高 limit 查看）`)
-        lines.push('· 写新日记时优先复用以上 Tag；只有概念真正变化时才创建新 Tag（需在 memo_write 里给出 newTagReason）。')
-        return Promise.resolve(lines.join('\n'))
+        /* SIGBUS 防护：词汇表读 store 走工作区串行闸。 */
+        return workspace.withDb(async () => {
+          const freq = workspace.store.tagFrequency()
+          const total = workspace.store.files().length
+          const lines = [`【记忆河流·memo_tags】桶=${workspace.paths.bucket} 共 ${freq.length} 个 Tag / ${total} 篇日记`]
+          for (const t of freq.slice(0, limit)) {
+            const ratio = total > 0 ? t.count / total : 0
+            const flag = ratio >= HUB_RATIO_LIMIT ? '  ⚠️枢纽(≥1/3)' : ''
+            lines.push(`· ${t.name}  ×${t.count}${flag}`)
+          }
+          if (freq.length > limit) lines.push(`· …还有 ${freq.length - limit} 个（提高 limit 查看）`)
+          lines.push('· 写新日记时优先复用以上 Tag；只有概念真正变化时才创建新 Tag（需在 memo_write 里给出 newTagReason）。')
+          return lines.join('\n')
+        })
       },
     }),
   )
@@ -865,19 +891,23 @@ export function installTools(
       async execute(args: Record<string, unknown>, exec: unknown) {
         const { cwd } = viewerOf(exec)
         const workspace = deps.getWorkspace(cwd)
-        const report = healthReport(workspace.store, workspace.paths.bucket)
-        const lines = [formatHealth(report)]
-        const loaded = await workspace.ensureLoaded()
-        if (loaded) {
-          const state = await workspace.engine.ensureArtifact(args.rebuild === true)
-          lines.push(
-            `· 原生资产：artifactSig=${state.artifactSig.slice(0, 24)}… 节点=${state.nodeCount} 边=${state.edgeCount} ` +
-              `persisted=${state.persisted} resident=${state.resident} 本次重建耗时=${state.elapsedMs}ms`,
-          )
-        } else {
-          lines.push('· 原生资产：未载入（native-unavailable）')
-        }
-        return lines.join('\n')
+        /* SIGBUS 防护：体检读 store 与 ensureArtifact 的原生重建不得交错——整段持工作区串行闸
+         * （ensureLoaded/engine.ensureArtifact 的自闸在闸内经 ALS 直通，不会二次排队）。 */
+        return workspace.withDb(async () => {
+          const report = healthReport(workspace.store, workspace.paths.bucket)
+          const lines = [formatHealth(report)]
+          const loaded = await workspace.ensureLoaded()
+          if (loaded) {
+            const state = await workspace.engine.ensureArtifact(args.rebuild === true)
+            lines.push(
+              `· 原生资产：artifactSig=${state.artifactSig.slice(0, 24)}… 节点=${state.nodeCount} 边=${state.edgeCount} ` +
+                `persisted=${state.persisted} resident=${state.resident} 本次重建耗时=${state.elapsedMs}ms`,
+            )
+          } else {
+            lines.push('· 原生资产：未载入（native-unavailable）')
+          }
+          return lines.join('\n')
+        })
       },
     }),
   )
@@ -907,21 +937,24 @@ export function installTools(
           if (!resolution.ok) return resolution.error
           if (resolution.entry.hash !== workspace.paths.hash) target = acquireBucketRuntime(resolution.entry, config)
         }
-        const result = patrolBucket(target.store, target.paths.bucket, {
-          hubRatio: typeof args.hubRatio === 'number' && args.hubRatio > 0 && args.hubRatio <= 1 ? args.hubRatio : undefined,
-          nearDupCosine:
-            typeof args.nearDupCosine === 'number' && args.nearDupCosine > 0 && args.nearDupCosine < 1
-              ? args.nearDupCosine
-              : undefined,
-          dimension: target.resolved.dimension,
+        /* SIGBUS 防护：巡检整库扫描（files/chunks/向量）持目标桶的工作区串行闸。 */
+        return target.withDb(async () => {
+          const result = patrolBucket(target.store, target.paths.bucket, {
+            hubRatio: typeof args.hubRatio === 'number' && args.hubRatio > 0 && args.hubRatio <= 1 ? args.hubRatio : undefined,
+            nearDupCosine:
+              typeof args.nearDupCosine === 'number' && args.nearDupCosine > 0 && args.nearDupCosine < 1
+                ? args.nearDupCosine
+                : undefined,
+            dimension: target.resolved.dimension,
+          })
+          const patrolLogger: Logger = target.logger
+          patrolLogger.info(
+            `memo_patrol bucket=${target.paths.bucket} scanned=${result.scanned} findings=${result.findings.length} ` +
+              `hub=${result.findings.filter((f) => f.kind === 'hub').length} untitled=${result.findings.filter((f) => f.kind === 'untitled').length} ` +
+              `near-dup=${result.findings.filter((f) => f.kind === 'near-dup').length}`,
+          )
+          return result.text
         })
-        const patrolLogger: Logger = target.logger
-        patrolLogger.info(
-          `memo_patrol bucket=${target.paths.bucket} scanned=${result.scanned} findings=${result.findings.length} ` +
-            `hub=${result.findings.filter((f) => f.kind === 'hub').length} untitled=${result.findings.filter((f) => f.kind === 'untitled').length} ` +
-            `near-dup=${result.findings.filter((f) => f.kind === 'near-dup').length}`,
-        )
-        return result.text
       },
     }),
   )
@@ -1023,16 +1056,24 @@ export function installTools(
         const date = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : new Date().toISOString().slice(0, 10)
         const newTagReason = typeof args.newTagReason === 'string' ? args.newTagReason.trim() : ''
 
-        /* ⓪ 目标解析：id / title 恰好给一个；标题匹配 chunk 首行（# 标题），歧义列出候选 */
+        /* ⓪ 目标解析：id / title 恰好给一个；标题匹配 chunk 首行（# 标题），歧义列出候选
+         * SIGBUS 防护：前读（files/chunks）持闸；后续 1063 处的 chunk 兜底也用同一份快照。 */
         const hasId = typeof args.id === 'number' && Number.isFinite(args.id)
         const titleQuery = typeof args.title === 'string' ? args.title.trim() : ''
         if (hasId === Boolean(titleQuery)) {
           return '❌ memo_update：给 id（D 编号）或 title（标题子串）二者之一，恰好一个。'
         }
-        const bucketFiles = workspace.store.files(bucket)
+        const { bucketFiles, chunksSnapshot } = await workspace.withDb(async () => ({
+          bucketFiles: workspace.store.files(bucket),
+          chunksSnapshot: workspace.store.chunks(bucket).map((c) => ({
+            id: Number(c.id),
+            file_id: c.file_id,
+            content: String(c.content ?? ''),
+          })),
+        }))
         const chunkTitle = new Map<number, string>()
-        for (const c of workspace.store.chunks(bucket)) {
-          const m = /^#\s+(.+)$/m.exec(String(c.content ?? ''))
+        for (const c of chunksSnapshot) {
+          const m = /^#\s+(.+)$/m.exec(c.content)
           if (m && !chunkTitle.has(c.file_id)) chunkTitle.set(c.file_id, m[1]!)
         }
         let target: (typeof bucketFiles)[number] | null = null
@@ -1041,7 +1082,7 @@ export function installTools(
           if (!target) {
             // memo_recall 输出的 D 编号是 **chunk id**（改写会换 chunk），memo_stats/台账是 file id：
             // 按_chunk→file 兜底解析，两个口径都能定位。
-            const ch = workspace.store.chunks(bucket).find((c) => Number(c.id) === args.id)
+            const ch = chunksSnapshot.find((c) => c.id === args.id)
             if (ch) target = bucketFiles.find((f) => f.id === ch.file_id) ?? null
           }
           if (!target) return `❌ memo_update：桶 ${bucket} 里没有 D${args.id}（已按 file id 和 chunk id 两种口径解析；用 memo_stats 查看清单）。`
@@ -1125,11 +1166,14 @@ export function installTools(
         const date = typeof args.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(args.date) ? args.date : new Date().toISOString().slice(0, 10)
         const newTagReason = typeof args.newTagReason === 'string' ? args.newTagReason.trim() : ''
 
-        /* ⓪ 源解析：file-id 优先、chunk-id 兜底（与 memo_update 同口径）；去重为集合 */
+        /* ⓪ 源解析：file-id 优先、chunk-id 兜底（与 memo_update 同口径）；去重为集合
+         * SIGBUS 防护：前读（files/chunks）持闸。 */
         const rawIds = (Array.isArray(args.sources) ? args.sources : []).map(Number).filter(Number.isFinite)
         if (rawIds.length < 2) return '❌ memo_merge：sources 至少 2 篇（改写单篇用 memo_update）。'
-        const bucketFiles = workspace.store.files(bucket)
-        const bucketChunks = workspace.store.chunks(bucket)
+        const { bucketFiles, bucketChunks } = await workspace.withDb(async () => ({
+          bucketFiles: workspace.store.files(bucket),
+          bucketChunks: workspace.store.chunks(bucket),
+        }))
         const resolveFile = (id: number) => {
           const byFile = bucketFiles.find((f) => f.id === id)
           if (byFile) return byFile
@@ -1202,29 +1246,33 @@ export function installTools(
         })
         if (result.status === 'rejected') return result.report
 
-        /* ⑥ 归档退役：先取原文（chunk 将被清），再磁盘归档（根内 move / 根外 copy），最后库内行级清除 + 台账清扫 */
-        const archiveDir = join(workspace.paths.root, 'archive')
-        mkdirSync(archiveDir, { recursive: true })
+        /* ⑥ 归档退役：先取原文（chunk 将被清），再磁盘归档（根内 move / 根外 copy），最后库内行级清除 + 台账清扫。
+         * SIGBUS 防护：writeDiaryCore 的闸已随其返回释放，退役段（chunks 读 + 行级 DELETE + 台账写）
+         * 自行持闸——中途被护栏打断会留下「磁盘已归档、库行未清」的半退役状态。 */
         const archived: string[] = []
-        for (const f of retired) {
-          const ch = workspace.store.chunks(bucket).find((c) => c.file_id === f.id)
-          const origText = String(ch?.content ?? '')
-          const dest = join(archiveDir, basename(f.path))
-          if (f.path.startsWith(workspace.paths.root)) {
-            try { renameSync(f.path, dest); archived.push(`${basename(f.path)}（移入）`) } catch { writeFileSync(dest, origText); archived.push(`${basename(f.path)}（复制兜底）`) }
-          } else {
-            writeFileSync(dest, origText || `(原文已不可得；源路径 ${f.path})`)
-            archived.push(`${basename(f.path)}（源在工作区根外，原文复制归档、源文件未动）`)
+        await workspace.withDb(async () => {
+          const archiveDir = join(workspace.paths.root, 'archive')
+          mkdirSync(archiveDir, { recursive: true })
+          for (const f of retired) {
+            const ch = workspace.store.chunks(bucket).find((c) => c.file_id === f.id)
+            const origText = String(ch?.content ?? '')
+            const dest = join(archiveDir, basename(f.path))
+            if (f.path.startsWith(workspace.paths.root)) {
+              try { renameSync(f.path, dest); archived.push(`${basename(f.path)}（移入）`) } catch { writeFileSync(dest, origText); archived.push(`${basename(f.path)}（复制兜底）`) }
+            } else {
+              writeFileSync(dest, origText || `(原文已不可得；源路径 ${f.path})`)
+              archived.push(`${basename(f.path)}（源在工作区根外，原文复制归档、源文件未动）`)
+            }
+            workspace.store.run('DELETE FROM chunks WHERE file_id = ?', f.id)
+            workspace.store.run('DELETE FROM file_tags WHERE file_id = ?', f.id)
+            workspace.store.run('DELETE FROM files WHERE id = ?', f.id)
           }
-          workspace.store.db.prepare('DELETE FROM chunks WHERE file_id = ?').run(f.id)
-          workspace.store.db.prepare('DELETE FROM file_tags WHERE file_id = ?').run(f.id)
-          workspace.store.db.prepare('DELETE FROM files WHERE id = ?').run(f.id)
-        }
-        if (retired.length > 0) {
-          const ledger = readUsageLedger(workspace.store)
-          for (const f of retired) ledger.delete(f.id)
-          workspace.store.kvSet(KV_USAGE, JSON.stringify(Object.fromEntries([...ledger.entries()].map(([k, v]) => [String(k), v]))))
-        }
+          if (retired.length > 0) {
+            const ledger = readUsageLedger(workspace.store)
+            for (const f of retired) ledger.delete(f.id)
+            workspace.store.kvSet(KV_USAGE, JSON.stringify(Object.fromEntries([...ledger.entries()].map(([k, v]) => [String(k), v]))))
+          }
+        })
         workspace.logger.info(
           `memo_merge bucket=${bucket} ${keepRow ? `keep=D${keepRow.id}` : 'keep=new-file'} retired=${retired.map((f) => `D${f.id}`).join(',')} archive=${archived.length} 篇`,
         )
@@ -1368,8 +1416,10 @@ export function installTools(
             return `· ⏭ ${basename(record.path)}：工作区缺 workspace.json（cwd 未知），跳过`
           }
           /* 票02：curateTags 改为**内容 kNN**（async：草稿正文嵌入 → 与词汇表向量比对 →
-           * 剔枢纽），命中 <TAG_MIN 即跳过；缓存取自草稿旁 `.status.json`（与守护预审同一份）。 */
-          const tags = await curateTags(record, workspace)
+           * 剔枢纽），命中 <TAG_MIN 即跳过；缓存取自草稿旁 `.status.json`（与守护预审同一份）。
+           * SIGBUS 防护：curateTags 的 store 读发生在 writeDiaryCore 的闸外，这里自行持闸
+           * （闸内含嵌入 await——批准是人工触发的低频操作，接受串行代价）。 */
+          const tags = await workspace.withDb(() => curateTags(record, workspace))
           if (tags.length < TAG_MIN) {
             return `· ⏭ ${basename(record.path)}：内容 Tag 命中 ${tags.length} 个（${tags.join(', ') || '无'}）< ${TAG_MIN}，待人工 memo_write 撰写后 memo_discard 本草稿`
           }

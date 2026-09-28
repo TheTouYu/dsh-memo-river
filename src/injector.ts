@@ -317,10 +317,16 @@ export async function buildTailInjection(
   const outcome = fed.outcome
 
   // §7.3 ③④：把 Ω 与召回足迹记进 kv_store（体检素材），无论是否注入——继承链上每桶各自记账。
+  // SIGBUS 防护：recall 的闸已随其返回释放，这里裸写 store 可能撞上守护轮的原生重建，
+  // 故每桶各持自己的工作区串行闸（fed.parts 可能跨桶）。
   try {
     for (const part of fed.parts) {
-      recordOmega(part.workspace.store, part.outcome.omega, part.outcome.regime ?? '')
-      if (part.injectedFileIds.length > 0) recordUsage(part.workspace.store, part.injectedFileIds, 'passive')
+      await part.workspace.withDb(async () => {
+        recordOmega(part.workspace.store, part.outcome.omega, part.outcome.regime ?? '')
+        if (part.injectedFileIds.length > 0) {
+          recordUsage(part.workspace.store, part.injectedFileIds, 'passive')
+        }
+      })
     }
   } catch (e) {
     logger.warn(`record-health-failed: ${String((e as Error)?.message ?? e)}`)

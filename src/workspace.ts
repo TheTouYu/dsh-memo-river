@@ -5,6 +5,7 @@
  * 会话级状态一律放 src/session.ts 的 Map（DESIGN.md §5.2 / §6.5）。
  */
 import { existsSync, readdirSync, statSync } from 'node:fs'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { basename, join } from 'node:path'
 import type { Config } from './config.js'
 import { closeEmbedTransport, EmbedClient, embedTransportIntent } from './embed.js'
@@ -32,6 +33,9 @@ export interface ResolvedEmbed {
   source: 'config' | 'config.env' | 'none'
 }
 
+/** 持闸工作区集合（AsyncLocalStorage）：withDb 同上下文重入直通判定用。 */
+const dbGateContext = new AsyncLocalStorage<ReadonlySet<WorkspaceRuntime>>()
+
 export class WorkspaceRuntime {
   readonly logger: Logger
   readonly embed: EmbedClient
@@ -41,6 +45,18 @@ export class WorkspaceRuntime {
   /** 单飞：并发首次载入共享同一次 `engine.load()`（否则第二个调用者会把索引重建一遍，
    *  把第一个正在用的 `tagIndex`/`runtime` 换掉——与 memo 代际竞态同族）。 */
   private loading: Promise<boolean> | null = null
+
+  /* ────────────── SIGBUS 防护串行闸（2026-09-28，机理见 store.ts 注释） ──────────────
+   *
+   * 进程内两份 sqlite（node 内嵌 + rust-vexus-lite 内嵌 rusqlite）互看不见对方的
+   * fcntl 锁：node:sqlite 访问与 rust AsyncTask 并发碰同一库文件时，WAL wal-index
+   * 可能被写坏 → BUS_ADRERR（SIGBUS）。三层防护：
+   *   ① 本闸（withDb）：同一工作区的**整段操作**（工具/注入/守护 tick）串行执行；
+   *   ② engine 自闸：碰原生的公有入口自行过闸（AsyncLocalStorage 可重入，嵌套直通）；
+   *   ③ store 护栏：native AsyncTask 在飞（engine.nativeBusy>0）时 store 任何方法
+   *      直接抛错——把未收敛到闸内的漏网访问变成可归因异常，而不是崩溃。
+   * 代价：闸横跨 embed HTTP await（写入持闸数秒）——同工作区并发操作排队而非并行。 */
+  private dbGate: Promise<unknown> = Promise.resolve()
 
   private constructor(
     readonly paths: WorkspacePaths,
@@ -62,6 +78,67 @@ export class WorkspaceRuntime {
       modelSig: `${resolved.model}${config.native.modelSigSuffix}`,
       diaryName: paths.bucket,
       store: this.store,
+      gate: (fn) => this.withDb(fn),
+    })
+    KnowledgeStore.installGuard(this.store, () => this.assertStoreIdle())
+  }
+
+  /** 工作区串行闸：整段 fn 持锁执行；同一异步上下文重入直通（ALS 判定）。 */
+  withDb<T>(fn: () => Promise<T>): Promise<T> {
+    const held = dbGateContext.getStore()
+    if (held?.has(this)) return fn()
+    const run = this.dbGate.then(async () => {
+      const next = new Set(held ?? [])
+      next.add(this)
+      return dbGateContext.run(next, fn)
+    })
+    this.dbGate = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
+
+  /** store 护栏检查：native AsyncTask 在飞时拒绝一切 store 访问（见类头注释③）。 */
+  private assertStoreIdle(): void {
+    if (this.engine.nativeBusy > 0) {
+      throw new Error(
+        'memo-river store-busy：native AsyncTask 在飞，node:sqlite 访问被拒（SIGBUS 防护）。' +
+          '该访问路径未收敛到 workspace.withDb 串行闸——请把整段操作包进 withDb 或改用 *Locked 变体。',
+      )
+    }
+  }
+
+  /** 同步 store 读的**不排队**通道：护栏拦下（原生在飞）时自旋重试而非入闸排队。
+   *
+   * 为什么不能 withDb：withDb 是排队语义。preamble（composeReinjection 等）在闸外
+   * 并行在飞，而闸内持有者（writeDiaryCoreLocked）可能正在 await 这个 preamble——
+   * preamble 若入闸排队就是循环等待（实测死锁：acceptance #6 unsettled top-level await）。
+   *
+   * 为什么自旋安全：fn 是同步读。JS 单线程下同步执行期间不可能有新的 native
+   * AsyncTask 被启动（那需要 JS 调它）；护栏在入口检查 nativeBusy==0 即足够。 */
+  async readSync<T>(fn: () => T, timeoutMs = 30_000): Promise<T> {
+    const t0 = Date.now()
+    for (;;) {
+      try {
+        return fn()
+      } catch (e) {
+        const msg = String((e as Error)?.message ?? e)
+        if (!msg.startsWith('memo-river store-busy')) throw e
+        if (Date.now() - t0 > timeoutMs) throw e
+        await new Promise((r) => setTimeout(r, 25))
+      }
+    }
+  }
+
+  /** fire-and-forget 后台任务：**脱离当前 ALS 闸上下文**再启动。
+   *
+   * 若在持闸上下文里直接 void 一个 async 任务，其内部的 gate 调用（engine 的自闸）
+   * 会经 ALS 判定「已持闸」而直通——闸释放后它就变成闸外裸跑，与下一个持闸操作
+   * 交错，护栏炸 store-busy。exit 后任务会正常排队入闸。 */
+  background(fn: () => Promise<unknown>): void {
+    dbGateContext.exit(() => {
+      void fn()
     })
   }
 
@@ -126,8 +203,12 @@ export class WorkspaceRuntime {
     }
   }
 
-  /** 跑一次召回；永不抛（失败即 injected=false + fallbackReason）。 */
+  /** 跑一次召回；永不抛（失败即 injected=false + fallbackReason）。整段持串行闸。 */
   async recall(queryText: string, options: RecallOptions): Promise<RecallOutcome> {
+    return this.withDb(() => this.recallLocked(queryText, options))
+  }
+
+  private async recallLocked(queryText: string, options: RecallOptions): Promise<RecallOutcome> {
     const ok = await this.ensureLoaded()
     if (!ok) {
       return {

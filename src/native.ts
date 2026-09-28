@@ -156,6 +156,12 @@ export interface MemoEngineOptions {
   modelSig: string
   diaryName: string
   store: KnowledgeStore
+  /**
+   * 工作区级串行闸（SIGBUS 防护，2026-09-28）：native AsyncTask 与 node:sqlite 访问
+   * 必须互斥（进程内两份 sqlite 的 fcntl 锁盲区，见 store.ts 注释）。缺省恒等——
+   * 独立脚本造的引擎无闸，行为与修复前一致。
+   */
+  gate?: <T>(fn: () => Promise<T>) => Promise<T>
 }
 
 export interface ArtifactState {
@@ -209,9 +215,24 @@ export class MemoEngine {
   private queue: Promise<unknown> = Promise.resolve()
   /** 单飞：同一次资产构建被并发请求时只跑一遍（不是每个调用者各建一次）。 */
   private building: Promise<ArtifactState> | null = null
+  /** 在飞 native AsyncTask 计数（SIGBUS 防护：>0 时 store 访问被护栏拒绝）。 */
+  nativeBusy = 0
+  /** 工作区串行闸（缺省恒等——独立脚本造的引擎保持修复前行为）。 */
+  private readonly gate: <T>(fn: () => Promise<T>) => Promise<T>
 
   constructor(private readonly options: MemoEngineOptions) {
     this.kbm = loadKnowledgeBaseManager(options.vcpRoot)
+    this.gate = options.gate ?? ((fn) => fn())
+  }
+
+  /** native AsyncTask 在飞期间执行 fn——计数器进出严格包裹提交/落定。 */
+  private async withNative<T>(fn: () => Promise<T>): Promise<T> {
+    this.nativeBusy++
+    try {
+      return await fn()
+    } finally {
+      this.nativeBusy--
+    }
   }
 
   /** 把一个临界区排进引擎串行队列。**不可重入**（临界区内部请调用 `*Locked` 变体）。 */
@@ -237,14 +258,20 @@ export class MemoEngine {
     return this.runtime !== null
   }
 
-  /** 载入原生模块 + 重建两个索引（tag 走 recoverFromSqlite，日记走 addBatch）。 */
+  /** 载入原生模块 + 重建两个索引（tag 走 recoverFromSqlite，日记走 addBatch）。自闸。 */
   async load(): Promise<void> {
+    return this.gate(() => this.loadLocked())
+  }
+
+  /** load 的无闸变体——供已在 engine 临界区（runExclusive 体）内的调用方使用。
+   *  死锁纪律：持 Q2（engine 队列）时拿 Q1（工作区闸）会与「持 Q1 等 Q2」互喂死锁。 */
+  async loadLocked(): Promise<void> {
     const mod = loadVexus(this.options.vcpRoot)
     const dim = this.options.dimension
     const store = this.options.store
 
     const tagIndex = new mod.VexusIndex(dim, 512)
-    await tagIndex.recoverFromSqlite(store.dbPath, 'tags', null)
+    await this.withNative(() => tagIndex.recoverFromSqlite(store.dbPath, 'tags', null))
 
     const diaryIndex = new mod.VexusIndex(dim, 128)
     const chunks = store.chunks(this.options.diaryName).filter((c) => c.vector !== null)
@@ -281,6 +308,12 @@ export class MemoEngine {
    * （它的 `recoverFromSqlite` 是整库扫描，没必要为一次写入付这个代价）。
    */
   async reloadDiaryIndex(): Promise<void> {
+    if (!this.mod) return
+    return this.gate(() => this.reloadDiaryIndexLocked())
+  }
+
+  /** reloadDiaryIndex 的无闸变体（临界区内用；本体现在不碰 native AsyncTask，纯内存）。 */
+  private async reloadDiaryIndexLocked(): Promise<void> {
     if (!this.mod) return
     const mod = this.mod
     const dim = this.options.dimension
@@ -320,7 +353,7 @@ export class MemoEngine {
   async ensureArtifact(force = false): Promise<ArtifactState> {
     // 单飞 + 串行：并发调用共享同一次构建，且构建期间不会有别的原生命令插进来。
     if (this.building) return this.building
-    const run = this.runExclusive(() => this.ensureArtifactLocked(force))
+    const run = this.gate(() => this.runExclusive(() => this.ensureArtifactLocked(force)))
     this.building = run
     try {
       return await run
@@ -332,9 +365,12 @@ export class MemoEngine {
   /** 队列内的真实构建体。调用方必须已经持有引擎临界区（`runExclusive` 或 `ensureArtifact`）。 */
   async ensureArtifactLocked(force = false): Promise<ArtifactState> {
     if (!this.tagIndex) throw new Error('engine-not-loaded')
+    const ti = this.tagIndex
     const input = JSON.stringify({ modelSig: this.options.modelSig, effectiveConfig: this.kbm })
     const t0 = Date.now()
-    const result = await this.tagIndex.rebuildMemoArtifact(this.options.store.dbPath, input)
+    const result = (await this.withNative(() =>
+      ti.rebuildMemoArtifact(this.options.store.dbPath, input),
+    )) as NativeMemoArtifactBuildResult
     const unchanged = !force && this.artifact?.artifactSig === result.artifactSig
     const dbPath = this.options.store.dbPath
     const modelSig = this.options.modelSig
@@ -350,7 +386,9 @@ export class MemoEngine {
     if (!unchanged || force) {
       // EPA 基底：先只读计算，再短租约发布
       try {
-        const epa = (await this.tagIndex.computeEpaBasis(dbPath, 64, 64)) as { basisCount?: number }
+        const epa = (await this.withNative(() => ti.computeEpaBasis(dbPath, 64, 64))) as {
+          basisCount?: number
+        }
         const published = this.tagIndex.publishEpaBasisCache(dbPath) as { success?: boolean; basisCount?: number }
         assets.epaBasis = {
           ok: published?.success !== false,
@@ -362,7 +400,9 @@ export class MemoEngine {
       }
       // 内生残差（V7/V9.1）
       try {
-        const res = (await this.tagIndex.computeIntrinsicResiduals(dbPath, null, null, modelSig, null)) as {
+        const res = (await this.withNative(() =>
+          ti.computeIntrinsicResiduals(dbPath, null, null, modelSig, null),
+        )) as {
           computedCount?: number
           skippedCount?: number
         }
@@ -372,7 +412,9 @@ export class MemoEngine {
       }
       // Tag 成对语义距离（V8.2，增量）
       try {
-        const pair = (await this.tagIndex.computePairwiseSimilarities(dbPath, modelSig, null, false)) as {
+        const pair = (await this.withNative(() =>
+          ti.computePairwiseSimilarities(dbPath, modelSig, null, false),
+        )) as {
           storedCount?: number
         }
         assets.pairwise = { ok: true, stored: pair?.storedCount ?? 0, error: null }
@@ -405,19 +447,25 @@ export class MemoEngine {
     ghostTags: string[] = [],
   ): Promise<{ metadata: Record<string, unknown>; enhancedVector: Float32Array; elapsedMs: number }> {
     if (!this.tagIndex || !this.artifact) throw new Error('artifact-not-ready')
+    const ti = this.tagIndex
+    const activeSig = this.artifact.artifactSig
     const t0 = Date.now()
-    const result = await this.tagIndex.runMemoPipeline(
-      this.options.store.dbPath,
-      this.artifact.artifactSig,
-      JSON.stringify({
-        queryId,
-        queryText,
-        coreTags,
-        ghostTags,
-        config: pipelineConfig(this.kbm),
-      }),
-      queryVector,
-      new Float32Array(0),
+    const result = await this.gate(() =>
+      this.withNative(() =>
+        ti.runMemoPipeline(
+          this.options.store.dbPath,
+          activeSig,
+          JSON.stringify({
+            queryId,
+            queryText,
+            coreTags,
+            ghostTags,
+            config: pipelineConfig(this.kbm),
+          }),
+          queryVector,
+          new Float32Array(0),
+        ),
+      ),
     )
     let metadata: Record<string, unknown> = {}
     try {
@@ -435,17 +483,23 @@ export class MemoEngine {
     candidates: Array<{ id: number; score: number }>,
   ): Promise<Record<string, unknown>> {
     if (!this.tagIndex || !this.artifact) throw new Error('artifact-not-ready')
-    const raw = await this.tagIndex.rerankMemoDtsc(
-      this.options.store.dbPath,
-      this.artifact.artifactSig,
-      JSON.stringify({
-        dimension: this.options.dimension,
-        observationHandle,
-        queryGeometryState,
-        topK: candidates.length,
-        candidates,
-        includeTrace: true,
-      }),
+    const ti = this.tagIndex
+    const activeSig = this.artifact.artifactSig
+    const raw = await this.gate(() =>
+      this.withNative(() =>
+        ti.rerankMemoDtsc(
+          this.options.store.dbPath,
+          activeSig,
+          JSON.stringify({
+            dimension: this.options.dimension,
+            observationHandle,
+            queryGeometryState,
+            topK: candidates.length,
+            candidates,
+            includeTrace: true,
+          }),
+        ),
+      ),
     )
     return parseJsonObject(raw)
   }
@@ -459,34 +513,40 @@ export class MemoEngine {
     candidates: Array<{ id: number; score: number }>,
   ): Promise<Record<string, unknown>> {
     if (!this.tagIndex || !this.artifact) throw new Error('artifact-not-ready')
-    const raw = await this.tagIndex.rerankRivermemoTopologyV3(
-      this.options.store.dbPath,
-      this.artifact.artifactSig,
-      JSON.stringify({
-        observationHandle,
-        dimension: this.options.dimension,
-        topK: candidates.length,
-        includeTrace: true,
-        // 生产形状见 KnowledgeBaseManager.js:1664：重数据留在 Rust（observationHandle），
-        // JS 侧只递空占位场 + 查询几何状态。
-        query: { text: queryText, vector: [] },
-        queryState: {
-          queryId,
-          sourceField: [],
-          localField: [],
-          transferField: [],
-          localDomain: { ids: [] },
-          transferDomain: { ids: [] },
-          queryRiverGraph: meta.queryRiverGraph ?? null,
-          sourceObservation: {
-            epa: meta.epa ?? {},
-            pyramid: meta.pyramid ?? {},
-            diagnostics: meta.diagnostics ?? {},
-          },
-          fieldDiagnostics: { backend: 'vexus-unified-memo-pipeline-handle' },
-        },
-        candidates,
-      }),
+    const ti = this.tagIndex
+    const activeSig = this.artifact.artifactSig
+    const raw = await this.gate(() =>
+      this.withNative(() =>
+        ti.rerankRivermemoTopologyV3(
+          this.options.store.dbPath,
+          activeSig,
+          JSON.stringify({
+            observationHandle,
+            dimension: this.options.dimension,
+            topK: candidates.length,
+            includeTrace: true,
+            // 生产形状见 KnowledgeBaseManager.js:1664：重数据留在 Rust（observationHandle），
+            // JS 侧只递空占位场 + 查询几何状态。
+            query: { text: queryText, vector: [] },
+            queryState: {
+              queryId,
+              sourceField: [],
+              localField: [],
+              transferField: [],
+              localDomain: { ids: [] },
+              transferDomain: { ids: [] },
+              queryRiverGraph: meta.queryRiverGraph ?? null,
+              sourceObservation: {
+                epa: meta.epa ?? {},
+                pyramid: meta.pyramid ?? {},
+                diagnostics: meta.diagnostics ?? {},
+              },
+              fieldDiagnostics: { backend: 'vexus-unified-memo-pipeline-handle' },
+            },
+            candidates,
+          }),
+        ),
+      ),
     )
     return parseJsonObject(raw)
   }
