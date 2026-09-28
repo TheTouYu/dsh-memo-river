@@ -4,9 +4,9 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done — 2026-09-28（commit 3a54c6f）
 
-- [ ] 同库 rebuild 双轨对账：图资产逐字段一致（nodes/edges 数完全相等；边权差 ≤1e-9；digest 拼接序一致）
-- [ ] artifactSig 一致（内容寻址，输入相同则 sig 相同）
-- [ ] 确定性属性：同库连跑 6 次 sig 逐位一致 + 跨进程 2×3 全同（probe-sig-determinism 口径移植）
-- [ ] 单元：票⑥修复的三处污染点各带一个回归测试（排序前后输出对比）
+- [x] 同库 rebuild 双轨对账：图资产逐字段一致——payload 规范化深比对（CSR weights/nodeIds/rowOffsets/targetIndices/inbound/anchorGain/wormhole/provenance 全量）5 腿 **0 分歧 0 浮点差**（1e-9 容差未动用）；nodes/edges 15/78 对上 compare.md v2 金数值表
+- [x] artifactSig 一致（内容寻址，输入相同则 sig 相同）——oracle 与候选逐位同串
+- [x] 确定性属性：同库连打 6 次 sig 逐位一致 + 跨进程 2×3 全同（probe-reimpl-sig.mjs，classroom + preset-composer 双语料）
+- [x] 单元：票⑥修复的三处污染点各带一个回归测试（HashMap 双实例构建序不敏感 / inbound 排序累加 / semantic_gain 公式数值锚点），cargo test 3/3
