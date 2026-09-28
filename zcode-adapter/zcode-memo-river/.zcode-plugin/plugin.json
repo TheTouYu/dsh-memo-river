@@ -6,7 +6,6 @@
     "name": "TheTouYu"
   },
   "license": "BSD-3-Clause",
-  "hooks": "./hooks/hooks.json",
   "mcpServers": {
     "memo-river": {
       "command": "node",
