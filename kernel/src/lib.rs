@@ -199,6 +199,38 @@ impl VexusIndex {
         })
     }
 
+    /// 批量插入向量（日记索引装载用；native.ts 无条件调用，是切换契约的硬项）。
+    #[napi]
+    pub fn add_batch(&self, ids: Vec<f64>, vectors: Float32Array) -> Result<()> {
+        let dimensions = self.dimensions as usize;
+        let slice = &vectors;
+        if slice.len() != ids.len() * dimensions {
+            return Err(Error::from_reason(format!(
+                "addBatch vector size mismatch: ids={}, expected values={}, got={}",
+                ids.len(),
+                ids.len() * dimensions,
+                slice.len()
+            )));
+        }
+        let mut index = self
+            .index
+            .write()
+            .map_err(|e| Error::from_reason(format!("addBatch lock failed: {}", e)))?;
+        for (position, id) in ids.iter().enumerate() {
+            let vector = &slice[position * dimensions..(position + 1) * dimensions];
+            if index.size() + 1 >= index.capacity() {
+                let new_cap = ((index.capacity() as f64) * 1.5).max(1024.0) as usize;
+                index
+                    .reserve(new_cap)
+                    .map_err(|e| Error::from_reason(format!("addBatch reserve failed: {:?}", e)))?;
+            }
+            index
+                .add(*id as u64, vector)
+                .map_err(|e| Error::from_reason(format!("addBatch insert failed for id {}: {:?}", id, e)))?;
+        }
+        Ok(())
+    }
+
     /// 建 Rust 侧 CSR / 图资产（票 07：与上游逐公式对齐）。
     #[napi]
     pub fn rebuild_memo_artifact(
