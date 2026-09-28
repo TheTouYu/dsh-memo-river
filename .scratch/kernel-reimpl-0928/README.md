@@ -14,6 +14,22 @@
 | 差分判据口径 | 名次完全一致 / 分数 ±1e-6 / enhancedVector 余弦 ≥0.999999 / Ω 与角色相等（PLAN §4，行为等价不追 bit-exact） |
 | 许可证 | 上游 CC BY-NC-SA：复刻物自用无碍、分发受限（与现状同） |
 
+## 一点五、进度快照（2026-09-28 深夜，自主推进段收官）
+
+| 票 | 状态 | commit |
+|---|---|---|
+| 01 立项骨架 | done | f1af6ec |
+| 02 差分对账器 | done | f1af6ec |
+| 03 逆向 topology_v3 | done | 1bbbef3 |
+| 07 复刻 artifact_builder | done | 3a54c6f |
+| 08 复刻 pipeline+sensing+索引层 | done | 821309f |
+| 09 复刻 topology_v3+dtsc（深水区） | done | d720932+6884bd8 |
+| 10 NAPI 收口 | **契约硬项已补**（addBatch，507a638）；SVD/NativeKnowledgeRuntime/save-load/dedup 为非阻断余量 | — |
+| 11 切换 | 待做——切换面已就绪，涉及生产 config，留待用户在场 | — |
+| 04/05/06 逆向补全 | 待做（纯读写作） | — |
+
+**当前差分状态**：五腿全 PASS（notImpl=0），27 查询 × 4 语料全链（rebuild→pipeline→dtsc+topo），分数最大差 1.11e-16；金数值表（compare.md v2）Topo/DTSC 双读出全复现。~6,300/13,598 行核心算法已复刻。
+
 ## 二、未解问题 → 票据
 
 | # | 问题 | 票 |
