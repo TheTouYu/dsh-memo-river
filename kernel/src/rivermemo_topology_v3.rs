@@ -6,8 +6,14 @@
 //! 并发冷查询的幂等命中语义是差分时 observableHandle 缓存行为的前提。
 
 use crate::memo_sensing::SenseOutput;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -156,7 +162,7 @@ impl MemoRuntime {
         transfer_domain_ids: Vec<i64>,
     ) -> std::result::Result<String, String> {
         let artifact_generation = self.active_generation(artifact_sig)?;
-        let sequence = self.query_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        let sequence = self.query_sequence.fetch_add(1, AtomicOrdering::AcqRel) + 1;
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|value| value.as_nanos())
@@ -261,7 +267,7 @@ impl MemoRuntime {
             }
         }
 
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let generation = self.generation.fetch_add(1, AtomicOrdering::AcqRel) + 1;
         *guard = Some((artifact_sig.to_string(), generation, artifact));
         drop(guard);
 
@@ -319,7 +325,6 @@ impl MemoRuntime {
 use flate2::read::GzDecoder;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
-use sha2::Digest;
 use std::io::Read;
 
 fn open_readonly(path: &str) -> std::result::Result<Connection, String> {

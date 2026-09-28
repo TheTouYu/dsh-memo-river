@@ -13,6 +13,7 @@ mod memo_artifact_builder;
 mod memo_pipeline;
 mod memo_sensing;
 mod rivermemo_topology_v3;
+mod topology_scoring;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -226,6 +227,22 @@ impl VexusIndex {
             input_json,
             query_vector.to_vec(),
             ghost_vectors.to_vec(),
+        )
+    }
+
+    /// RiverMemo Topology V3 读出（票 09：Ω/角色/锚奖励/压制语义）。
+    #[napi]
+    pub fn rerank_rivermemo_topology_v3(
+        &self,
+        db_path: String,
+        artifact_sig: String,
+        input_json: String,
+    ) -> AsyncTask<topology_scoring::RiverMemoTopologyV3Task> {
+        topology_scoring::rerank_with_runtime(
+            self.memo_runtime.clone(),
+            db_path,
+            artifact_sig,
+            input_json,
         )
     }
 
