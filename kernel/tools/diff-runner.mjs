@@ -109,6 +109,45 @@ const cos = (a, b) => {
   return na > 0 && nb > 0 ? d / Math.sqrt(na * nb) : 0;
 };
 
+// 规范化后的 payload 深比对：整数/字符串/布尔精确相等；浮点 |Δ|≤tol（票 07 判据 1e-9）。
+// 记录最大浮点差与首个分歧路径（可定位），分歧超过 20 条即止（防刷屏）。
+function deepCompare(a, b, tol, report, prefix = '') {
+  if (typeof a === 'number' && typeof b === 'number') {
+    const d = Math.abs(a - b);
+    if (Number.isInteger(a) && Number.isInteger(b) ? a !== b : d > tol) {
+      if (report.mismatchCount < 20) report.mismatches.push(`${prefix}: ${a} vs ${b} (Δ${d.toExponential(2)})`);
+      report.mismatchCount++;
+    }
+    report.maxFloatDiff = Math.max(report.maxFloatDiff, d);
+    return;
+  }
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) {
+      if (report.mismatchCount < 20) report.mismatches.push(`${prefix}: 数组长度 ${a.length} vs ${b.length}`);
+      report.mismatchCount++;
+      return;
+    }
+    for (let i = 0; i < a.length; i++) deepCompare(a[i], b[i], tol, report, `${prefix}[${i}]`);
+    return;
+  }
+  if (a && b && typeof a === 'object' && typeof b === 'object') {
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    for (const k of keys) {
+      if (!(k in a) || !(k in b)) {
+        if (report.mismatchCount < 20) report.mismatches.push(`${prefix}.${k}: 缺侧`);
+        report.mismatchCount++;
+        continue;
+      }
+      deepCompare(a[k], b[k], tol, report, `${prefix}.${k}`);
+    }
+    return;
+  }
+  if (a !== b) {
+    if (report.mismatchCount < 20) report.mismatches.push(`${prefix}: ${JSON.stringify(a)} vs ${JSON.stringify(b)}`);
+    report.mismatchCount++;
+  }
+}
+
 function compareRanked(name, a, b, issues) {
   if (a.length !== b.length) { issues.push(`${name}: 长度 ${a.length} vs ${b.length}`); return; }
   for (let i = 0; i < a.length; i++) {
@@ -120,24 +159,39 @@ function compareRanked(name, a, b, issues) {
 
 function compareLeg(a, b) {
   const issues = [];
-  const meta = { queries: 0, scoreMaxDiff: 0, omegaMaxDiff: 0, enhancedMinCos: Infinity };
+  const meta = { queries: 0, scoreMaxDiff: 0, omegaMaxDiff: 0, enhancedMinCos: Infinity, notImplemented: 0, payloadMaxDiff: 0, payloadMismatches: 0 };
   if (a.status !== 'ok' || b.status !== 'ok') {
     return { verdict: a.status !== 'ok' ? a.status : b.status, issues, meta: { queries: 0, scoreMaxDiff: 0, omegaMaxDiff: 0, enhancedMinCos: null }, detail: `${a.status}/${b.status}: ${a.detail || ''}${b.detail || ''}` };
   }
   if (a.artifact.artifactSig !== b.artifact.artifactSig) issues.push(`artifactSig 不一致（${a.artifact.artifactSig.slice(0, 12)}… vs ${b.artifact.artifactSig.slice(0, 12)}…）`);
+  // 图资产逐字段对账（票 07 判据）：payload 已在驱动器侧规范化排序，浮点容差 1e-9
+  if (a.artifact.payload && b.artifact.payload) {
+    const report = { maxFloatDiff: 0, mismatchCount: 0, mismatches: [] };
+    deepCompare(a.artifact.payload, b.artifact.payload, 1e-9, report, 'payload');
+    meta.payloadMaxDiff = report.maxFloatDiff;
+    meta.payloadMismatches = report.mismatchCount;
+    if (report.mismatchCount) issues.push(`payload 分歧 ${report.mismatchCount} 处，首个：${report.mismatches[0]}`);
+  } else if (a.artifact.payload !== b.artifact.payload) {
+    issues.push('payload 单侧缺失（row 回读失败？）');
+  }
   if (a.queries.length !== b.queries.length) issues.push(`查询数 ${a.queries.length} vs ${b.queries.length}`);
   for (let qi = 0; qi < Math.min(a.queries.length, b.queries.length); qi++) {
     const qa = a.queries[qi], qb = b.queries[qi], qid = qa.queryId;
     meta.queries++;
-    if (qa.error || qb.error) { issues.push(`${qid}: 轨道错误 ${qa.error || qb.error}`); continue; }
+    if (qa.error || qb.error) {
+      const err = qa.error || qb.error;
+      if (err.startsWith('not-implemented')) { meta.notImplemented++; continue; }
+      issues.push(`${qid}: 轨道错误 ${err}`);
+      continue;
+    }
     if (JSON.stringify(qa.knnOrder) !== JSON.stringify(qb.knnOrder)) issues.push(`${qid}: KNN 基线序不一致（语料副本漂移？）`);
-    if (qa.dtsc && qb.dtsc) {
+    if (qa.dtsc?.ranked && qb.dtsc?.ranked) {
       compareRanked(`${qid}/dtsc`, qa.dtsc.ranked, qb.dtsc.ranked, issues);
       for (let i = 0; i < Math.min(qa.dtsc.ranked.length, qb.dtsc.ranked.length); i++) {
         meta.scoreMaxDiff = Math.max(meta.scoreMaxDiff, Math.abs(qa.dtsc.ranked[i].score - qb.dtsc.ranked[i].score));
       }
-    }
-    if (qa.topo && qb.topo) {
+    } else if (qa.dtsc?.notImplemented || qb.dtsc?.notImplemented) meta.notImplemented++;
+    if (qa.topo?.ranked && qb.topo?.ranked) {
       compareRanked(`${qid}/topo`, qa.topo.ranked, qb.topo.ranked, issues);
       for (let i = 0; i < Math.min(qa.topo.ranked.length, qb.topo.ranked.length); i++) {
         meta.scoreMaxDiff = Math.max(meta.scoreMaxDiff, Math.abs(qa.topo.ranked[i].score - qb.topo.ranked[i].score));
@@ -149,15 +203,18 @@ function compareLeg(a, b) {
       }
       if (qa.topo.regime !== qb.topo.regime) issues.push(`${qid}: regime ${qa.topo.regime} vs ${qb.topo.regime}`);
       if (qa.topo.queryMode !== qb.topo.queryMode) issues.push(`${qid}: queryMode ${qa.topo.queryMode} vs ${qb.topo.queryMode}`);
-    }
+    } else if (qa.topo?.notImplemented || qb.topo?.notImplemented) meta.notImplemented++;
     if (qa.enhancedVector && qb.enhancedVector) {
       const c = cos(qa.enhancedVector, qb.enhancedVector);
       meta.enhancedMinCos = Math.min(meta.enhancedMinCos, c);
       if (c < TOL.enhancedCos) issues.push(`${qid}: enhancedVector 余弦 ${c.toFixed(9)} < ${TOL.enhancedCos}`);
+    } else if (!qa.error && !qb.error && (qa.enhancedVector || qb.enhancedVector)) {
+      issues.push(`${qid}: enhancedVector 单侧缺失`);
     }
   }
   if (!isFinite(meta.enhancedMinCos)) meta.enhancedMinCos = null;
-  return { verdict: issues.length ? 'FAIL' : 'PASS', issues, meta };
+  const verdict = issues.length ? 'FAIL' : (meta.notImplemented ? 'PARTIAL' : 'PASS');
+  return { verdict, issues, meta };
 }
 
 // ── 腿编排 ─────────────────────────────────────────────────────────────
@@ -210,7 +267,7 @@ async function main() {
   const verdict = selfcheck && selfcheck.verdict !== 'PASS' ? 'SELF-CHECK-FAILED'
     : legs.some((l) => l.verdict === 'FAIL') ? 'FAIL'
       : legs.some((l) => l.verdict === 'error') ? 'ERROR' : 'OK';
-  md.push('', `**总判定：${verdict}**（自校验必须 PASS；候选未实现记 SKIP 不算失败）`);
+  md.push('', `**总判定：${verdict}**（自校验必须 PASS；候选未实现记 PARTIAL/SKIP 不算失败，payload 分歧即 FAIL）`);
   fs.writeFileSync(path.join(outDir, 'summary.md'), md.join('\n') + '\n');
   fs.writeFileSync(path.join(outDir, 'legs.json'), JSON.stringify(legs, null, 2));
   console.log(`\n报告：${path.join(outDir, 'summary.md')}\n总判定：${verdict}`);

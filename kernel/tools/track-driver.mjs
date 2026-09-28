@@ -85,17 +85,25 @@ const cos = (a, b) => {
   const VexusIndex = mod.VexusIndex;
   if (typeof VexusIndex !== 'function') die('skipped', 'no VexusIndex export');
 
-  // 能力探测：候选骨架缺 memo 方法 → SKIP（票 02 允许，票 07 起逐模块点亮）
-  const needed = ['recoverFromSqlite', 'rebuildMemoArtifact', 'runMemoPipeline', 'rerankMemoDtsc', 'rerankRivermemoTopologyV3'];
-  const missing = needed.filter((m) => typeof VexusIndex.prototype[m] !== 'function' && typeof VexusIndex[m] !== 'function');
-  if (missing.length) die('skipped', `missing methods: ${missing.join(',')}`);
+  // 能力分级探测（票 07 起逐模块点亮）：rebuild 是差分地基必须存在；
+  // recover（向量索引层，票 10）与 pipeline/rerank（票 08/09）缺失按能力退化，不整体跳过。
+  const has = (m) => typeof VexusIndex.prototype[m] === 'function' || typeof VexusIndex[m] === 'function';
+  const caps = {
+    recover: has('recoverFromSqlite'),
+    rebuild: has('rebuildMemoArtifact'),
+    pipeline: has('runMemoPipeline'),
+    dtsc: has('rerankMemoDtsc'),
+    topo: has('rerankRivermemoTopologyV3'),
+  };
+  if (!caps.rebuild) die('skipped', 'missing methods: rebuildMemoArtifact');
 
   const db = new Database(DB_PATH, { readonly: true });
   // 过滤 NULL 向量行（待嵌入的遗留 chunk）：KNN 基线与候选集同口径排除
   const chunkRows = db.prepare('SELECT id, vector FROM chunks').all().filter((r) => r.vector);
   const dim = chunkRows.length ? chunkRows[0].vector.byteLength / 4 : 3072;
   const idx = new VexusIndex(dim, 512);
-  await idx.recoverFromSqlite(DB_PATH, 'tags', null);
+  if (caps.recover) await idx.recoverFromSqlite(DB_PATH, 'tags', null);
+  else console.log(`[${LABEL}] recover 不可用（票 10 前正常），跳过索引载入`);
 
   // ① 图资产
   const art = await idx.rebuildMemoArtifact(DB_PATH, JSON.stringify({ modelSig: MODEL_SIG, effectiveConfig: KBM }));
@@ -103,10 +111,39 @@ const cos = (a, b) => {
   if (!artifactSig) die('error', 'no artifactSig');
   const artifact = {
     artifactSig,
-    keys: Object.keys(art).sort(),
-    nodeCount: art.nodeCount ?? art.node_count ?? null,
-    edgeCount: art.edgeCount ?? art.edge_count ?? null,
+    sourceArtifactSig: art.sourceArtifactSig,
+    graphGeneration: art.graphGeneration,
+    databaseGeneration: art.databaseGeneration,
+    provenanceGeneration: art.provenanceGeneration,
+    nodeCount: art.nodeCount ?? null,
+    edgeCount: art.edgeCount ?? null,
   };
+
+  // artifact 行回读（票 07 判据）：payload 里 inboundMassView/anchorGainView/wormholeView/
+  // provenanceView 由 HashMap 迭代序决定排列（连 oracle 自己跨进程都不同），比对前规范化排序。
+  db.close();
+  const db2 = new Database(DB_PATH, { readonly: true });
+  const row = db2.prepare(
+    'SELECT artifact_sig, source_graph_generation, config_hash, database_generation, provenance_generation, node_count, edge_count, payload FROM rivermemo_artifacts WHERE artifact_sig = ?',
+  ).get(artifactSig);
+  db2.close();
+  let artifactPayload = null;
+  if (row && row.payload) {
+    const zlib = await import('node:zlib');
+    const parsed = JSON.parse(zlib.gunzipSync(Buffer.from(row.payload)).toString('utf8'));
+    const canon = (arr) => (Array.isArray(arr) ? [...arr].sort((a, b) => JSON.stringify(a) < JSON.stringify(b) ? -1 : 1) : arr);
+    if (parsed.inboundMassView) parsed.inboundMassView = canon(parsed.inboundMassView);
+    if (parsed.anchorGainView) parsed.anchorGainView = canon(parsed.anchorGainView);
+    if (parsed.wormholeView) parsed.wormholeView = canon(parsed.wormholeView);
+    if (parsed.provenanceView?.edges) {
+      parsed.provenanceView.edges = parsed.provenanceView.edges
+        .map(([key, contribs]) => [key, [...contribs].sort((a, b) => a[0] - b[0])])
+        .sort((a, b) => (a[0] < b[0] ? -1 : 1));
+    }
+    artifactPayload = parsed;
+  }
+  artifact.rowPresent = !!row;
+  artifact.payload = artifactPayload;
 
   // ②③ 每查询：pipeline + 双读出
   const out = { label: LABEL, status: 'ok', identity, artifact, queries: [] };
@@ -119,6 +156,7 @@ const cos = (a, b) => {
 
     const entry = { queryId: q.id, knnOrder: knn.slice(0, 12).map((c) => c.id) };
     try {
+      if (!caps.pipeline) { entry.error = 'not-implemented:pipeline'; out.queries.push(entry); continue; }
       const pipe = await idx.runMemoPipeline(
         DB_PATH, artifactSig,
         JSON.stringify({ queryId: q.id, queryText: q.text || q.id, coreTags: [], ghostTags: [], config: pipelineConfig() }),
@@ -134,17 +172,17 @@ const cos = (a, b) => {
       if (!handle) { entry.error = 'no observationHandle'; out.queries.push(entry); continue; }
       const geoState = { epa: meta.epa || {}, pyramid: meta.pyramid || {} };
 
-      const dtscRaw = await idx.rerankMemoDtsc(DB_PATH, artifactSig, JSON.stringify({
+      const dtscRaw = caps.dtsc ? await idx.rerankMemoDtsc(DB_PATH, artifactSig, JSON.stringify({
         dimension: dim, observationHandle: handle, queryGeometryState: geoState,
         topK: candidates.length, candidates, includeTrace: true,
-      }));
-      const dtsc = JSON.parse(dtscRaw);
-      entry.dtsc = {
+      })) : null;
+      const dtsc = dtscRaw ? JSON.parse(dtscRaw) : null;
+      entry.dtsc = dtsc ? {
         ranked: (dtsc.results || []).map((r) => ({ id: Number(r.chunkId ?? r.id), score: Number(r.score), role: r.role ?? null })),
         diagnostics: dtsc.diagnostics ?? null,
-      };
+      } : { notImplemented: true };
 
-      const topoRaw = await idx.rerankRivermemoTopologyV3(DB_PATH, artifactSig, JSON.stringify({
+      const topoRaw = caps.topo ? await idx.rerankRivermemoTopologyV3(DB_PATH, artifactSig, JSON.stringify({
         observationHandle: handle, dimension: dim, topK: candidates.length, includeTrace: true,
         query: { text: q.text || q.id, vector: [] },
         queryState: {
@@ -155,21 +193,20 @@ const cos = (a, b) => {
           fieldDiagnostics: { backend: 'vexus-unified-memo-pipeline-handle' },
         },
         candidates,
-      }));
-      const topo = JSON.parse(topoRaw);
-      entry.topo = {
+      })) : null;
+      const topo = topoRaw ? JSON.parse(topoRaw) : null;
+      entry.topo = topo ? {
         ranked: (topo.results || []).map((r) => ({ id: Number(r.chunkId ?? r.id), score: Number(r.score), role: r.role ?? null })),
         omega: topo.omega?.omega ?? null,
         regime: topo.omega?.regime ?? null,
         queryMode: topo.queryMode ?? null,
         diagnostics: topo.diagnostics ?? null,
-      };
+      } : { notImplemented: true };
     } catch (e) {
       entry.error = `${e.message}`;
     }
     out.queries.push(entry);
   }
-  db.close();
   fs.writeFileSync(OUT_PATH, JSON.stringify(out));
   console.log(`[${LABEL}] ok: ${out.queries.length} queries, sig=${artifactSig.slice(0, 12)}…`);
 })().catch((e) => die('error', e.message));
