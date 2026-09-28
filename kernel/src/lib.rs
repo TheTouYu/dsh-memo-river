@@ -10,6 +10,7 @@
 //! （排序或 BTreeMap 后累加），确定性是属性测试不是运气。
 
 mod memo_artifact_builder;
+mod memo_dtsc;
 mod memo_pipeline;
 mod memo_sensing;
 mod rivermemo_topology_v3;
@@ -250,5 +251,21 @@ impl VexusIndex {
     #[napi]
     pub fn clear_memo_runtime(&self) -> Result<()> {
         self.memo_runtime.clear().map_err(Error::from_reason)
+    }
+
+    /// DTSC 测地曲线读出（票 09：与 Topology V3 共享同一活动图快照）。
+    #[napi]
+    pub fn rerank_memo_dtsc(
+        &self,
+        db_path: String,
+        artifact_sig: String,
+        input_json: String,
+    ) -> AsyncTask<memo_dtsc::MemoDtscTask> {
+        memo_dtsc::rerank_with_runtime(
+            self.memo_runtime.clone(),
+            db_path,
+            artifact_sig,
+            input_json,
+        )
     }
 }
