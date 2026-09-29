@@ -41,10 +41,12 @@ export interface PatrolOptions {
 
 const PLACEHOLDER_TITLE = /^(未命名|untitled)$/i
 
-/** 从磁盘正文取标题：首个非空行若是 `# 标题` 返回之；否则 null（无标题行）。 */
-function titleOfEntry(path: string): { title: string | null; heading: boolean } {
-  try {
-    const text = readFileSync(path, 'utf8')
+/** 从磁盘正文取标题：首个非空行若是 `# 标题` 返回之；否则 null（无标题行）。
+ *  磁盘缺文件（旧工作区迁移/导入语料）时回退读**库内 chunk 首行**——2026-09-29 实锤：
+ *  81 篇旧根（6c8bcf85fe1b56e1）迁入条目盘上已无文件，但 chunk 内容首行有标题，
+ *  旧口径全部误报「无标题行」，把这一档巡检变成纯噪声。 */
+function titleOfEntry(path: string, store?: KnowledgeStore, fileId?: number): { title: string | null; heading: boolean } {
+  const parse = (text: string) => {
     for (const raw of text.split('\n')) {
       const line = raw.trim()
       if (!line) continue
@@ -53,8 +55,15 @@ function titleOfEntry(path: string): { title: string | null; heading: boolean } 
       return { title: line.slice(0, 40), heading: false } // 首个非空行不是标题
     }
     return { title: null, heading: false }
+  }
+  try {
+    return parse(readFileSync(path, 'utf8'))
   } catch {
-    return { title: null, heading: false } // 磁盘缺文件（导入语料等）：只报库内侧能报的
+    if (store && fileId !== undefined) {
+      const row = store.allRows('SELECT content FROM chunks WHERE file_id = ? LIMIT 1', fileId)[0]
+      if (row) return parse(String(row.content))
+    }
+    return { title: null, heading: false }
   }
 }
 
@@ -116,8 +125,13 @@ export function patrolBucket(
 
   /* ② 未命名/占位标题存量。 */
   for (const f of files) {
-    const { title, heading } = titleOfEntry(f.path)
-    const placeholder = !heading || (title !== null && PLACEHOLDER_TITLE.test(title)) || /-未命名/.test(basename(f.path))
+    const { title, heading } = titleOfEntry(f.path, store, f.id)
+    // 文件名 -未命名 启发式只在**拿不到真标题**时参与判定——真标题在手时文件名
+    // 不该越权（D62 实锤：讲「未命名残次品治理」的日记，文件名含“未命名”但标题真实）。
+    const placeholder =
+      !heading ||
+      (title !== null && PLACEHOLDER_TITLE.test(title)) ||
+      (title === null && /-未命名/.test(basename(f.path)))
     if (placeholder) {
       findings.push({
         kind: 'untitled',
