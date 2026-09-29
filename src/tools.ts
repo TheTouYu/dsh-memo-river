@@ -478,6 +478,15 @@ async function writeDiaryCoreLocked(
    * → 一次批量请求 [...newTags, full]，写路径预算 15s + 失败重试 1 次（尾部硬顶 ~30s）。
    * 向量三用：③ 同义漂移检查 / ④.5 内容去重与 chunk 向量 / 新 Tag 向量（原 :396 调用点整个消掉）。
    * 票 02：标题源缺失时不起嵌入（马上要 missing-title 拒绝，省一次白飞的请求）。 */
+  if (title && !workspace.embed.configured) {
+    // 2026-09-29 实锤事故：嵌入未配置的会话连写 16 篇，chunk 向量全 NULL——KNN
+    // 过滤 NULL 后这些日记从召回里**静默消失**，最宝贵的近期知识恰好隐身（D173–D195
+    // SIGBUS 全系列）。NULL 向量不是可接受的降级，必须在工具结果里喊出来。
+    healthLines.push(
+      '· ⚠️ 嵌入未配置（apiUrl/apiKey 为空，config 与 config.env 都没给）：本篇 chunk 向量将落 NULL，KNN 召回不可见——知识隐身，配置恢复后需补嵌。',
+    )
+    logger.warn(`memo_write embed-unconfigured bucket=${bucket ?? '-'} chunk-vector=null（KNN 不可见）`)
+  }
   const writeEmbed = title && workspace.embed.configured
     ? workspace.embed
         .embed([...newTags, full], WRITE_EMBED_OPTIONS)
