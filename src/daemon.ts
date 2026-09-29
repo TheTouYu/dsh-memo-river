@@ -16,6 +16,7 @@ import { precheckDrafts, SECTION_RECALLED, SECTION_SUGGESTED, type PrecheckSumma
 import { formatHealth, healthReport } from './health.js'
 import { excerpt } from './render.js'
 import type { PendingDraft } from './session.js'
+import { acquireWorkspace } from './workspace.js'
 import type { KnowledgeStore } from './store.js'
 import type { WorkspaceRuntime } from './workspace.js'
 
@@ -238,9 +239,16 @@ export class WorkspaceDaemon {
     let written = 0
     for (const { state, draft } of drafts) {
       if (state.cwd) {
-        // 只落盘属于本工作区的草稿
-        const expected = workspace.paths.cwd
-        if (expected && state.cwd !== expected) continue
+        // 只落盘属于本工作区的草稿。归属判据 = **桶 hash**（与 daemonFor 的 takeDrafts 谓词同源）：
+        // config.bucket 覆盖或 workspace.json 都会把不同 cwd 映射到同一桶，此时按 cwd 字符串相等
+        // 判归属（初版遗留的第二道门）会静默丢草稿——P3-c 实证：draft-collected 在、round drafts=0。
+        let own = false
+        try {
+          own = acquireWorkspace(state.cwd, this.options.config).paths.hash === workspace.paths.hash
+        } catch {
+          own = false
+        }
+        if (!own) continue
       }
       try {
         mkdirSync(workspace.paths.pendingDir, { recursive: true })
