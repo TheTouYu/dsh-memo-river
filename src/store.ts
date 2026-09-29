@@ -303,18 +303,28 @@ export class KnowledgeStore {
       .run(fileId, input.content, input.chunkVector ? vectorToBlob(input.chunkVector) : null)
     const chunkId = Number(chunkInfo.lastInsertRowid)
 
-    this.db.prepare('DELETE FROM file_tags WHERE file_id = ?').run(fileId)
+    // 换装前先记下本篇**被换掉的** tag（RETURNING）——GC 只回收这批里已零引用的。
+    const removedTags = this.db
+      .prepare('DELETE FROM file_tags WHERE file_id = ? RETURNING tag_id')
+      .all(fileId) as unknown as Array<{ tag_id: number }>
     input.tagIds.forEach((tagId, i) => {
       // **position 是 1-based**（VCP 约定，见参考库 file_tags：首 Tag position=1）。
       // 这一列参与原生图的 content/provenance 代际哈希，写成 0-based 会让
       // artifactSig 与生产库分叉、读出排名在近似并列处翻转（实测 A/C 两查询受影响）。
       this.db.prepare('INSERT OR IGNORE INTO file_tags (file_id, tag_id, position) VALUES (?, ?, ?)').run(fileId, tagId, i + 1)
     })
-    // 孤儿 Tag GC：本篇改写可能把某 Tag 的最后一个引用带走——零引用的 tags 行
+    // 孤儿 Tag GC（收窄 2026-09-29）：本篇改写可能把某 Tag 的最后一个引用带走——零引用的 tags 行
     // 会留在 tags 表里，被 connectedComponents（节点集=tags 全量）当成假孤岛，
     // 体检永远报「连通分量 2」（2026-09-28 实锤：memo_update 换 Tag 后 61,1）。
+    // ⚠️ 只回收**本篇换掉的** tag：全表 GC（DELETE WHERE id NOT IN 全量子查询）会误杀
+    // 「先批量 upsert、后逐篇写」调用方（import-dailynote 正是此序）里尚未落 file_tags
+    // 的同批 Tag——下一篇引用已删行，FOREIGN KEY constraint failed（setup-selftest 实锤）。
     // GC 掉的 Tag 若真回来，按新 Tag 走闸门要理由——概念回归本就该重新自证。
-    this.db.prepare('DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM file_tags)').run()
+    for (const r of removedTags) {
+      this.db
+        .prepare('DELETE FROM tags WHERE id = ? AND id NOT IN (SELECT tag_id FROM file_tags)')
+        .run(Number(r.tag_id))
+    }
     return { fileId, chunkId }
   }
 
