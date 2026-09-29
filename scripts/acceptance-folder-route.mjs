@@ -118,6 +118,8 @@ try {
   const wsA = acquireWorkspace(WS_A, config)
   const wsB = acquireWorkspace(WS_B, config)
   const hashB = workspacePaths(WS_B).hash
+  /* SIGBUS 闸适配（2026-09-29）：建桶写入的 native 异步可能仍在飞——裸 store 读前先收干两桶。 */
+  await Promise.all([wsA.withDb(async () => {}), wsB.withDb(async () => {})])
   line(`\n建桶完成：A=${wsA.paths.bucket}@${wsA.paths.hash}（${wsA.store.files().length} 篇）` +
     `  B=${wsB.paths.bucket}@${wsB.paths.hash}（${wsB.store.files().length} 篇）`)
 
@@ -213,6 +215,8 @@ try {
     folder: hashB, sources: [cloth.id, skin.id], keep: cloth.id,
     content: '# 布料模拟两篇归一：褶皱参数与蒙皮权重\n\n合并自褶皱参数调优（迭代 12/自碰撞 0.8cm/碰撞放大 1.2）与蒙皮权重修复（过渡带 2→8 帧消抖）——跨桶 merge 路由回归篇。\n\nTag: 布料模拟, 参数调优, 角色动画',
   }, execStub(WS_A)))
+  await wsB.withDb(async () => {})
+  await wsB.withDb(async () => {}) /* SIGBUS 闸适配：merge 的 native 异步收干后再读 B 桶计数 */
   const m9ok = !m9.includes('不在桶') && /合并|归一|✅/.test(m9) && countB() === b0 /* +1(FR-7) 后 2→1 合并回 b0 */
   check('FR-9', 'memo_merge{folder=哈希路由, sources=B 桶 D-id}（A 会话）→ 解析成功并归一（不报「不在桶」）', m9ok, [
     m9.split('\n')[0], `B=${countB()}（FR-7 后 ${b0 + 1}，合并 2→1 应回 ${b0}）`,

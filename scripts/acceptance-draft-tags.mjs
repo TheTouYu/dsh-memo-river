@@ -200,6 +200,8 @@ try {
     ))
     if (r.includes('✅ 已写入')) seeded += 1
   }
+  /* SIGBUS 闸适配（2026-09-29）：种子写入的 native 异步可能仍在飞——裸 store 读前先经 withDb 收干。 */
+  await wsA.withDb(async () => {})
   const filesA = wsA.store.files(BUCKET_A).length
   const tagRows = wsA.store.tags()
   line(`铺底：${seeded}/${SEEDS.length} 篇入库，库内 ${filesA} 篇 / ${tagRows.length} Tag（带向量 ${tagRows.filter((t) => t.vector).length} 个）`)
@@ -220,8 +222,9 @@ try {
     recalled: HUB_TAGS, // 召回命中全是枢纽词 ⇒ 若判定还吃召回，结果会变成枢纽
   }))
 
-  /* ── 腿① / 腿②：两轮预审（真实入口 precheckDrafts） ── */
-  const round12 = await precheckDrafts(wsA, config.write.dedupCosine)
+  /* ── 腿① / 腿②：两轮预审（真实入口 precheckDrafts；库内裸 store 读——脚本侧须经 withDb 闸，
+     守护轮路径本就在 runOnceLocked 闸内，只有脚本这条路会踩 store-busy） ── */
+  const round12 = await wsA.withDb(async () => precheckDrafts(wsA, config.write.dedupCosine))
   const st1 = readDraftStatus(hubDraftPath)
   const st2 = readDraftStatus(contentDraftPath)
   line(`\n预审汇总：ok=${round12.ok} manual=${round12.manual} discard=${round12.discard} failures=${round12.failures}`)
@@ -261,7 +264,7 @@ try {
   check('T-2b', '一键批真的可用：memo_approve 用内容判定 Tag 入库（而非召回命中的枢纽词）', approveOk, [
     `回执：${approvedLine.trim().slice(0, 130)}`,
     `入库 Tag 全为内容词、无枢纽词：${approveOk ? '✅' : '❌'}；出队：${approveOut.includes('approved/') ? '✅ approved/' : '❌'}`,
-    `库内篇数 = ${wsA.store.files(BUCKET_A).length}（种子 6 + 批准 1 = 7）`,
+    `库内篇数 = ${await wsA.withDb(async () => wsA.store.files(BUCKET_A).length)}（种子 6 + 批准 1 = 7）`,
   ])
 
   /* ── 腿③：本回合已 memo_write ⇒ 不收草稿；对照回合照收 + 落盘 ── */

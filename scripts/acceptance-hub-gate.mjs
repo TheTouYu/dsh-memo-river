@@ -125,8 +125,10 @@ const ws = acquireWorkspace(CWD, config)
 /* exec 桩：interExec=交互（无 depth、未见过的会话）；delExec=被派的孩子（depth=1）。 */
 const interExec = (sid = 'sess-interactive') => ({ agent: { session: { id: sid, header: { cwd: CWD } } } })
 const delExec = (sid = 'sess-child-1', depth = 1) => ({ agent: { session: { id: sid, header: { cwd: CWD, delegationDepth: depth } } } })
-const exec = (t, args, e = interExec()) => t.execute(args, e)
-const fileCount = () => ws.store.files(BUCKET).length
+/* SIGBUS 闸适配（2026-09-29）：execute 返回≠native 收干（embed/artifact 异步仍在飞）——
+   exec 内置 withDb 收干，后续裸 store 读不再踩 store-busy 闸。 */
+const exec = async (t, args, e = interExec()) => { const r = await t.execute(args, e); await ws.withDb(async () => {}); return r }
+const fileCount = () => ws.withDb(async () => ws.store.files(BUCKET).length)
 const logTail = () => {
   try { return readFileSync(join(paths.root, 'memo-river.log'), 'utf8') } catch { return '' }
 }
@@ -138,23 +140,23 @@ try {
     const r = String(await exec(writeTool, { content: `${s.t}\n\n种子正文：铺出枢纽频次与替代词汇池。\n\nTag: ${s.tags.join(', ')}`, newTagReason: REASON }))
     if (r.includes('✅ 已写入')) seeded += 1
   }
-  if (seeded !== SEEDS.length || fileCount() !== 6) {
-    check('H-0', '铺底：6 篇种子全部入库', false, [`seeded=${seeded} files=${fileCount()}`])
+  if (seeded !== SEEDS.length || (await fileCount()) !== 6) {
+    check('H-0', '铺底：6 篇种子全部入库', false, [`seeded=${seeded} files=${await fileCount()}`])
     process.exit(1)
   }
-  const hubCount = ws.store.files(BUCKET).filter((f) => ws.store.fileTags(f.id).some((t) => t.name === HUB)).length
+  const hubCount = await ws.withDb(async () => ws.store.files(BUCKET).filter((f) => ws.store.fileTags(f.id).some((t) => t.name === HUB)).length)
   line(`铺底：6 篇入库，「${HUB}」挂 ${hubCount}/6 = ${(hubCount / 6).toFixed(3)}（≥1/3 ✅ 已枢纽化）`)
 
   /* ── H-1 缺省档 = suggest：委托写枢纽 Tag → 放行 + 观察段 + 替代建议 + 观察日志行 ── */
   const defaultModeOk = config.write.hubGateMode === 1
-  const before1 = fileCount()
+  const before1 = await fileCount()
   const r1 = String(await exec(writeTool, {
     content: `# 子代理落盘：又写枢纽\n\n委托进行中的进展日记，Tag 踩在枢纽词上。\n\nTag: ${HUB}, 词汇B, 词汇C`,
   }, delExec()))
   const log1 = logTail()
   const altLine1 = r1.split('\n').find((l) => l.includes('替代建议')) ?? ''
   const t1 =
-    defaultModeOk && r1.includes('✅ 已写入') && fileCount() === before1 + 1 &&
+    defaultModeOk && r1.includes('✅ 已写入') && (await fileCount()) === before1 + 1 &&
     r1.includes('【hub 闸门·观察】') && r1.includes(HUB) && altLine1.includes('「') &&
     log1.includes('hub-gate-observe') && log1.includes(`tag=${HUB}`) && log1.includes('shape=delegationDepth=1')
   check('H-1', '缺省 suggest 档：委托写枢纽 Tag → 放行 + 观察段 + 替代建议 + hub-gate-observe 日志', t1, [
@@ -166,32 +168,32 @@ try {
 
   /* ── H-2 enforce 档：同一委托写 → 硬拒 + 替代建议（带频次）+ 不落库 ── */
   config.write.hubGateMode = 2
-  const before2 = fileCount()
+  const before2 = await fileCount()
   const r2 = String(await exec(writeTool, {
     content: `# 子代理再写：enforce 应拒\n\n同一委托会话的第二次写入。\n\nTag: ${HUB}, 词汇B, 词汇D`,
   }, delExec('sess-child-2')))
   const rejectLine = r2.split('\n').find((l) => l.includes('被拒绝')) ?? ''
   const advice2 = r2.split('\n').find((l) => l.includes('词汇表内替代建议')) ?? ''
   const t2 =
-    r2.includes('❌ memo_write 被拒绝：hub-tag-scoped') && fileCount() === before2 &&
+    r2.includes('❌ memo_write 被拒绝：hub-tag-scoped') && (await fileCount()) === before2 &&
     advice2.includes('「') && /\「[^」]+」×\d/.test(advice2) && !advice2.includes(`「${HUB}」`) &&
     logTail().includes('rejected=hub-tag-scoped')
   check('H-2', 'enforce 档：委托写枢纽 Tag → hub-tag-scoped 硬拒 + 词汇表内替代建议 + 不落库', t2, [
     `拒绝行：${rejectLine}`,
     `建议行（带桶内频次）：${advice2.slice(0, 100)}`,
-    `库内篇数：${fileCount()}（拒绝前后应相等 = ${before2}）`,
+    `库内篇数：${await fileCount()}（拒绝前后应相等 = ${before2}）`,
   ])
 
   /* ── H-3 交互会话现状回归：enforce 档下交互写枢纽 → 放行，仅软警告 ── */
-  const before3 = fileCount()
+  const before3 = await fileCount()
   const r3 = String(await exec(writeTool, {
     content: `# 交互会话写枢纽：现状回归\n\n人类在场的会话不受闸门约束，保持软警告。\n\nTag: ${HUB}, 词汇E, 词汇F`,
   }, interExec('sess-interactive-h3')))
   const t3 =
-    r3.includes('✅ 已写入') && fileCount() === before3 + 1 &&
+    r3.includes('✅ 已写入') && (await fileCount()) === before3 + 1 &&
     r3.includes('枢纽警告') && !r3.includes('hub-tag-scoped') && !r3.includes('【hub 闸门·观察】')
   check('H-3', '交互会话：enforce 档也只软警告（现状回归，放行）', t3, [
-    `写入：${r3.includes('✅ 已写入') ? '✅ 放行' : '❌'}（库 ${before3}→${fileCount()}）`,
+    `写入：${r3.includes('✅ 已写入') ? '✅ 放行' : '❌'}（库 ${before3}→${await fileCount()}）`,
     `软警告：${(r3.match(/⚠️ 枢纽警告[^\n]*/) ?? ['(未找到)'])[0].slice(0, 80)}`,
     `无 hub 闸门痕迹：${!r3.includes('hub-tag-scoped') && !r3.includes('【hub 闸门·观察】') ? '✅' : '❌'}`,
   ])
@@ -204,13 +206,13 @@ try {
   const interactiveSeen = stAut?.lastInjectMode === 'interactive'
   await runPreStep(h, agAut, 2, [], 3) // 同回合步 3、无新用户输入 → autonomous
   const autonomousSeen = stAut?.lastInjectMode === 'autonomous'
-  const before4 = fileCount()
+  const before4 = await fileCount()
   const r4 = String(await exec(writeTool, {
     content: `# 自主态写枢纽：应拒\n\noneshot 长回合无新用户输入的写入。\n\nTag: ${HUB}, 词汇G, 词汇H`,
   }, interExec(AUT))) // depth=0、闩锁 false——只靠 injectMode=autonomous 命中
   const t4 =
     interactiveSeen && autonomousSeen &&
-    r4.includes('❌ memo_write 被拒绝：hub-tag-scoped') && fileCount() === before4 &&
+    r4.includes('❌ memo_write 被拒绝：hub-tag-scoped') && (await fileCount()) === before4 &&
     r4.includes('injectMode=autonomous')
   check('H-4', 'autonomous 信号全链路：pre-step 落 lastInjectMode → 写侧 enforce 拒（shape=injectMode=autonomous）', t4, [
     `pre-step step=1（新输入）→ ${interactiveSeen ? "interactive ✅" : `❌ ${stAut?.lastInjectMode}`}`,
@@ -223,13 +225,13 @@ try {
   const setOut0 = String(await exec(tuningTool, { action: 'set', scope: 'preset', hubGateMode: 0 }, interExec('sess-tune')))
   const file0 = JSON.parse(readFileSync(tuningFile, 'utf8'))
   const offActive = config.write.hubGateMode === 0
-  const before5 = fileCount()
+  const before5 = await fileCount()
   const r5 = String(await exec(writeTool, {
     content: `# off 档委托写：回软警告\n\n档位归零后场景内也只软警告。\n\nTag: ${HUB}, 词汇I, 词汇J`,
   }, delExec('sess-child-5')))
   const t5 =
     setOut0.includes('hubGateMode') && file0.hubGateMode === 0 && offActive &&
-    r5.includes('✅ 已写入') && fileCount() === before5 + 1 && r5.includes('枢纽警告') && !r5.includes('【hub 闸门·观察】')
+    r5.includes('✅ 已写入') && (await fileCount()) === before5 + 1 && r5.includes('枢纽警告') && !r5.includes('【hub 闸门·观察】')
   const getOut5 = String(await exec(tuningTool, { action: 'get' }, interExec('sess-tune')))
   check('H-5', 'preset 级开关可控：memo_tuning set 落盘 tuning.json + 即时生效（0=off 场景内回软警告）', t5 && getOut5.includes('hubGateMode'), [
     `set 回执：${setOut0.replace(/\n/g, ' ').slice(0, 90)}`,
@@ -278,18 +280,18 @@ try {
     '## 相关旧日记', '(无)', '',
     '> 本文件是**草稿**：确认后用 memo_write 显式入库（会走 Tag 校验与枢纽闸门）。',
   ].join('\n'), 'utf8')
-  const before7 = fileCount()
+  const before7 = await fileCount()
   const hubFilesBefore7 = ws.store.files(BUCKET).filter((f) => ws.store.fileTags(f.id).some((t) => t.name === HUB)).length
   const r7 = String(await exec(approveTool, { ids: ['机械批准样本'] }, delExec('sess-child-approve')))
   const skipLine7 = r7.split('\n').find((l) => l.includes('⏭') || l.includes('❌')) ?? ''
   const hubFilesAfter7 = ws.store.files(BUCKET).filter((f) => ws.store.fileTags(f.id).some((t) => t.name === HUB)).length
   const t7 =
-    !r7.includes('hub-tag-scoped') && fileCount() === before7 && hubFilesAfter7 === hubFilesBefore7 &&
+    !r7.includes('hub-tag-scoped') && (await fileCount()) === before7 && hubFilesAfter7 === hubFilesBefore7 &&
     existsSync(draftPath) && skipLine7.includes('内容 Tag 命中')
   check('H-7', '票02 后：批准入口不再能把枢纽 Tag 写进库（内容判定剔枢纽 ⇒ 库内零新增枢纽篇）', t7, [
     `批凖回执：${skipLine7.slice(0, 130)}`,
     `hub 闸门未触发（hub-tag-scoped 缺席）：${!r7.includes('hub-tag-scoped') ? '✅' : '❌'}`,
-    `库内篇数不变：${fileCount() === before7 ? '✅' : `❌ ${before7}→${fileCount()}`}；带「${HUB}」的篇 ${hubFilesBefore7}→${hubFilesAfter7}（应不变）；草稿留 pending：${existsSync(draftPath) ? '✅' : '❌'}`,
+    `库内篇数不变：${fileCount() === before7 ? '✅' : `❌ ${before7}→${await fileCount()}`}；带「${HUB}」的篇 ${hubFilesBefore7}→${hubFilesAfter7}（应不变）；草稿留 pending：${existsSync(draftPath) ? '✅' : '❌'}`,
   ])
 
   /* ── H-8 memo_merge 豁免：委托 enforce 档合并两篇枢纽日记 → 放行 ── */

@@ -75,7 +75,8 @@ if (!writeTool || !updateTool) {
   process.exit(2)
 }
 const ws = acquireWorkspace(CWD, config)
-const exec = (t, args) => t.execute(args, execStub(CWD))
+/* SIGBUS 闸适配（2026-09-29）：execute 返回≠native 收干——exec 内置 withDb 收干，后续裸 store 读安全。 */
+const exec = async (t, args) => { const r = await t.execute(args, execStub(CWD)); await ws.withDb(async () => {}); return r }
 const fileCount = () => ws.store.files(BUCKET).length
 const chunkOf = (fileId) => ws.store.chunks(BUCKET).find((c) => c.file_id === fileId)
 const headOf = (c) => (String(c?.content ?? '').split('\n')[0] ?? '')

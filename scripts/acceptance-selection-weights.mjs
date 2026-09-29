@@ -405,7 +405,7 @@ hr('票04-⑥ 集成：config→recallOptions→recall 全链路（台账曝光�
 
   /* 记账 passive 后再注：曝光惩罚在真实读出链路生效（轮换本身由 #56 确定性证明——
      7 篇桶分差大，惩罚 0.037 翻不动宽差距是「有界、不推翻主排序」的设计语义） */
-  recordUsage(ws.store, r1.selected.map((c) => c.fileId), 'passive')
+  await ws.withDb(async () => { recordUsage(ws.store, r1.selected.map((c) => c.fileId), 'passive') }) /* SIGBUS 闸适配：裸 store 写也走串行闸 */
   const r2 = await recallWith('sw-2', { selectionWeights: W() })
   const penalized = r2.diagnostics.selectionWeights?.exposurePenalized ?? 0
   const rotated = JSON.stringify(r2.selected.map((c) => c.id)) !== JSON.stringify(r1.selected.map((c) => c.id))
