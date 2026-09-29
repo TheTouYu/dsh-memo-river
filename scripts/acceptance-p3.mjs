@@ -85,9 +85,10 @@ apply(h.ctx, config)
 hr('P3-a 守护循环被 timer 拉起')
 const guardInterval = h.intervals.find((i) => i.ms === config.intervalMs)
 {
-  // 触发一次 session-start，让工作区与守护循环就位
+  // 触发一次握手，让工作区与守护循环就位。0.1.7-rc.2 起 'agent/session-start' 已并入
+  // 'agent/created'（src/index.ts:357 两处监听合一）——fire 旧名=打空靶（P3-c 红的根因，2026-09-29）。
   const agent = { session: { id: 'sess-p3', header: { cwd: WS }, deriveMessages: () => [] } }
-  await fire(h, 'agent/session-start', { agent })
+  await fire(h, 'agent/created', { agent })
   const ws = acquireWorkspace(WS, config)
   const logs = []
   const off = ws.logger.onLine((l) => logs.push(l))
@@ -159,11 +160,13 @@ hr('P3-c 回合草稿落盘 pending/，且**不自动入库**')
   ]
   // 真实 seam 读的是 agent.session.deriveMessages()（src/index.ts:171），不是 payload.messages
   const agent = { session: { id: 'sess-p3-draft', header: { cwd: WS }, deriveMessages: () => turns } }
-  await fire(h, 'agent/session-start', { agent })
+  // 0.1.7-rc.2：握手事件名 = 'agent/created'（旧名已并入，fire 旧名=空靶）
+  await fire(h, 'agent/created', { agent })
   await fire(h, 'agent/turn-stopping', { agent, turn: 42 })
 
-  // 走**插件真实注册的 timer 回调**驱动守护：每个工作区一个 daemon，各自只认领自己桶的草稿。
-  // apply() 启动时已为 process.cwd() 建了一个 daemon，故这里有 2 个 interval —— 正是隔离性的现场。
+  // 走**插件真实注册的 timer 回调**驱动守护。注意：config.bucket=教室建模写入测试 覆盖下，
+  // process.cwd() 与本测试工作区映射**同一桶同 hash**（daemonFor 按 hash 去重）——所以只有
+  // 1 个 interval，恰好是「同桶不同 cwd 也必须认领草稿」的现场（2026-09-29 flushDrafts 修复的回归面）。
   for (const gi of h.intervals) await gi.fn()
   await new Promise((r) => setTimeout(r, 500))
 
@@ -206,6 +209,9 @@ hr('P3-d 连续失败指数退避（§8 ④）')
       ensureLoaded: async () => {
         throw new Error('simulated native/DB outage')
       },
+      // 原型方法不随 spread 存活；daemon.runOnce 持工作区串行闸（SIGBUS 修复）须经此进入——
+      // 桩里给直通实现（退避测试不关心串行语义）
+      withDb: (fn) => fn(),
       paths: ws.paths,
       store: ws.store,
       engine: ws.engine,
