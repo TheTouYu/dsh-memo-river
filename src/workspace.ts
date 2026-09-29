@@ -74,6 +74,7 @@ export class WorkspaceRuntime {
     })
     this.engine = new MemoEngine({
       vcpRoot: config.native.vcpRoot,
+      kernel: config.native.kernel,
       dimension: resolved.dimension,
       modelSig: `${resolved.model}${config.native.modelSigSuffix}`,
       diaryName: paths.bucket,

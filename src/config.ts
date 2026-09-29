@@ -122,6 +122,8 @@ export interface InjectConfig {
 export interface NativeConfig {
   /** VCPToolBox 根目录（rust-vexus-lite 与 rag_params.json 所在处）。 */
   vcpRoot: string
+  /** 票11 内核切换：'vcp' = 上游 rust-vexus-lite（缺省）；'reimpl' = 本仓 kernel/ 复刻（行为等价，差分判据 PLAN §4）。 */
+  kernel: string
   /** 显式指定 config.env（取 API_URL / API_Key / VECTORDB_DIMENSION）。 */
   configEnv: string
   /** 原生 artifact 的 modelSig 后缀（VCP 约定 `${model}@relayrouter`）。 */
@@ -312,6 +314,9 @@ export const Config: z<Config> = z.object({
   native: z
     .object({
       vcpRoot: z.string().default('/home/h/app/VCPToolBox'),
+      /* 票11 切换开关（2026-09-29 落地）：'vcp'（上游二进制，缺省）| 'reimpl'（kernel/ 复刻）。
+       * env MEMO_NATIVE_KERNEL 只作缺省种子——验收/运维一键换轨；组合里的显式配置永远优先。 */
+      kernel: z.string().default(process.env.MEMO_NATIVE_KERNEL ?? 'vcp'),
       configEnv: z.string().default(''),
       modelSigSuffix: z.string().default('@relayrouter'),
     })

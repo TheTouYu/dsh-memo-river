@@ -12,6 +12,7 @@
 import { createRequire } from 'node:module'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { KnowledgeStore } from './store.js'
 
 /* ────────────── 原生绑定形状（照 rust-vexus-lite/index.d.ts） ────────────── */
@@ -88,9 +89,18 @@ export interface NativeVexusModule {
 
 const requireFromHere = createRequire(import.meta.url)
 
-/** 加载 rust-vexus-lite（N-API，Node 26 实测可加载）。 */
-export function loadVexus(vcpRoot: string): NativeVexusModule {
-  const entry = join(vcpRoot, 'rust-vexus-lite')
+/** 加载原生内核——票11 切换面单点（kernel='vcp'：上游 rust-vexus-lite；'reimpl'：本仓 kernel/ 复刻）。 */
+export function loadVexus(vcpRoot: string, kernel: string = 'vcp'): NativeVexusModule {
+  let entry: string
+  if (kernel === 'reimpl') {
+    /* kernel/ 在插件根（src|lib 的上一级）；index.js 自带平台候选与装载报错。
+     * 与上游同形：CJS require，契约校验同一道（VexusIndex 可构造）。 */
+    entry = fileURLToPath(new URL('../kernel/index.js', import.meta.url))
+  } else if (kernel === 'vcp') {
+    entry = join(vcpRoot, 'rust-vexus-lite')
+  } else {
+    throw new Error(`native.kernel 未知取值 "${kernel}"（合法：vcp | reimpl）——拒绝静默回退`)
+  }
   const mod = requireFromHere(entry) as NativeVexusModule
   if (typeof mod?.VexusIndex !== 'function') throw new Error(`vexus-lite 未导出 VexusIndex: ${entry}`)
   return mod
@@ -152,6 +162,8 @@ export function pipelineConfig(kbm: Record<string, unknown>): Record<string, unk
 
 export interface MemoEngineOptions {
   vcpRoot: string
+  /** 票11：'vcp'（缺省，上游）| 'reimpl'（kernel/ 复刻）。透传 loadVexus。 */
+  kernel?: string
   dimension: number
   modelSig: string
   diaryName: string
@@ -266,7 +278,7 @@ export class MemoEngine {
   /** load 的无闸变体——供已在 engine 临界区（runExclusive 体）内的调用方使用。
    *  死锁纪律：持 Q2（engine 队列）时拿 Q1（工作区闸）会与「持 Q1 等 Q2」互喂死锁。 */
   async loadLocked(): Promise<void> {
-    const mod = loadVexus(this.options.vcpRoot)
+    const mod = loadVexus(this.options.vcpRoot, this.options.kernel)
     const dim = this.options.dimension
     const store = this.options.store
 
