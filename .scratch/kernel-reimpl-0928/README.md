@@ -25,10 +25,15 @@
 | 08 复刻 pipeline+sensing+索引层 | done | 821309f |
 | 09 复刻 topology_v3+dtsc（深水区） | done | d720932+6884bd8 |
 | 10 NAPI 收口 | **契约硬项已补**（addBatch，507a638）；SVD/NativeKnowledgeRuntime/save-load/dedup 为非阻断余量 | — |
-| 11 切换 | 待做——切换面已就绪，涉及生产 config，留待用户在场 | — |
+| 11 切换 | **done（2026-09-29，用户在场）**——`config.native.kernel` 开关落地：缺省 'vcp' 零扰动；'reimpl' 一键换轨（env MEMO_NATIVE_KERNEL 可作缺省种子）；双轨验证 reimpl 37/37+4/4 / 缺省 37/37；非法值显式拒退 | 8ac0…（见 git log feat(票11)） |
 | 04/05/06 逆向补全 | 待做（纯读写作） | — |
 
 **当前差分状态**：五腿全 PASS（notImpl=0），27 查询 × 4 语料全链（rebuild→pipeline→dtsc+topo），分数最大差 1.11e-16；金数值表（compare.md v2）Topo/DTSC 双读出全复现。~6,300/13,598 行核心算法已复刻。
+
+**2026-09-29 切换前基准验证（用户在场）**：①差分五腿在 HEAD 90583d1 复跑 PASS（报告 kernel/tools/diff-report/2026-09-29-02-30-/summary.md）；②acceptance.mjs 37/37 三连绿；③acceptance-p3.mjs 修两处测试侧漂移（fire 改 agent/created + withDb 桩）后 4/4 两连绿；④~10 次原生加载零 SIGBUS。提交 e0f6be0（flushDrafts 归属判据桶 hash 统一）+ b0f54f4（p3 适配）。构建注意：全机 node_modules/.bin shim 被 0 字节清空，可用 tsc 借道 genshin-ts（TS 5.9.3 完整）——/tmp/tsbin/tsc wrapper。
+
+**2026-09-29 生产切换（用户拍板）+ 观测基线（真实数据）**：drop-in `~/.config/systemd/user/dsh-web.service.d/kernel-reimpl.conf`（env MEMO_NATIVE_KERNEL=reimpl）→ PID 798→9226，maps 证实 memo-kernel.node 在役、无 rust-vexus。**vcp 时代基线（桶 8acc4f5a492532e5=dsh-plugins，health.log round 3-5 @03:51-04:21）**：components=1｜hub=环境迁移:3/14｜omegaMean=0.607→0.616（omegaN=19）｜uncovered=0/14｜used=14/14｜topUsed=D2×13｜warnings=0。**复刻轨首批实测**：memo_stats 四项全绿 artifact 重建 25ms（20 节点/80 边）；memo_recall pipelineElapsedMs=3（loadMs 3.2/computeMs 0.8，backend=rust-rayon-sqlite，rayon×16）。**观察口径（每周对照 health.log round≥6 起）**：omegaMean 漂移 <±0.05、warnings 恒 0、uncovered 不回升、守护轮 elapsedMs 无恶化、plugin.log 无 warn/error 涌现、零 SIGBUS。回滚=rm drop-in+restart。
+**测试债（vcp 同红，与内核无关，10 项）**：hub-gate/merge/selection-weights/title-gate/draft-tags/folder-route（store-busy 签名：脚本裸调 store 未过 withDb 闸）+ update/draft-scope（null 读）+ usage（4/6）+ consolidation（exit2）——修法=裸 store 调用包 `ws.withDb(async () => …)` 或改 *Locked 变体，属修复串后续清理，非阻断生产。
 
 ## 二、未解问题 → 票据
 
