@@ -12,6 +12,7 @@
  *
  * 用法：node scripts/acceptance-write-prompts.mjs（自建自净 /tmp 工作区）
  */
+import './isolated-env.mjs' // DSH_HOME 隔离：自建自净，不碰生产桶（见 scripts/isolated-env.mjs）
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'

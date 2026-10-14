@@ -13,6 +13,7 @@
  *
  * 用法：node scripts/acceptance-patrol.mjs（自建自净 /tmp 工作区；向量直接种进 store，嵌入离线）
  */
+import './isolated-env.mjs' // DSH_HOME 隔离：自建自净，不碰生产桶（见 scripts/isolated-env.mjs）
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'

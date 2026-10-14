@@ -15,6 +15,7 @@
  * 用法：node scripts/acceptance-adaptivek.mjs（自建自净 /tmp 桶；嵌入桩 = sha256 伪正交向量，
  * 与 #36 同款——写侧与召回共用同一 embed 实例，直调 ws.recall 免真实端点）。
  */
+import './isolated-env.mjs' // DSH_HOME 隔离：自建自净，不碰生产桶（见 scripts/isolated-env.mjs）
 import { createHash } from 'node:crypto'
 import { mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'

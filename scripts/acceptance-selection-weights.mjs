@@ -18,6 +18,7 @@
  * 用法：node scripts/acceptance-selection-weights.mjs（自建自净 /tmp 桶；嵌入桩与 #36/#51 同款）。
  * 编号承接 acceptance-adaptivek.mjs（#51-54），本套件 #55-60。
  */
+import './isolated-env.mjs' // DSH_HOME 隔离：自建自净，不碰生产桶（见 scripts/isolated-env.mjs）
 import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
