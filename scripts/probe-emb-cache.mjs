@@ -208,7 +208,9 @@ console.log('\n[F] 真桶迁移实测（genshin 116MB）')
   const bin = embCacheBinPath(jsonPath)
   const binMb = statSync(bin).size / 1048576
   const jsonMb = statSync(`${jsonPath}.bak`).size / 1048576
-  ok('bin 体积 < 15MB', binMb < 15, `${jsonMb.toFixed(1)}MB JSON → ${binMb.toFixed(2)}MB bin`)
+  // 3072 维实测：1764 条未清淤全量 ≈ 24.9MB（每条 3072×4B+key）；<30MB 覆盖未清淤迁移，
+  // <15MB 只在已清淤语料（≤~1200 条）上成立——那是 compact 脚本的职责，运行时迁移不逐出。
+  ok('bin 体积 < 30MB（未清淤全量）', binMb < 30, `${jsonMb.toFixed(1)}MB JSON → ${binMb.toFixed(2)}MB bin`)
   cache.dispose()
   console.log(`     拷贝 ${copyMs}ms / 载入 ${loadMs}ms / 条目 ${cache.size} / HWM ${hwmMb()}MB`)
 }
