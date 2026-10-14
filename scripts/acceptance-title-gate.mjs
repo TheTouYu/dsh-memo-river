@@ -14,12 +14,15 @@
  *
  * 用法：node scripts/acceptance-title-gate.mjs（自建自净 /tmp 工作区，无需 setup-selftest）
  */
+import { ensureSelftestFixtures } from './isolated-env.mjs' // DSH_HOME 隔离：自建自净，不碰生产桶
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { apply, Config as ConfigSchema } from '../lib/index.js'
 import { acquireWorkspace } from '../lib/workspace.js'
 import { workspacePaths } from '../lib/runtime.js'
+
+await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；三库齐了即刻返回）
 
 const ROOT = new URL('..', import.meta.url).pathname
 const CWD = join(tmpdir(), `memo-river-title-${process.pid}`)

@@ -14,31 +14,85 @@
  * 调用时懒读的（`runtime.ts:14` 在函数体内），所以文本顺序上「helper 在前」已足够安全。
  *
  * 环境变量：
+ *   · `MEMO_ACC_HOME=<dir>` —— **持久隔离柜**：复用同一隔离 home（不删），首轮铺台只花一次
+ *   · `MEMO_ACC_FIXTURE_MODE=stub` —— 铺台用 hash 桩（~2s，语义用例会红，仅调试）
  *   · `MEMO_ACC_KEEP=1`        —— 跑完不删临时根（取证用，路径会打到 stderr）
  *   · `MEMO_ACC_TMP_ROOT=<dir>`—— 换临时根的父目录（缺省 `$TMPDIR` 或 `/var/tmp`）
  *   · `MEMO_ACC_NO_ISOLATE=1`  —— 明确要求不隔离（**故意**对真桶干活的运维件才用；
  *                                 测试套件不要设它，那正是本次要消灭的行为）
  */
-import { mkdtempSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 
 const PARENT = process.env.MEMO_ACC_TMP_ROOT || process.env.TMPDIR || tmpdir() || '/var/tmp'
 const KEEP = process.env.MEMO_ACC_KEEP === '1'
 const NO_ISOLATE = process.env.MEMO_ACC_NO_ISOLATE === '1'
+/** 持久隔离柜（复用）：给了就用它当隔离根，且**退出不删**（首轮铺台只花一次）。 */
+const PERSIST = process.env.MEMO_ACC_HOME && !NO_ISOLATE ? process.env.MEMO_ACC_HOME : null
+
+/** 仓库根（scripts/ 的上一级）——铺台时定位 `scripts/setup-selftest.mjs`。 */
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** 临时根（保持导出，便于套件自己打印/断言）。 */
-export const ISOLATED_ROOT = NO_ISOLATE ? null : mkdtempSync(join(PARENT, 'memo-river-acc-'))
+export const ISOLATED_ROOT = NO_ISOLATE
+  ? null
+  : PERSIST
+    ? (mkdirSync(PERSIST, { recursive: true }), PERSIST)
+    : mkdtempSync(join(PARENT, 'memo-river-acc-'))
 
 if (ISOLATED_ROOT) {
   process.env.DSH_HOME = join(ISOLATED_ROOT, 'dsh-home')
   process.env.MEMO_ACC_ISOLATED = '1'
 }
 
+/**
+ * 在**隔离 home 里**自铺 `.selftest/教室建模{归档,孤岛,写入测试}` 三夹具（幂等，三库齐了即返回）。
+ *
+ * 为什么需要它：主套件（acceptance.mjs 等 8 个）跑前有**环境自检**，要求这三个夹具的库存在；
+ * 不铺台就隔离 = 自检必红（EXIT=2）。铺台走官方 `scripts/setup-selftest.mjs`，但**必须真向量**
+ * （`REAL_EMBED=1`）——缺省它用本地 hash 桩，随机向量下 gate 分数无意义，语义敏感用例成片红
+ * （实测 25/37）。真向量走 api.relayrouter.ai（代理见 AGENTS.md），约 30~60s，故只在该 home 空缺时跑。
+ *
+ * @returns 本次是否真跑了铺台
+ */
+export async function ensureSelftestFixtures() {
+  if (!ISOLATED_ROOT) return false
+  const { workspacePaths } = await import('../lib/runtime.js')
+  const fixtures = [
+    ['教室建模归档', '教室建模归档'],
+    ['教室建模孤岛', '教室建模孤岛'],
+    ['教室建模写入测试', '教室建模写入测试'],
+  ]
+  const missingOf = () =>
+    fixtures.filter(([dir, bucket]) => !existsSync(workspacePaths(join(REPO_ROOT, '.selftest', dir), bucket).dbPath))
+  const missing = missingOf()
+  if (missing.length === 0) return false
+  const stub = process.env.MEMO_ACC_FIXTURE_MODE === 'stub'
+  process.stderr.write(
+    `[isolated-env] 隔离柜缺 ${missing.length} 个夹具（${missing.map(([d]) => d).join('/')}）→ 在 ${ISOLATED_ROOT} 内铺台` +
+      `（${stub ? 'hash 桩：语义敏感用例会红' : 'REAL_EMBED=1 真向量，约 30~60s'}）…\n`,
+  )
+  const t0 = Date.now()
+  const { spawnSync } = await import('node:child_process')
+  const res = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts', 'setup-selftest.mjs')], {
+    cwd: REPO_ROOT,
+    stdio: 'inherit',
+    env: { ...process.env, DSH_HOME: process.env.DSH_HOME, REAL_EMBED: stub ? '0' : '1' },
+  })
+  const left = missingOf()
+  process.stderr.write(
+    `[isolated-env] 铺台结束 rc=${res.status} 用时 ${((Date.now() - t0) / 1000).toFixed(1)}s` +
+      `，仍缺 ${left.length} 个${left.length ? `（${left.map(([d]) => d).join('/')}）` : ' ✅'}\n`,
+  )
+  return true
+}
+
 let cleaned = false
 /** 清理隔离根（幂等）。不隔离时是空操作。 */
 export function cleanupIsolatedEnv() {
-  if (!ISOLATED_ROOT || cleaned) return
+  if (!ISOLATED_ROOT || cleaned || PERSIST) return
   cleaned = true
   if (KEEP) {
     process.stderr.write(`[isolated-env] MEMO_ACC_KEEP=1，保留 ${ISOLATED_ROOT}\n`)

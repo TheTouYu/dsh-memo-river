@@ -13,12 +13,15 @@
  * 用法：node scripts/acceptance-usage.mjs
  * 前置：node scripts/setup-selftest.mjs（写入测试桶 = 河流语料副本）；嵌入走真实 API。
  */
+import { ensureSelftestFixtures } from './isolated-env.mjs' // DSH_HOME 隔离：自建自净，不碰生产桶
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { apply, Config as ConfigSchema } from '../lib/index.js'
 import { acquireWorkspace } from '../lib/workspace.js'
 import { workspacePaths } from '../lib/runtime.js'
 import { healthReport, formatHealth, readUsageLedger } from '../lib/health.js'
+
+await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；三库齐了即刻返回）
 
 const ROOT = new URL('..', import.meta.url).pathname
 const VCP = '/home/h/app/VCPToolBox'

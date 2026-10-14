@@ -12,6 +12,7 @@
  *
  * 用法：node scripts/setup-selftest.mjs && node scripts/acceptance-update.mjs
  */
+import { ensureSelftestFixtures } from './isolated-env.mjs' // DSH_HOME 隔离：自建自净，不碰生产桶
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { apply, Config as ConfigSchema } from '../lib/index.js'
@@ -123,6 +124,8 @@ const today = new Date().toISOString().slice(0, 10)
 
 /* ── A-1 原地改写 ── */
 import { createHash } from 'node:crypto'
+
+await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；三库齐了即刻返回）
 const diskGuard = createHash('sha256').update(readFileSync(target.path, 'utf8')).digest('hex')
 const r1 = String(await updateTool.execute({ id: target.id, content: newContent, date: today }, execStub(WS)))
 const files1 = ws.store.files(BUCKET)

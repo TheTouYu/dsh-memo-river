@@ -10,6 +10,7 @@
  *
  * 用法：node scripts/acceptance.mjs
  */
+import { ensureSelftestFixtures } from './isolated-env.mjs' // DSH_HOME 隔离：自建自净，不碰生产桶
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
@@ -22,6 +23,8 @@ import { EmbedClient, cosine } from '../lib/embed.js'
 import { buildQueryField } from '../lib/recall.js'
 import { peekSession } from '../lib/session.js'
 import { BLOCK_CLOSE, BLOCK_OPEN } from '../lib/render.js'
+
+await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；三库齐了即刻返回）
 
 const ROOT = new URL('..', import.meta.url).pathname
 const VCP = '/home/h/app/VCPToolBox'

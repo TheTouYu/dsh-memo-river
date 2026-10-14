@@ -30,8 +30,9 @@
   - `scripts/compact-emb-cache.mjs`：清淤 + 落二进制。孤儿判据 = 不命中 `chunks.content ∪ tags.name`（一次性 query 键永远不该常驻）。**先跑脚本再重启**，否则大桶首次加载仍要整读一遍旧 JSON；脚本自带 `.precompact-<ts>` 留证、库读不动则跳过该桶。
   - `scripts/probe-emb-cache.mjs`（49 项单测：迁移/追加/逐出/截断自愈/无头自愈/落盘前验头/跳闸/exit 兜底）、`scripts/probe-emb-cache-mem.mjs`（真 `writeDiaryCore` 的内存验收台，`PROBE_LIB` 支持拿修复前的 lib 做负对照）。
 - **套件卫生：DSH_HOME 隔离与空壳桶**（2026-10-14 整改）。每个工作目录对应 `$DSH_HOME/memo-river/<sha256(cwd) 前 16 位>/` 一个桶；套件把 cwd 放 tmpdir 却没设 `DSH_HOME` 时，就在**生产柜子**里留下永久空壳桶（无 `knowledge_base.sqlite`、无 `dailynote`）。实测 288 桶里 186 个是空壳，其中 35 个正是最近 2 小时 5 次验收跑出来的——字节只有 0.05MB，但**污染取证现场**（追查无头 `emb-cache.bin` 时最早的 8 个可疑文件全躺在这种假桶里，误导半小时）。
-  - 已隔离（`import './isolated-env.mjs'`，自建自净，`MEMO_ACC_KEEP=1` 可留证）：`acceptance-adaptivek/patrol/selection-weights/write-prompts` + 既有 6 个（corpus/draft-scope/draft-tags/folder-route/hub-gate/shared-routes）+ `probe-emb-cache-mem`。
-  - **8 个不能隔离**：`acceptance.mjs`、`-consolidation/-merge/-p3/-tiebreaker/-title-gate/-update/-usage`——它们依赖 `setup-selftest.mjs` 预铺的 `.selftest/教室建模{归档,孤岛,写入测试}` 三个夹具（隔离后环境自检必红，实测 EXIT=2）。夹具不齐时先跑 `node scripts/setup-selftest.mjs` 一键铺台。
-  - 空壳清理：`node scripts/clean-junk-buckets.mjs`（缺省 dry-run；`--apply` 真删；判据 = 无库 + 无 dailynote + mtime 早于 `--min-age`，缺省 30 分钟）。
+  - **全部测试套件已隔离**（`import './isolated-env.mjs'`，自建自净）：4 个自带夹具的（adaptivek/patrol/selection-weights/write-prompts）+ 既有 6 个（corpus/draft-scope/draft-tags/folder-route/hub-gate/shared-routes）+ **8 个依赖 `.selftest` 夹具的**（`acceptance.mjs`、-consolidation/-merge/-p3/-tiebreaker/-title-gate/-update/-usage）。
+  - 那 8 个在主套件体内多一行 **`await ensureSelftestFixtures()`**：发现隔离柜里缺 `.selftest/教室建模{归档,孤岛,写入测试}` 三夹具时，用 `scripts/setup-selftest.mjs` 在**隔离柜内**自铺（幂等；三库齐了即刻返回）。⚠️ **铺台必须真向量**：`setup-selftest.mjs` 缺省用本地 hash 桩，随机向量下 gate 分数无意义，主套件会掉到 25/37——helper 已强制 `REAL_EMBED=1`（约 30~60s，仅首轮付一次）。
+  - 想复用隔离柜省钱：`MEMO_ACC_HOME=/var/tmp/memo-acc-home`（持久、退出不删、下轮免铺台）；`MEMO_ACC_KEEP=1` 留临时根取证；`MEMO_ACC_FIXTURE_MODE=stub` 用桩铺台（仅调试，语义用例会红）。
+  - 空壳清理：`node scripts/clean-junk-buckets.mjs`（缺省 dry-run；`--apply` 真删；判据 = 无库 + 无 dailynote + mtime 早于 `--min-age`，缺省 30 分钟）。历史上跑出来的空壳已清（204 个，柜子 321 → 118 桶）。
   - `import-dailynote.mjs` / `reimport-orphans.mjs` 是**故意**对真桶干活的运维件，**不要**给它们加隔离。
 

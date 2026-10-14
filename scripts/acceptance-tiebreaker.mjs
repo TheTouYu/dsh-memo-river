@@ -11,6 +11,7 @@
  *
  * 用法：node scripts/setup-selftest.mjs && node scripts/acceptance-tiebreaker.mjs
  */
+import { ensureSelftestFixtures } from './isolated-env.mjs' // DSH_HOME 隔离：自建自净，不碰生产桶
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -19,6 +20,8 @@ import { acquireWorkspace } from '../lib/workspace.js'
 import { workspacePaths } from '../lib/runtime.js'
 import { applyUsageTieBreaker } from '../lib/tiebreaker.js'
 import { readUsageLedger } from '../lib/health.js'
+
+await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；三库齐了即刻返回）
 
 const ROOT = new URL('..', import.meta.url).pathname
 const VCP = '/home/h/app/VCPToolBox'
