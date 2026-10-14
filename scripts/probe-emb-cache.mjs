@@ -140,6 +140,77 @@ console.log('\n[D] 尾部截断自愈')
   c4.dispose(); c5.dispose()
 }
 
+/* ── G 无头记录日志自愈（2026-10-14 实测 7 个桶出现的形态）── */
+console.log('\n[G] 无头记录日志 → 补头自愈')
+{
+  const dir = join(ROOT, 'g')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  const jsonPath = join(dir, 'emb-cache.json')
+  const binPath = embCacheBinPath(jsonPath)
+  const dim = 4
+  // 手工造一段「记录流从 0 字节起、无 16B 头」的文件（keyLen|vecLen|key|Float32LE×dim）
+  const recs = ['无头甲', '无头乙'].map((k, i) => {
+    const kb = Buffer.from(k, 'utf8')
+    const r = Buffer.alloc(8 + kb.length + dim * 4)
+    r.writeUInt32LE(kb.length, 0)
+    r.writeUInt32LE(dim, 4)
+    kb.copy(r, 8)
+    for (let j = 0; j < dim; j++) r.writeFloatLE(i + j, 8 + kb.length + j * 4)
+    return r
+  })
+  writeFileSync(binPath, Buffer.concat(recs))
+  const warns = []
+  const c1 = new EmbCache({ cachePath: jsonPath, dimension: dim, logger: { warn: (m) => warns.push(m), info: () => {} } })
+  ok('无头文件条目全收', c1.size === 2 && c1.get('无头甲')?.[1] === 1, `size=${c1.size}`)
+  ok('报了缺头取证行', warns.some((w) => w.includes('缺头')), warns[0] ?? '')
+  const healed = readFileSync(binPath)
+  ok('补头后魔数正确', healed.toString('ascii', 0, 4) === 'MREC', `首 4B=${healed.subarray(0, 4).toString('hex')}`)
+  c1.set('新增丙', Float32Array.from([9, 9, 9, 9]))
+  await c1.flushNow()
+  const c2 = new EmbCache({ cachePath: jsonPath, dimension: dim })
+  ok('补头后可继续追加且读回', c2.get('新增丙')?.[0] === 9 && c2.get('无头乙') !== undefined, `size=${c2.size}`)
+  c1.dispose(); c2.dispose()
+}
+
+/* ── H 并发 create 窗口（EEXIST 但无头）→ 不丢、不写歪 ── */
+console.log('\n[H] EEXIST 但无头（并发 writeFile 的 0 字节窗口）')
+{
+  const dir = join(ROOT, 'h')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  const jsonPath = join(dir, 'emb-cache.json')
+  const binPath = embCacheBinPath(jsonPath)
+  const dim = 4
+  const c = new EmbCache({ cachePath: jsonPath, dimension: dim, debounceMs: 60_000 })
+  c.set('我先', Float32Array.from([1, 1, 1, 1]))
+  // 模拟「另一个实例的 writeFile('wx') 刚 create 完还没写头 / 或别处已追加了无头记录」
+  const kb = Buffer.from('别人的', 'utf8')
+  const r = Buffer.alloc(8 + kb.length + dim * 4)
+  r.writeUInt32LE(kb.length, 0)
+  r.writeUInt32LE(dim, 4)
+  kb.copy(r, 8)
+  for (let j = 0; j < dim; j++) r.writeFloatLE(7, 8 + kb.length + j * 4)
+  writeFileSync(binPath, r)
+  await c.flushNow()
+  const buf = readFileSync(binPath)
+  ok('落盘后有头', buf.toString('ascii', 0, 4) === 'MREC')
+  const c2 = new EmbCache({ cachePath: jsonPath, dimension: dim })
+  ok('两边的条目都在（重写前先并入）', c2.get('我先') !== undefined && c2.get('别人的')?.[0] === 7, `size=${c2.size}`)
+  // 0 字节窗口
+  const dir2 = join(ROOT, 'h2')
+  rmSync(dir2, { recursive: true, force: true })
+  mkdirSync(dir2, { recursive: true })
+  const j2 = join(dir2, 'emb-cache.json')
+  const c3 = new EmbCache({ cachePath: j2, dimension: dim, debounceMs: 60_000 })
+  c3.set('零字节窗', Float32Array.from([5, 5, 5, 5]))
+  writeFileSync(embCacheBinPath(j2), Buffer.alloc(0)) // 空的 .bin（create 了还没写头）
+  await c3.flushNow()
+  const c4 = new EmbCache({ cachePath: j2, dimension: dim })
+  ok('0 字节窗口也兜住', c4.get('零字节窗')?.[0] === 5, `size=${c4.size}`)
+  c.dispose(); c2.dispose(); c3.dispose(); c4.dispose()
+}
+
 /* ── E 跳闸 ── */
 console.log('\n[E] 跳闸退避（死端点）')
 {

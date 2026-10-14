@@ -31,8 +31,8 @@
  * 116MB 与 1764 份 boxed 数组；落盘 `.bin` 后原文件改名 `<json>.bak` 留证（不删）。
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, truncateSync, writeFileSync } from 'node:fs'
-import { appendFile, rename, stat, writeFile } from 'node:fs/promises'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, truncateSync, writeFileSync } from 'node:fs'
+import { appendFile, open, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 /** `emb-cache.json` → 同目录同前缀的二进制主文件 `emb-cache.bin`。 */
@@ -125,32 +125,58 @@ interface ScannedBin {
   validBytes: number
   fileBytes: number
   ok: boolean
+  /** true = **无头记录日志**（记录合法但缺 16B 头）——载入时补头自愈。 */
+  headerless?: boolean
   reason?: string
 }
 
-/** 扫描 `.bin`：坏头/坏版本/维度不符 → ok=false（调用方当作空缓存，绝不崩）。 */
-function scanBin(buf: Buffer, dimension: number): ScannedBin {
-  const fileBytes = buf.length
-  const bad = (reason: string): ScannedBin => ({ entries: [], validBytes: 0, fileBytes, ok: false, reason })
-  if (fileBytes < HEADER_BYTES) return bad(`短于头部 ${fileBytes}B`)
-  if (buf.toString('ascii', 0, 4) !== MAGIC) return bad('魔数不符')
-  const version = buf.readUInt32LE(4)
-  if (version !== VERSION) return bad(`版本 ${version} != ${VERSION}`)
-  const dim = buf.readUInt32LE(8)
-  if (dim !== dimension) return bad(`维度 ${dim} != 配置 ${dimension}`)
+/** 从 `start` 起扫记录流；尾部截断即停（返回已扫到的部分）。 */
+function scanRecords(
+  buf: Buffer,
+  start: number,
+  dimension: number,
+): { entries: Array<[string, Float32Array]>; end: number; err?: string } {
   const entries: Array<[string, Float32Array]> = []
-  let p = HEADER_BYTES
-  while (p + RECORD_HEADER <= fileBytes) {
+  let p = start
+  while (p + RECORD_HEADER <= buf.length) {
     const keyLen = buf.readUInt32LE(p)
     const vecLen = buf.readUInt32LE(p + 4)
-    if (vecLen !== dimension || keyLen > 1 << 20) return bad(`记录头异常 @${p} keyLen=${keyLen} vecLen=${vecLen}`)
+    if (vecLen !== dimension || keyLen > 1 << 20) {
+      return { entries, end: p, err: `记录头异常 @${p} keyLen=${keyLen} vecLen=${vecLen}` }
+    }
     const end = p + RECORD_HEADER + keyLen + vecLen * 4
-    if (end > fileBytes) break // 尾部截断（追加中途进程死）——保留前面已扫到的，后面接续追加
+    if (end > buf.length) return { entries, end: p } // 尾部截断（追加中途进程死）——保留已扫到的
     const key = buf.toString('utf8', p + RECORD_HEADER, p + RECORD_HEADER + keyLen)
     entries.push([key, readVec(buf, p + RECORD_HEADER + keyLen, vecLen)])
     p = end
   }
-  return { entries, validBytes: p, fileBytes, ok: true }
+  return { entries, end: p }
+}
+
+/**
+ * 扫描 `.bin`：坏头/坏版本/维度不符 → ok=false（调用方当作空缓存，绝不崩）。
+ * 特例：**无头记录日志**（记录流从 0 字节起，缺 16B 头）→ ok=true + headerless=true，
+ * 条目照收、载入时补头写回。2026-10-14 实测 7 个桶出现这种文件（成因未定位），补头既救回
+ * 缓存又留取证行——下次再出现就能顺着日志定位写方。
+ */
+function scanBin(buf: Buffer, dimension: number): ScannedBin {
+  const fileBytes = buf.length
+  const bad = (reason: string): ScannedBin => ({ entries: [], validBytes: 0, fileBytes, ok: false, reason })
+  if (fileBytes >= HEADER_BYTES && buf.toString('ascii', 0, 4) === MAGIC) {
+    const version = buf.readUInt32LE(4)
+    if (version !== VERSION) return bad(`版本 ${version} != ${VERSION}`)
+    const dim = buf.readUInt32LE(8)
+    if (dim !== dimension) return bad(`维度 ${dim} != 配置 ${dimension}`)
+    const r = scanRecords(buf, HEADER_BYTES, dimension)
+    if (r.err) return bad(r.err)
+    return { entries: r.entries, validBytes: r.end, fileBytes, ok: true }
+  }
+  if (fileBytes >= RECORD_HEADER) {
+    const r = scanRecords(buf, 0, dimension)
+    if (r.entries.length > 0) return { entries: r.entries, validBytes: r.end, fileBytes, ok: true, headerless: true }
+  }
+  if (fileBytes < HEADER_BYTES) return bad(`短于头部 ${fileBytes}B`)
+  return bad('魔数不符')
 }
 
 /**
@@ -303,6 +329,21 @@ export class EmbCache {
       for (const [k, v] of scanned.entries) this.insert(k, v)
       this.fileBytes = scanned.fileBytes
       this.headerEnsured = true
+      if (scanned.headerless) {
+        // 无头记录日志（2026-10-14 实测 7 桶）：记录全合法、只缺 16B 头。补头写回，条目一条不丢。
+        this.logger?.warn(
+          `emb-cache .bin 缺头（记录 ${scanned.entries.length} 条 / ${scanned.fileBytes}B）→ 已补头自愈；` +
+            `若再出现请顺此取证：写方把记录追加到了无头文件上`,
+        )
+        try {
+          this.rewriteWithHeaderSync()
+        } catch (e) {
+          this.logger?.warn(`emb-cache 补头失败：${String((e as Error)?.message ?? e)}`)
+          this.headerEnsured = false
+          this.fileBytes = 0
+        }
+        return
+      }
       if (scanned.validBytes < scanned.fileBytes) {
         // 尾部截断（追加中途进程死）：截到有效长度，后续 append 才能被正常扫描
         try {
@@ -321,6 +362,19 @@ export class EmbCache {
     }
     if (!existsSync(this.cachePath)) return
     this.migrateLegacy()
+  }
+
+  /** 把当前内存里的条目连头写回（补头 / 压实共用）：tmp + rename，原子替换。 */
+  private rewriteWithHeaderSync(): void {
+    const parts: Buffer[] = [headerBuffer(this.dimension)]
+    for (const [k, v] of this.map) parts.push(encodeRecord(k, v))
+    const body = Buffer.concat(parts)
+    mkdirSync(dirname(this.binPath), { recursive: true })
+    const tmp = `${this.binPath}.tmp-${process.pid}`
+    writeFileSync(tmp, body)
+    renameSync(tmp, this.binPath)
+    this.fileBytes = body.length
+    this.headerEnsured = true
   }
 
   /** 旧 JSON → `.bin`，原文件留 `.bak`。同步完成（一次性事件，量级 = 迁移后缓存体积）。 */
@@ -475,44 +529,128 @@ export class EmbCache {
     const body = Buffer.concat(recs.map(([k, v]) => encodeRecord(k, v)))
     try {
       mkdirSync(dirname(this.binPath), { recursive: true })
-      this.ensureHeaderSync()
-      appendFileSync(this.binPath, body)
-      this.fileBytes += body.length
+      // 头未就绪时不 append：全量重写已经把 pending 连同内存条目一起落盘了（重复写只会多一条死记录）
+      if (this.ensureHeaderSync()) {
+        appendFileSync(this.binPath, body)
+        this.fileBytes += body.length
+      }
     } catch {
       /* 退出路径静默 */
     }
   }
 
-  private ensureHeaderSync(): void {
-    if (this.headerEnsured) return
-    this.headerEnsured = true
+  /** 把磁盘上已有的（无头）记录并进内存——补头重写前调用，保证一条不丢。 */
+  private mergeExistingSync(): void {
     try {
-      writeFileSync(this.binPath, headerBuffer(this.dimension), { flag: 'wx' })
-      if (this.fileBytes < HEADER_BYTES) this.fileBytes = HEADER_BYTES
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') this.headerEnsured = false
+      const scanned = scanBin(readFileSync(this.binPath), this.dimension)
+      if (scanned.ok) for (const [k, v] of scanned.entries) if (!this.map.has(k)) this.insert(k, v)
+    } catch {
+      /* 读不动就算了——重写仍有内存里的条目兜底 */
     }
   }
 
-  private async ensureHeader(): Promise<void> {
-    if (this.headerEnsured) return
+  private ensureHeaderSync(): boolean {
+    if (this.headerEnsured) return true
+    try {
+      writeFileSync(this.binPath, headerBuffer(this.dimension), { flag: 'wx' })
+      this.headerEnsured = true
+      if (this.fileBytes < HEADER_BYTES) this.fileBytes = HEADER_BYTES
+      return true
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
+        // 目录/权限/磁盘问题：**不 append**（append 会凭空造出无头文件，正是 2026-10-14 那 7 个桶的形态）
+        this.logger?.warn(`emb-cache 头写入失败，放弃本次落盘：${String((e as Error)?.message ?? e)}`)
+        return false
+      }
+    }
+    // EEXIST 不等于「头已就绪」：并发的 writeFile('wx') 会先把文件 create 成 0 字节再写数据，
+    // 这个窗口里 append 就会写出**无头记录日志**。必须验头。
+    if (this.fileHasHeaderSync()) {
+      this.headerEnsured = true
+      return true
+    }
+    this.logger?.warn('emb-cache .bin 已存在但无头（0 字节或历史无头日志）→ 连头全量重写兜住')
+    this.mergeExistingSync()
+    this.rewriteWithHeaderSync()
+    return false
+  }
+
+  /** 文件头 4 字节是不是 'MREC'（不整读文件）。 */
+  private fileHasHeaderSync(): boolean {
+    try {
+      const fd = openSync(this.binPath, 'r')
+      try {
+        const b = Buffer.alloc(4)
+        const n = readSync(fd, b, 0, 4, 0)
+        return n === 4 && b.toString('ascii') === MAGIC
+      } finally {
+        closeSync(fd)
+      }
+    } catch {
+      return false
+    }
+  }
+
+  /** 确保头就绪。返回 true = 可以安全 append；false = 已用全量重写兜住，调用方**不要**再 append。 */
+  private async ensureHeader(): Promise<boolean> {
+    if (this.headerEnsured) return true
     mkdirSync(dirname(this.binPath), { recursive: true })
     try {
       await writeFile(this.binPath, headerBuffer(this.dimension), { flag: 'wx' })
       this.fileBytes = HEADER_BYTES
       this.headerEnsured = true
+      return true
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
-        this.headerEnsured = true
+        // 同 ensureHeaderSync：EEXIST 不代表头就绪（并发 writeFile('wx') 的 0 字节窗口），必须验头
+        let size = 0
         try {
-          this.fileBytes = (await stat(this.binPath)).size
+          size = (await stat(this.binPath)).size
         } catch {
           /* 忽略 */
         }
-        return
+        if (size >= HEADER_BYTES && (await this.fileHasHeader())) {
+          this.headerEnsured = true
+          this.fileBytes = size
+          return true
+        }
+        this.logger?.warn(
+          `emb-cache .bin 已存在但无头（${size}B）→ 连头全量重写兜住（记录 ${this.map.size} 条）`,
+        )
+        this.mergeExistingSync()
+        await this.rewriteWithHeader()
+        return false
       }
       throw e
     }
+  }
+
+  /** 文件头 4 字节是不是 'MREC'。 */
+  private async fileHasHeader(): Promise<boolean> {
+    let fh: Awaited<ReturnType<typeof open>> | null = null
+    try {
+      fh = await open(this.binPath, 'r')
+      const b = Buffer.alloc(4)
+      const { bytesRead } = await fh.read(b, 0, 4, 0)
+      return bytesRead === 4 && b.toString('ascii') === MAGIC
+    } catch {
+      return false
+    } finally {
+      await fh?.close().catch(() => undefined)
+    }
+  }
+
+  /** 把当前内存条目连头写回（补头 / 压实共用，异步版）：tmp + rename，原子替换。 */
+  private async rewriteWithHeader(): Promise<void> {
+    const parts: Buffer[] = [headerBuffer(this.dimension)]
+    for (const [k, v] of this.map) parts.push(encodeRecord(k, v))
+    const body = Buffer.concat(parts)
+    mkdirSync(dirname(this.binPath), { recursive: true })
+    const tmp = `${this.binPath}.tmp-${process.pid}`
+    await writeFile(tmp, body)
+    await rename(tmp, this.binPath)
+    this.fileBytes = body.length
+    this.headerEnsured = true
   }
 
   private async flushOnce(): Promise<void> {
@@ -521,9 +659,12 @@ export class EmbCache {
     this.pending.clear()
     const body = Buffer.concat(recs.map(([k, v]) => encodeRecord(k, v)))
     try {
-      await this.ensureHeader()
-      await appendFile(this.binPath, body)
-      this.fileBytes += body.length
+      const ready = await this.ensureHeader()
+      // 头刚被补写时 ensureHeader 已把内存条目（含本批 pending）全量落盘——再 append 只会多一条死记录
+      if (ready) {
+        await appendFile(this.binPath, body)
+        this.fileBytes += body.length
+      }
     } catch (e) {
       // 回填（仅当内存里还是同一份向量——已被逐出/覆盖的不再落盘），下次去抖窗口重试
       for (const [k, v] of recs) if (this.map.get(k) === v) this.pending.set(k, v)
