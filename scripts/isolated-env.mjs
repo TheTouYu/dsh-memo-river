@@ -68,23 +68,39 @@ export async function ensureSelftestFixtures() {
   const missingOf = () =>
     fixtures.filter(([dir, bucket]) => !existsSync(workspacePaths(join(REPO_ROOT, '.selftest', dir), bucket).dbPath))
   const missing = missingOf()
-  if (missing.length === 0) return false
+  // **每次重铺**（这些套件会消耗共享夹具：实测一波变体跑完，写入测试夹具从 11 篇掉到 1 篇——
+  // merge 归档源篇、update 改写、consolidation/usage 各自写自己的小语料）。它们的文件头写的就是
+  // `setup-selftest && acceptance-X`，即「每次先铺台」。要省这 ~20s 就设 MEMO_ACC_NO_REFRESH=1
+  //（只在库缺失时铺）——但夹具不新鲜时会出现「明明隔离没错却成片红」的假象。
+  const refresh = process.env.MEMO_ACC_NO_REFRESH !== '1'
+  if (missing.length === 0 && !refresh) return false
   const stub = process.env.MEMO_ACC_FIXTURE_MODE === 'stub'
   process.stderr.write(
-    `[isolated-env] 隔离柜缺 ${missing.length} 个夹具（${missing.map(([d]) => d).join('/')}）→ 在 ${ISOLATED_ROOT} 内铺台` +
+    `[isolated-env] 隔离柜${missing.length ? `缺 ${missing.length} 个夹具（${missing.map(([d]) => d).join('/')}）` : '重铺夹具'}→ 在 ${ISOLATED_ROOT} 内铺台` +
       `（${stub ? 'hash 桩：语义敏感用例会红' : 'REAL_EMBED=1 真向量，约 30~60s'}）…\n`,
   )
   const t0 = Date.now()
   const { spawnSync } = await import('node:child_process')
-  const res = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts', 'setup-selftest.mjs')], {
-    cwd: REPO_ROOT,
-    stdio: 'inherit',
-    env: { ...process.env, DSH_HOME: process.env.DSH_HOME, REAL_EMBED: stub ? '0' : '1' },
-  })
-  const left = missingOf()
+  let res = { status: -1 }
+  let left = missingOf()
+  // 连跑时铺台偶发失败（实测 rc=1、第三个夹具没铺出来——上一轮套件留下的库锁/异步任务未收）
+  // → 退避 5s 重试一次；仍缺就由套件自己的环境自检报红（不静默）。
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) {
+      process.stderr.write(`[isolated-env] 仍缺 ${left.length} 个夹具 → 5s 后重试铺台（第 ${attempt + 1} 次）\n`)
+      await new Promise((r) => setTimeout(r, 5000))
+    }
+    res = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts', 'setup-selftest.mjs')], {
+      cwd: REPO_ROOT,
+      stdio: 'inherit',
+      env: { ...process.env, DSH_HOME: process.env.DSH_HOME, REAL_EMBED: stub ? '0' : '1' },
+    })
+    left = missingOf()
+    if (left.length === 0) break
+  }
   process.stderr.write(
     `[isolated-env] 铺台结束 rc=${res.status} 用时 ${((Date.now() - t0) / 1000).toFixed(1)}s` +
-      `，仍缺 ${left.length} 个${left.length ? `（${left.map(([d]) => d).join('/')}）` : ' ✅'}\n`,
+      `，仍缺 ${left.length} 个${left.length ? `（${left.map(([d]) => d).join('/')}）❌` : ' ✅'}\n`,
   )
   return true
 }

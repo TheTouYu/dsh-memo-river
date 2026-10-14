@@ -22,7 +22,8 @@ import { apply, Config as ConfigSchema } from '../lib/index.js'
 import { acquireWorkspace } from '../lib/workspace.js'
 import { workspacePaths } from '../lib/runtime.js'
 
-await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；三库齐了即刻返回）
+await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；每次重铺）
+
 
 const ROOT = new URL('..', import.meta.url).pathname
 const CWD = join(tmpdir(), `memo-river-title-${process.pid}`)

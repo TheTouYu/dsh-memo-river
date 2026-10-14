@@ -21,7 +21,8 @@ import { workspacePaths } from '../lib/runtime.js'
 import { startEmbedStub } from './embed-stub.mjs'
 import { KV_USAGE } from '../lib/health.js'
 
-await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；三库齐了即刻返回）
+await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；每次重铺）
+
 
 const ROOT = new URL('..', import.meta.url).pathname
 const VCP = '/home/h/app/VCPToolBox'

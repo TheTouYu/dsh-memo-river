@@ -20,6 +20,8 @@ import { acquireWorkspace } from '../lib/workspace.js'
 import { workspacePaths } from '../lib/runtime.js'
 import { startEmbedStub } from './embed-stub.mjs'
 
+await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；每次重铺）
+
 const ROOT = new URL('..', import.meta.url).pathname
 const VCP = '/home/h/app/VCPToolBox'
 const WS = join(ROOT, '.selftest', '教室建模写入测试')
@@ -125,7 +127,6 @@ const today = new Date().toISOString().slice(0, 10)
 /* ── A-1 原地改写 ── */
 import { createHash } from 'node:crypto'
 
-await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；三库齐了即刻返回）
 const diskGuard = createHash('sha256').update(readFileSync(target.path, 'utf8')).digest('hex')
 const r1 = String(await updateTool.execute({ id: target.id, content: newContent, date: today }, execStub(WS)))
 const files1 = ws.store.files(BUCKET)
