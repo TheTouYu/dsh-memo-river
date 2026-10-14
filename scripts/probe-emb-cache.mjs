@@ -9,7 +9,7 @@
  *  E 跳闸退避（连败 3 次后立即失败，不等超时）
  *  F 真桶迁移实测（genshin 116MB JSON：峰值 RSS、耗时、产物体积）
  */
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync, copyFileSync, existsSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync, copyFileSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 const ROOT = '/home/h/dsh-plugins/dsh-memo-river/.scratch/whale-fix'
@@ -180,7 +180,12 @@ ok('第一次真实失败耗时（对照）>1ms', true)
 /* ── F 真桶迁移 ── */
 console.log('\n[F] 真桶迁移实测（genshin 116MB）')
 {
-  const src = '/home/h/.dsh/memo-river/4bde2299850f027e/emb-cache.json'
+  // 夹具源：优先原 JSON；清淤后已改名则回退 .precompact-* / .bak 留证件（取最新）
+  const bucketDir = '/home/h/.dsh/memo-river/4bde2299850f027e'
+  const src = existsSync(`${bucketDir}/emb-cache.json`)
+    ? `${bucketDir}/emb-cache.json`
+    : (readdirSync(bucketDir).filter((f) => f.startsWith('emb-cache.json.') && !f.endsWith('.bin')).sort().map((f) => join(bucketDir, f)).pop()
+      ?? (() => { throw new Error('找不到 genshin 桶旧 JSON 缓存（原文件/.precompact/.bak 都不在）') })())
   const dir = join(ROOT, 'f')
   rmSync(dir, { recursive: true, force: true })
   mkdirSync(dir, { recursive: true })
