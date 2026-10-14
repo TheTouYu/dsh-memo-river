@@ -54,8 +54,9 @@
           name: '@deepseek-ai/dsh-persona'
           config:
             suffix: Your working directory is {{cwd}}.
-            prefix: >-
-              You are a coding agent powered by the {{model}} model.
+            # 2026-10-14 用户裁决：删 persona 身份句——宿主 harness:identity 已给身份，
+            # 同义第二句属冗余（river-acp 家族同批清理）。prefix 留空 = 只保留平台身份行。
+            prefix: ''
 
         - id: agent-instructions
           name: '@deepseek-ai/dsh-agent-instructions'
@@ -84,7 +85,10 @@
               config:
                 workspaceScoped: true
                 intervalMs: 900000          # 守护循环 15 分钟
-                embed: { apiUrl: 'https://api.relayrouter.ai', apiKey: !!js process.env.TAG_EMBED_KEY || '', model: 'gemini-embedding-2-preview', dimension: 3072 }
+                # providerOrder：把 OpenRouter 的按价负载均衡钉到单一 provider。不定它时同一文本会被
+                # 路由到 DeepInfra/Parasail 两家，逐元素差 3.8e-4~7.3e-4（逐位不可复现，见
+                # scripts/probe-embed-provider-routing.mjs）；钉住后连打 3 次逐元素差 0.00e+0。
+                embed: { apiUrl: 'https://openrouter.ai/api', apiKey: !!js process.env.TAG_EMBED_KEY || '', model: 'baai/bge-m3', dimension: 1024, providerOrder: 'Parasail' }
                 inject:
                   gate: true
                   k: 3
