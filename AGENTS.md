@@ -26,3 +26,6 @@
 - `scripts/reimport-orphans.mjs <workspace-cwd>`：桶 dailynote/*.md 与库 files 行比对，孤儿走 writeDiaryCore 全管线重灌。**必须 `env -u MEMO_NATIVE_KERNEL`**（防继承服务 env）；内置 reimpl 旧内核拒跑闸。
 - schema 变更：`src/schema.ts` 53 条幂等 DDL，源参考 VCPToolBox classroom-flow；`scripts/gen-schema.mjs` 再生。
 - 嵌入：api.relayrouter.ai 需代理（TAG_EMBED_PROXY=7890 三处兜底）；embed 失败写入 NULL 向量+告警（不阻断）。
+- **嵌入缓存是 `.bin` 不是 JSON**（2026-10-14 内存鲸鱼修复，定谳见 dsh-plugins 桶 D98）：`emb-cache.bin` = 追加式 Float32 记录日志，内存有预算（`MEMO_EMB_CACHE_MAX_MB`，缺省 48MB 按 LRU 逐出）、落盘去抖 2s + 异步。旧 `emb-cache.json` 会被自动迁走（改名 `.bak`）——**别再写任何回 JSON 的代码**，也没必要备份它。
+  - `scripts/compact-emb-cache.mjs`：清淤 + 落二进制。孤儿判据 = 不命中 `chunks.content ∪ tags.name`（一次性 query 键永远不该常驻）。**先跑脚本再重启**，否则大桶首次加载仍要整读一遍旧 JSON；脚本自带 `.precompact-<ts>` 留证、库读不动则跳过该桶。
+  - `scripts/probe-emb-cache.mjs`（28 项单测：迁移/追加/逐出/截断自愈/跳闸）、`scripts/probe-emb-cache-mem.mjs`（真 `writeDiaryCore` 的内存验收台，`PROBE_LIB` 支持拿修复前的 lib 做负对照）。

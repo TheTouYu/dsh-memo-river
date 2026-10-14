@@ -10,7 +10,8 @@
  *
  * 命中缓存不重复消耗额度（DESIGN.md §9「嵌入缓存：emb-cache.json」）。
  */
-import { estimateTokens, readJsonSafe, writeJsonSafe } from './runtime.js'
+import { EmbCache } from './emb-cache.js'
+import { estimateTokens } from './runtime.js'
 
 export interface EmbedClientOptions {
   apiUrl: string
@@ -49,6 +50,34 @@ export const WRITE_EMBED_OPTIONS: EmbedCallOptions = {
 
 const BATCH_SIZE = 32
 const CONCURRENCY = Number(process.env.TAG_VECTORIZE_CONCURRENCY) || 5
+
+/* ────────────── 写闸指数退避（票 04，2026-10-14 鲸鱼修复第四件） ──────────────
+ *
+ * dbGate 横跨 embed HTTP await（workspace.ts 类头注释：闸的生命期 = 整段操作）——
+ * 端点劣化时每次嵌入都吃满超时（注入 3s / 写侧 15s×2），整个工作区的读写就堵在闸后
+ * 排队（09-15 实测写侧离群 120s；10-14 端点劣化日 inject skip 58%）。对策：连续失败到
+ * 阈值即「跳闸」，退避窗口内的调用**立即失败**——调用方本就有降级路径（注入
+ * embed-timeout → inject-skip；写侧 → embed-unavailable 拒绝），闸即刻释放而不是继续
+ * 持有数秒等超时。窗口到期放行一次探测，再失败窗口翻倍（封顶 5 分钟）。
+ * `EMB_BREAKER=0` 关闭（对照实验用）；`EMB_BREAKER_THRESHOLD/BASE_MS/MAX_MS` 可调。 */
+export const DEFAULT_BREAKER_THRESHOLD = 3
+export const DEFAULT_BREAKER_BASE_MS = 10_000
+export const DEFAULT_BREAKER_MAX_MS = 300_000
+
+const BREAKER_ENABLED = process.env.EMB_BREAKER !== '0'
+const BREAKER_THRESHOLD = Number(process.env.EMB_BREAKER_THRESHOLD) || DEFAULT_BREAKER_THRESHOLD
+const BREAKER_BASE_MS = Number(process.env.EMB_BREAKER_BASE_MS) || DEFAULT_BREAKER_BASE_MS
+const BREAKER_MAX_MS = Number(process.env.EMB_BREAKER_MAX_MS) || DEFAULT_BREAKER_MAX_MS
+
+/** 跳闸状态（探针/验收观测用）。 */
+export interface BreakerState {
+  enabled: boolean
+  consecutiveFailures: number
+  /** 退避窗口截止时刻（epoch ms）；<= now 表示会放行一次探测。 */
+  openUntil: number
+  /** 当前窗口长度（ms），0 = 从未跳闸。 */
+  windowMs: number
+}
 
 /* ────────────── 传输层（票 02）：undici Agent 连接保活 ──────────────
  *
@@ -185,23 +214,50 @@ export function closeEmbedTransport(): void {
   if (agent) void agent.close().catch(() => {})
 }
 
-type Cache = Record<string, number[]>
-
 export class EmbedClient {
-  private cache: Cache
-  private dirty = false
+  private readonly cache: EmbCache
   private readonly timeoutMs: number
+  /** 跳闸状态（票 04）。 */
+  private consecutiveFailures = 0
+  private breakerOpenUntil = 0
+  private breakerWindowMs = 0
 
   /** 上一次失败原因（体检 / fallbackReason 取证用）。 */
   lastError: string | null = null
 
   constructor(private readonly options: EmbedClientOptions) {
-    this.cache = readJsonSafe<Cache>(options.cachePath, {})
+    // 缓存是**二进制追加式**（src/emb-cache.ts，2026-10-14 鲸鱼修复）：构造只扫一遍记录，
+    // 不再 JSON.parse 整份 116MB；值常驻 Float32Array；落盘走异步去抖 append。
+    this.cache = new EmbCache({
+      cachePath: options.cachePath,
+      dimension: options.dimension,
+      logger: options.logger,
+    })
     this.timeoutMs = options.timeoutMs ?? 60_000
   }
 
   get cacheSize(): number {
-    return Object.keys(this.cache).length
+    return this.cache.size
+  }
+
+  /** 缓存体检（探针/日志用）：条目 / 值字节 / 文件字节 / 逐出 / 迁移留证。 */
+  get cacheStats(): ReturnType<EmbCache['stats']> {
+    return this.cache.stats()
+  }
+
+  /** 跳闸状态（探针/验收观测用）。 */
+  get breaker(): BreakerState {
+    return {
+      enabled: BREAKER_ENABLED,
+      consecutiveFailures: this.consecutiveFailures,
+      openUntil: this.breakerOpenUntil,
+      windowMs: this.breakerWindowMs,
+    }
+  }
+
+  /** 落盘收尾（测试/脚本用；生产由去抖 + 进程 exit 兜底）。 */
+  async flushCache(): Promise<void> {
+    await this.cache.flushNow()
   }
 
   /** 配置是否足以调用远端。 */
@@ -218,9 +274,9 @@ export class EmbedClient {
     const missingIndex = new Map<string, number[]>()
 
     texts.forEach((text, i) => {
-      const hit = this.cache[text]
+      const hit = this.cache.get(text)
       if (hit && hit.length === this.options.dimension) {
-        out[i] = Float32Array.from(hit)
+        out[i] = hit
         return
       }
       const list = missingIndex.get(text)
@@ -232,6 +288,12 @@ export class EmbedClient {
     })
 
     if (missing.length > 0) {
+      // 票 04：跳闸窗口内立即失败，绝不持着工作区闸去等一个已知劣化的端点
+      const openLeft = this.breakerOpenUntil - Date.now()
+      if (BREAKER_ENABLED && openLeft > 0) {
+        this.lastError = `embed-circuit-open: 端点连续失败 ${this.consecutiveFailures} 次，退避窗口还剩 ${Math.ceil(openLeft / 1000)}s`
+        throw new Error(this.lastError)
+      }
       const batches: string[][] = []
       for (let i = 0; i < missing.length; i += BATCH_SIZE) batches.push(missing.slice(i, i + BATCH_SIZE))
 
@@ -243,18 +305,22 @@ export class EmbedClient {
           results[myIndex] = await this.requestWithRetry(batches[myIndex]!, callOpts)
         }
       })
-      await Promise.all(workers)
+      try {
+        await Promise.all(workers)
+      } catch (e) {
+        this.noteEmbedFailure()
+        throw e
+      }
+      this.noteEmbedSuccess()
 
       results.forEach((vectors, b) => {
         const batch = batches[b]!
         vectors.forEach((vec, j) => {
           const text = batch[j]!
           for (const i of missingIndex.get(text) ?? []) out[i] = vec
-          this.cache[text] = Array.from(vec)
-          this.dirty = true
+          this.cache.set(text, vec)
         })
       })
-      this.flush()
     }
 
     return out.map((vec, i) => {
@@ -327,10 +393,29 @@ export class EmbedClient {
     })
   }
 
-  private flush(): void {
-    if (!this.dirty) return
-    this.dirty = false
-    writeJsonSafe(this.options.cachePath, this.cache)
+  /* ────────────── 票 04：写闸指数退避 ────────────── */
+
+  private noteEmbedFailure(): void {
+    if (!BREAKER_ENABLED) return
+    this.consecutiveFailures++
+    if (this.consecutiveFailures < BREAKER_THRESHOLD) return
+    this.breakerWindowMs = this.breakerWindowMs === 0 ? BREAKER_BASE_MS : Math.min(this.breakerWindowMs * 2, BREAKER_MAX_MS)
+    this.breakerOpenUntil = Date.now() + this.breakerWindowMs
+    this.options.logger?.warn(
+      `embed-circuit-open: 连续失败 ${this.consecutiveFailures} 次（${this.lastError ?? '未知'}）` +
+        `→ 退避 ${Math.round(this.breakerWindowMs / 1000)}s；窗口内调用立即失败，不再持闸等超时`,
+    )
+  }
+
+  private noteEmbedSuccess(): void {
+    if (this.breakerWindowMs > 0) {
+      this.options.logger?.info(
+        `embed-circuit-closed: 端点恢复（此前连续失败 ${this.consecutiveFailures} 次，窗口 ${Math.round(this.breakerWindowMs / 1000)}s）`,
+      )
+    }
+    this.consecutiveFailures = 0
+    this.breakerOpenUntil = 0
+    this.breakerWindowMs = 0
   }
 
   /** 估算一次调用的输入体量（日志用）。 */

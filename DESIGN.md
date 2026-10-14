@@ -420,7 +420,7 @@ D6「终局报告：六轮盲测 0 误判」 role=thematic_neighbor  topology=+0
 - 表：VCP schema 子集（`tags` / `files` / `file_tags` / `chunks` / `kv_store`），DDL 取自 `VCPToolBox/modules/knowledgeBase/schemaManager.js`。
 - 向量：3072 维 Float32，`chunks.vector`；Tag 向量在 `tags.vector`。
 - 派生资产：图 / CSR / provenance 全部由 `rebuildMemoArtifact` 从库重建，**不单独持久化为真相**。
-- 嵌入缓存：`emb-cache.json`（文本 → 向量），重跑不重复消耗额度。
+- 嵌入缓存：`emb-cache.bin`（文本 → 向量）——**二进制追加式记录日志**（`src/emb-cache.ts`：`'MREC'|v|dim|reserved` 头 + `keyLen|vecLen|key|Float32LE×dim` 记录），追加写不入 O(全库)，内存按预算（`MEMO_EMB_CACHE_MAX_MB`，缺省 48MB）LRU 逐出，落盘去抖 2s + `fs.promises`（不阻塞事件循环）。旧 `emb-cache.json` 首次载入自动流式迁移并改名 `.bak` 留证。重跑不重复消耗额度。
 
 ---
 

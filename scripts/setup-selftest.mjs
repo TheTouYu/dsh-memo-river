@@ -75,7 +75,14 @@ await run(['scripts/import-dailynote.mjs', '--force', '--src', ISLAND_SRC, '--cw
     srcStore.close()
   }
   copyFileSync(src.dbPath, dst.dbPath)
-  copyFileSync(src.embCachePath, dst.embCachePath)
+  // 嵌入缓存 2026-10-14 起是二进制追加式：主文件 emb-cache.bin（旧 emb-cache.json 只存在于
+  // 未迁移的桶）。两种都拷——漏拷 .bin 会让副本每篇日记都真调一次嵌入端点。
+  for (const [s, d] of [
+    [src.embCachePath, dst.embCachePath],
+    [src.embCachePath.replace(/\.json$/, '.bin'), dst.embCachePath.replace(/\.json$/, '.bin')],
+  ]) {
+    if (existsSync(s)) copyFileSync(s, d)
+  }
   // 桶名不同 → 把副本里的 diary_name 改写为写入测试桶，避免两条工作区互相看见
   const store = new KnowledgeStore(dst.dbPath)
   store.db.exec(`UPDATE files SET diary_name = '${WS_WRITE.bucket}'`)

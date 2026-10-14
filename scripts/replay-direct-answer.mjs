@@ -303,9 +303,16 @@ if (!quiet)
 /* ── 工作目录 + 只读快照素材 ── */
 const work = mkdtempSync(join(tmpdir(), 'replay-da-'))
 const embCacheCopy = join(work, 'emb-cache.json')
-if (existsSync(PROD_EMB_CACHE)) cpSync(PROD_EMB_CACHE, embCacheCopy)
+// 嵌入缓存 2026-10-14 起是二进制追加式（emb-cache.bin），旧 JSON 只存在于未迁移的桶：
+// 两种都拷，EmbedClient 自己会优先读 .bin。
+for (const suffix of ['.json', '.bin']) {
+  const src = PROD_EMB_CACHE.replace(/\.json$/, suffix)
+  if (existsSync(src)) cpSync(src, embCacheCopy.replace(/\.json$/, suffix))
+}
+// 当 oracle 用：生产缓存的键集合（走新载入器，兼容 .bin / 旧 JSON）
+const { loadEmbCacheEntries } = await import(join(LIB, 'emb-cache.js'))
 const prodCacheKeys = existsSync(PROD_EMB_CACHE)
-  ? new Set(Object.keys(JSON.parse(readFileSync(PROD_EMB_CACHE, 'utf8'))))
+  ? new Set(loadEmbCacheEntries(PROD_EMB_CACHE, EMBED_CFG.dimension).keys())
   : new Set()
 
 const { KnowledgeStore } = await import(join(LIB, 'store.js'))
