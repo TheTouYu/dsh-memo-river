@@ -31,7 +31,7 @@
  * 116MB 与 1764 份 boxed 数组；落盘 `.bin` 后原文件改名 `<json>.bak` 留证（不删）。
  */
 
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, truncateSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, truncateSync, writeFileSync } from 'node:fs'
 import { appendFile, open, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
@@ -317,7 +317,13 @@ export class EmbCache {
     if (existsSync(this.binPath)) {
       const scanned = scanBin(readFileSync(this.binPath), this.dimension)
       if (!scanned.ok) {
-        // 畸形 .bin：改名留证后从零开始（否则新追加的记录永远落在坏头之后 = 全库不可读）
+        // 0 字节 / 短于头：**不改名**——这是「另一个实例正在 create」或「文件刚被外部清掉」的中间态，
+        // 改名会把别人正在写的文件挪走（第三路径的帮凶）。留 0 字节文件给 appendGuarded 自己补头。
+        if (scanned.fileBytes < HEADER_BYTES) {
+          this.logger?.warn(`emb-cache .bin 只有 ${scanned.fileBytes}B（未初始化/正在建）→ 不改名，交由落盘闸补头`)
+          return
+        }
+        // 有内容但头/版本/维度不对：改名留证后从零开始（否则新追加的记录永远落在坏头之后 = 全库不可读）
         this.logger?.warn(`emb-cache .bin 不可用（${scanned.reason}）→ 改名留证并重建，缓存待重算`)
         try {
           renameSync(this.binPath, `${this.binPath}.corrupt-${Date.now()}`)
@@ -529,11 +535,7 @@ export class EmbCache {
     const body = Buffer.concat(recs.map(([k, v]) => encodeRecord(k, v)))
     try {
       mkdirSync(dirname(this.binPath), { recursive: true })
-      // 头未就绪时不 append：全量重写已经把 pending 连同内存条目一起落盘了（重复写只会多一条死记录）
-      if (this.ensureHeaderSync()) {
-        appendFileSync(this.binPath, body)
-        this.fileBytes += body.length
-      }
+      this.appendGuardedSync(body)
     } catch {
       /* 退出路径静默 */
     }
@@ -549,29 +551,94 @@ export class EmbCache {
     }
   }
 
-  private ensureHeaderSync(): boolean {
-    if (this.headerEnsured) return true
+  /** 预先确保目录存在（appendGuarded 的 'nofile' 新建分支用）。 */
+  private ensureDirSync(): void {
     try {
-      writeFileSync(this.binPath, headerBuffer(this.dimension), { flag: 'wx' })
-      this.headerEnsured = true
-      if (this.fileBytes < HEADER_BYTES) this.fileBytes = HEADER_BYTES
+      mkdirSync(dirname(this.binPath), { recursive: true })
+    } catch {
+      /* 目录建不出来时 appendGuarded 的写入会自己失败并走静默路径 */
+    }
+  }
+
+  /**
+   * 盘上头还在不在（**每次 append 前都问一遍**）。`headerEnsured` 只是「我们写过头」的记忆，
+   * 不等于「文件现在还有头」：另一个实例改名换文件、测试拆桶 `rmSync`、外部清理都会让头消失，
+   * 而 append 会凭空把路径建成 **无头记录日志**（2026-10-14 第三路径，acceptance 复跑实锤）。
+   */
+  private headerStateSync(): 'ok' | 'nofile' | 'short' | 'noheader' {
+    try {
+      const st = statSync(this.binPath)
+      if (st.size === 0) return 'short'
+      if (st.size < HEADER_BYTES) return 'short'
+    } catch {
+      return 'nofile'
+    }
+    return this.fileHasHeaderSync() ? 'ok' : 'noheader'
+  }
+
+  private async headerState(): Promise<'ok' | 'nofile' | 'short' | 'noheader'> {
+    let size: number
+    try {
+      size = (await stat(this.binPath)).size
+    } catch {
+      return 'nofile'
+    }
+    if (size < HEADER_BYTES) return 'short'
+    return (await this.fileHasHeader()) ? 'ok' : 'noheader'
+  }
+
+  /** 同步追加的最后一道闸：头不在就整份重写（而不是 append 出无头文件）。 */
+  private appendGuardedSync(body: Buffer): boolean {
+    const state = this.headerStateSync()
+    if (state === 'ok') {
+      appendFileSync(this.binPath, body)
+      this.fileBytes += body.length
       return true
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
-        // 目录/权限/磁盘问题：**不 append**（append 会凭空造出无头文件，正是 2026-10-14 那 7 个桶的形态）
-        this.logger?.warn(`emb-cache 头写入失败，放弃本次落盘：${String((e as Error)?.message ?? e)}`)
+    }
+    if (state === 'nofile' && this.fileBytes === 0 && !existsSync(this.binPath)) {
+      // 从未落过盘的新桶（合法路径）：写头 + 追加
+      try {
+        mkdirSync(dirname(this.binPath), { recursive: true })
+        writeFileSync(this.binPath, headerBuffer(this.dimension), { flag: 'wx' })
+        this.headerEnsured = true
+        appendFileSync(this.binPath, body)
+        this.fileBytes += body.length
+        return true
+      } catch {
         return false
       }
     }
-    // EEXIST 不等于「头已就绪」：并发的 writeFile('wx') 会先把文件 create 成 0 字节再写数据，
-    // 这个窗口里 append 就会写出**无头记录日志**。必须验头。
-    if (this.fileHasHeaderSync()) {
+    this.logger?.warn(
+      `emb-cache 落盘前发现头不在（${state}；headerEnsured=${this.headerEnsured} 已知 ${this.fileBytes}B pid=${process.pid}）` +
+        `→ 连头全量重写兜住，不 append`,
+    )
+    this.mergeExistingSync()
+    this.rewriteWithHeaderSync()
+    return false
+  }
+
+  /** 异步追加的最后一道闸（同 appendGuardedSync）。 */
+  private async appendGuarded(body: Buffer): Promise<boolean> {
+    const state = await this.headerState()
+    if (state === 'ok') {
+      await appendFile(this.binPath, body)
+      this.fileBytes += body.length
+      return true
+    }
+    if (state === 'nofile' && this.fileBytes === 0 && !existsSync(this.binPath)) {
+      mkdirSync(dirname(this.binPath), { recursive: true })
+      await writeFile(this.binPath, headerBuffer(this.dimension), { flag: 'wx' })
+      await appendFile(this.binPath, body)
+      this.fileBytes += body.length
       this.headerEnsured = true
       return true
     }
-    this.logger?.warn('emb-cache .bin 已存在但无头（0 字节或历史无头日志）→ 连头全量重写兜住')
+    this.logger?.warn(
+      `emb-cache 落盘前发现头不在（${state}；headerEnsured=${this.headerEnsured} 已知 ${this.fileBytes}B pid=${process.pid}）` +
+        `→ 连头全量重写兜住，不 append`,
+    )
     this.mergeExistingSync()
-    this.rewriteWithHeaderSync()
+    await this.rewriteWithHeader()
     return false
   }
 
@@ -588,40 +655,6 @@ export class EmbCache {
       }
     } catch {
       return false
-    }
-  }
-
-  /** 确保头就绪。返回 true = 可以安全 append；false = 已用全量重写兜住，调用方**不要**再 append。 */
-  private async ensureHeader(): Promise<boolean> {
-    if (this.headerEnsured) return true
-    mkdirSync(dirname(this.binPath), { recursive: true })
-    try {
-      await writeFile(this.binPath, headerBuffer(this.dimension), { flag: 'wx' })
-      this.fileBytes = HEADER_BYTES
-      this.headerEnsured = true
-      return true
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
-        // 同 ensureHeaderSync：EEXIST 不代表头就绪（并发 writeFile('wx') 的 0 字节窗口），必须验头
-        let size = 0
-        try {
-          size = (await stat(this.binPath)).size
-        } catch {
-          /* 忽略 */
-        }
-        if (size >= HEADER_BYTES && (await this.fileHasHeader())) {
-          this.headerEnsured = true
-          this.fileBytes = size
-          return true
-        }
-        this.logger?.warn(
-          `emb-cache .bin 已存在但无头（${size}B）→ 连头全量重写兜住（记录 ${this.map.size} 条）`,
-        )
-        this.mergeExistingSync()
-        await this.rewriteWithHeader()
-        return false
-      }
-      throw e
     }
   }
 
@@ -659,12 +692,8 @@ export class EmbCache {
     this.pending.clear()
     const body = Buffer.concat(recs.map(([k, v]) => encodeRecord(k, v)))
     try {
-      const ready = await this.ensureHeader()
-      // 头刚被补写时 ensureHeader 已把内存条目（含本批 pending）全量落盘——再 append 只会多一条死记录
-      if (ready) {
-        await appendFile(this.binPath, body)
-        this.fileBytes += body.length
-      }
+      // 每次 append 前都验盘上头还在不在（见 appendGuarded：第三路径就是「头没了还照 append」）
+      await this.appendGuarded(body)
     } catch (e) {
       // 回填（仅当内存里还是同一份向量——已被逐出/覆盖的不再落盘），下次去抖窗口重试
       for (const [k, v] of recs) if (this.map.get(k) === v) this.pending.set(k, v)

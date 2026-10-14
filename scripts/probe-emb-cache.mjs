@@ -10,6 +10,7 @@
  *  F 真桶迁移实测（genshin 116MB JSON：峰值 RSS、耗时、产物体积）
  */
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync, copyFileSync, existsSync, readdirSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
 const ROOT = '/home/h/dsh-plugins/dsh-memo-river/.scratch/whale-fix'
@@ -209,6 +210,99 @@ console.log('\n[H] EEXIST 但无头（并发 writeFile 的 0 字节窗口）')
   const c4 = new EmbCache({ cachePath: j2, dimension: dim })
   ok('0 字节窗口也兜住', c4.get('零字节窗')?.[0] === 5, `size=${c4.size}`)
   c.dispose(); c2.dispose(); c3.dispose(); c4.dispose()
+}
+
+/* ── I 第三路径：文件/目录被外部删掉后仍照 append（acceptance 复跑实锤）── */
+console.log('\n[I] 落盘前验头：文件被外部删除 / 0 字节中间态')
+{
+  const dir = join(ROOT, 'i')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  const jsonPath = join(dir, 'emb-cache.json')
+  const binPath = embCacheBinPath(jsonPath)
+  const dim = 4
+  const c1 = new EmbCache({ cachePath: jsonPath, dimension: dim, debounceMs: 10 })
+  c1.set('落盘前', Float32Array.from([1, 1, 1, 1]))
+  await c1.flushNow()
+  ok('前置：正常落盘有头', readFileSync(binPath).subarray(0, 4).toString('ascii') === 'MREC')
+  rmSync(binPath) // 外部删文件（模拟测试拆桶 rmSync）
+  c1.set('删后续写', Float32Array.from([2, 2, 2, 2]))
+  await c1.flushNow()
+  const after = readFileSync(binPath)
+  ok('文件被删后落盘仍有头', after.subarray(0, 4).toString('ascii') === 'MREC', `首 4B=${after.subarray(0, 4).toString('hex')}`)
+  const c2 = new EmbCache({ cachePath: jsonPath, dimension: dim })
+  ok('删前删后条目都在', c2.get('落盘前') !== undefined && c2.get('删后续写') !== undefined, `size=${c2.size}`)
+  rmSync(dir, { recursive: true, force: true }) // 连目录一起删（模拟桶根 rmSync）
+  c1.set('目录也没了', Float32Array.from([3, 3, 3, 3]))
+  await c1.flushNow()
+  const after2 = readFileSync(binPath)
+  ok('目录被删后重建仍有头', after2.subarray(0, 4).toString('ascii') === 'MREC')
+  const c3 = new EmbCache({ cachePath: jsonPath, dimension: dim })
+  ok('目录重建后条目可读', c3.get('目录也没了')?.[0] === 3, `size=${c3.size}`)
+  // 0 字节中间态不应被改名留证（那是别人正在 create）
+  const dir2 = join(ROOT, 'i2')
+  rmSync(dir2, { recursive: true, force: true })
+  mkdirSync(dir2, { recursive: true })
+  const j2 = join(dir2, 'emb-cache.json')
+  writeFileSync(embCacheBinPath(j2), Buffer.alloc(0))
+  const c4 = new EmbCache({ cachePath: j2, dimension: dim, debounceMs: 10 })
+  ok('0 字节文件不被改名留证', readdirSync(dir2).filter((f) => f.includes('.corrupt-')).length === 0, readdirSync(dir2).join(','))
+  c4.set('中间态后写', Float32Array.from([4, 4, 4, 4]))
+  await c4.flushNow()
+  const c5 = new EmbCache({ cachePath: j2, dimension: dim })
+  ok('0 字节中间态后落盘有头可读', c5.get('中间态后写')?.[0] === 4, `size=${c5.size}`)
+  c1.dispose(); c2.dispose(); c3.dispose(); c4.dispose(); c5.dispose()
+}
+
+/* ── J 进程 exit 兜底路径（flushSync，只在退出时跑，必须单测）── */
+console.log('\n[J] 退出兜底 flushSync（子进程真 exit）')
+{
+  const dir = join(ROOT, 'j')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  const jsonPath = join(dir, 'emb-cache.json')
+  const binPath = embCacheBinPath(jsonPath)
+  const dim = 4
+  // 子进程：构造 → set → 立刻 exit（不给去抖定时器机会，只能走 exit 钩子的 flushSync）
+  const child = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      `(async () => {
+        const { EmbCache } = await import('${join(LIB, 'emb-cache.js')}');
+        const c = new EmbCache({ cachePath: ${JSON.stringify(jsonPath)}, dimension: ${dim}, debounceMs: 60000 });
+        c.set('退出兜底', Float32Array.from([8, 8, 8, 8]));
+        process.exit(0);
+      })()`,
+    ],
+    { encoding: 'utf8' },
+  )
+  ok('子进程正常退出', child.status === 0, `status=${child.status} ${String(child.stderr).slice(0, 80)}`)
+  const buf = readFileSync(binPath)
+  ok('exit 兜底落盘有头', buf.subarray(0, 4).toString('ascii') === 'MREC', `首 4B=${buf.subarray(0, 4).toString('hex')} ${buf.length}B`)
+  const c = new EmbCache({ cachePath: jsonPath, dimension: dim })
+  ok('exit 兜底写入可读回', c.get('退出兜底')?.[2] === 8, `size=${c.size}`)
+  // 文件先被外部删掉再 exit（第三路径的退出变体）
+  rmSync(binPath)
+  const child2 = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      `(async () => {
+        const { EmbCache } = await import('${join(LIB, 'emb-cache.js')}');
+        const c = new EmbCache({ cachePath: ${JSON.stringify(jsonPath)}, dimension: ${dim}, debounceMs: 60000 });
+        c.set('删后退出', Float32Array.from([9, 9, 9, 9]));
+        process.exit(0);
+      })()`,
+    ],
+    { encoding: 'utf8' },
+  )
+  ok('删文件后子进程正常退出', child2.status === 0, `status=${child2.status}`)
+  const buf2 = readFileSync(binPath)
+  ok('删文件后 exit 兜底仍有头', buf2.subarray(0, 4).toString('ascii') === 'MREC', `首 4B=${buf2.subarray(0, 4).toString('hex')}`)
+  const c2 = new EmbCache({ cachePath: jsonPath, dimension: dim })
+  ok('删文件后 exit 写入可读回', c2.get('删后退出')?.[0] === 9, `size=${c2.size}`)
+  c.dispose(); c2.dispose()
 }
 
 /* ── E 跳闸 ── */
