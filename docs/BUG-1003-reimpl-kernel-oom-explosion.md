@@ -1,6 +1,6 @@
 # BUG-1003: reimpl 内核轨生产爆炸（437MB→5.97GB）+ SEGV——挂载风暴 × 生命周期泄漏
 
-**状态**: 取证完成，修复执行中 ｜ **报告方**: dsh-plugins 工作区 ｜ 2026-10-03 ｜ 关联: BUG-0930（keepalive/tripwire 已并入本案背景）
+**状态**: CLOSED（2026-10-14 定谳修复：根因=emb-cache.json 全量同步重写，单周期 573MB 峰值/16 倍 JSON 膨胀；修复=追加式 emb-cache.bin + LRU 预算 + 落盘去抖。核验：probe 36/36、acceptance reimpl 37/37、生产 E2E 首触 +4MB vs 旧 +280MB。全案见 dsh-plugins 桶 D98/D102；余留低危尾巴另立 BUG-1014） ｜ **报告方**: dsh-plugins 工作区 ｜ 2026-10-03 ｜ 关联: BUG-0930（keepalive/tripwire 已并入本案背景）
 
 ## 案情（时间线，北京时间）
 
