@@ -26,3 +26,4 @@ kernel/tools/diff-report/
 .scratch/t02-baseline/
 .scratch/corpus-governance-0926/07-after-samples-suite*.log
 .scratch/corpus-governance-0926/02-baseline-suite.log
+.scratch/whale-fix/
