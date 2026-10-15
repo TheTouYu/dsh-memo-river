@@ -621,10 +621,28 @@ export function recallFailureNotice(
     } else {
       const top = effective.selected.slice(0, deps.config.inject.decisionTopN)
       const cands: DecisionBatchCandidate[] = top.map((c) => ({ key: keyOf(c), d: dForm(c), title: c.title, body: c.body }))
+      // 保底泳道（2026-10-16 用户令）：apiUrl+model 齐才启用；key 空=沿用 embed 保底 key（同 openrouter 家族）。
+      // 配置不完整（有 apiUrl 无 model）显式告警不启用，不静默。
+      const dfb = deps.config.inject
+      const decisionFallback =
+        dfb.decisionFallbackApiUrl && dfb.decisionFallbackModel
+          ? {
+              apiUrl: dfb.decisionFallbackApiUrl,
+              apiKey: dfb.decisionFallbackApiKey || deps.config.embed.fallbackApiKey,
+              model: dfb.decisionFallbackModel,
+              timeoutMs: dfb.decisionFallbackTimeoutMs,
+            }
+          : undefined
+      if (dfb.decisionFallbackApiUrl && !decisionFallback) {
+        logger.warn(
+          `decision-fallback-unconfigured apiUrl 已给但 model 为空——保底不启用（补 inject.decisionFallbackModel）`,
+        )
+      }
       const clientOpts = {
         endpoint: deps.config.inject.decisionEndpoint,
         timeoutMs: deps.config.inject.decisionTimeoutMs,
         logger,
+        fallback: decisionFallback,
       }
       if (decisionMode === 'shadow') {
         // fire-and-forget：失败已由客户端记 decision-error，这里不 await、绝不抛。
@@ -635,7 +653,7 @@ export function recallFailureNotice(
             logger.info(
               `inject-decision bucket=${workspace.paths.bucket} mode=shadow ids=${top.map(dForm).join(',')} ` +
                 `decisionP=${top.map((c) => res.probs[keyOf(c)]?.toFixed(2) ?? 'n/a').join('/')} ` +
-                `asked=${res.asked}/${cands.length} elapsedMs=${Date.now() - t0} session=${sessionId}`,
+                `asked=${res.asked}/${cands.length} viaFallback=${res.fallbackAnswered} elapsedMs=${Date.now() - t0} session=${sessionId}`,
             )
           })
           .catch(() => {
@@ -647,7 +665,7 @@ export function recallFailureNotice(
           const res = await scoreDecisionBatch(stateText, cands, clientOpts)
           if (res.answered > 0) {
             finalOutcome = { ...effective, selected: rerankByDecision(effective.selected, res.probs, keyOf) }
-            decisionSuffix = ` decisionP=${top.map((c) => res.probs[keyOf(c)]?.toFixed(2) ?? 'n/a').join('/')} decisionRerank=on`
+            decisionSuffix = ` decisionP=${top.map((c) => res.probs[keyOf(c)]?.toFixed(2) ?? 'n/a').join('/')} decisionRerank=on viaFallback=${res.fallbackAnswered}`
           } else {
             logger.warn(
               `decision-degraded bucket=${workspace.paths.bucket} mode=on 顺序保持原样（asked=${res.asked} answered=0，失败已在上行记因）session=${sessionId}`,

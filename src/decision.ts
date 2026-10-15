@@ -46,6 +46,24 @@ export interface DecisionClientOptions {
   logger?: DecisionLoggerLike
   /** 测试注入口；缺省全局 fetch。 */
   fetchImpl?: typeof fetch
+  /**
+   * **保底泳道**（2026-10-16 用户令，游戏模式停 8122 期间 shadow/on 不断流）：
+   * 主端点任何失败（超时/拒连/5xx/坏 JSON/坏形状）后，把同一问法适配成
+   * openrouter 兼容 chat completions（max_tokens=1 + logprobs 读 P(是)/P(否)）。
+   * undefined = 不启用（行为与旧版逐字相同）。⚠️ 云端模型与本地 0.8b 分布**不等价**：
+   * 保底分只做可用性兜底，H1/H4/H8 金标实验**不得**混入（batch 返回 fallbackAnswered
+   * 计数 + `decision-fallback` 日志行供口径分离）。
+   */
+  fallback?: DecisionFallbackOptions
+}
+
+/** 保底泳道配置（apiUrl 约定同 embed：不带 /v1，请求打到 `${apiUrl}/v1/chat/completions`）。 */
+export interface DecisionFallbackOptions {
+  apiUrl: string
+  apiKey: string
+  model: string
+  /** 云端往返独立超时（本地 800ms 预算装不下；批 deadline 在保底在场时取两超时较大值）。 */
+  timeoutMs: number
 }
 
 /** 空上下文轮跳过判据（PLAN §P0b：先判空——空 state 上打分是噪声）。 */
@@ -181,6 +199,106 @@ export async function scoreCandidateDecision(stateZh: string, opts: DecisionClie
   }
 }
 
+/* ── 保底泳道：openrouter chat 适配（2026-10-16）──────────────────────────
+ * 主端点死（游戏模式/维护/崩溃）时，把 ⑥ 问法原样装进 user 消息，让云端模型
+ * 单 token 作答「是/否」，从 top_logprobs 读两路概率 softmax 得 p(true)。
+ * 与本地 8122 的 probs["true"] 同为「读了会改变做法吗」的 P(是)，但模型不同 ⇒
+ * 分布不等价——保底分只保可用性（重排不断流），不当实验金标。 */
+const FALLBACK_PROMPT_SUFFIX = `\n\n${DECISION_INSTRUCTION}\n只回答一个字：是 或 否`
+
+function softmax2(la: number, lb: number): number {
+  const m = Math.max(la, lb)
+  const ea = Math.exp(la - m)
+  const eb = Math.exp(lb - m)
+  return ea / (ea + eb)
+}
+
+async function chatFallbackScore(stateZh: string, opts: DecisionClientOptions): Promise<number | null> {
+  const fb = opts.fallback!
+  const fetchImpl = opts.fetchImpl ?? fetch
+  const url = `${fb.apiUrl.replace(/\/+$/, '')}/v1/chat/completions`
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), fb.timeoutMs)
+  try {
+    let res: Response
+    try {
+      res = await fetchImpl(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${fb.apiKey}` },
+        body: JSON.stringify({
+          model: fb.model,
+          messages: [{ role: 'user', content: stateZh + FALLBACK_PROMPT_SUFFIX }],
+          max_tokens: 1,
+          temperature: 0,
+          logprobs: true,
+          top_logprobs: 20,
+        }),
+        signal: ac.signal,
+      })
+    } catch (e) {
+      const kind = (e as Error)?.name === 'AbortError' ? 'timeout' : 'network'
+      opts.logger?.warn(`decision-fallback-error kind=${kind} model=${fb.model} msg=${String((e as Error)?.message ?? e)}`)
+      return null
+    }
+    if (!res.ok) {
+      opts.logger?.warn(`decision-fallback-error kind=http-${res.status} model=${fb.model}`)
+      return null
+    }
+    let data: unknown
+    try {
+      data = await res.json()
+    } catch (e) {
+      opts.logger?.warn(`decision-fallback-error kind=bad-json model=${fb.model} msg=${String((e as Error)?.message ?? e)}`)
+      return null
+    }
+    const choice = (data as { choices?: unknown[] } | null)?.choices?.[0] as
+      | { message?: { content?: unknown }; logprobs?: { content?: Array<{ top_logprobs?: Array<{ token?: unknown; logprob?: unknown }> }> } }
+      | undefined
+    let lpYes: number | null = null
+    let lpNo: number | null = null
+    const tl = choice?.logprobs?.content?.[0]?.top_logprobs
+    if (Array.isArray(tl)) {
+      for (const t of tl) {
+        const tok = String(t?.token ?? '').trim()
+        const lp = Number(t?.logprob)
+        if (Number.isFinite(lp)) {
+          if (tok.startsWith('是') && lpYes === null) lpYes = lp
+          else if (tok.startsWith('否') && lpNo === null) lpNo = lp
+        }
+      }
+    }
+    if (lpYes !== null && lpNo !== null) return softmax2(lpYes, lpNo)
+    if (lpYes !== null) return 1 // 「否」不在 top-20 ⇒ P(是) 压倒性
+    if (lpNo !== null) return 0
+    // 两路都不在 top_logprobs：退化读正文首字（max_tokens=1，content 即首 token 文本）
+    const content = String(choice?.message?.content ?? '').trim()
+    if (content.startsWith('是')) return 1
+    if (content.startsWith('否')) return 0
+    opts.logger?.warn(`decision-fallback-error kind=no-prob-tokens model=${fb.model} content=${JSON.stringify(content.slice(0, 8))}`)
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** lane 区分打分结果：primary=8122 / fallback=云端（口径分离的数据面）。 */
+export interface DecisionScoreOutcome {
+  p: number
+  lane: 'primary' | 'fallback'
+}
+
+/**
+ * 带 lane 的单候选打分：主端点失败且配置了保底 → 走 chat 适配。任何失败返回 null（绝不抛）。
+ */
+export async function scoreCandidateWithLane(stateZh: string, opts: DecisionClientOptions): Promise<DecisionScoreOutcome | null> {
+  const p = await scoreCandidateDecision(stateZh, opts)
+  if (p !== null) return { p, lane: 'primary' }
+  if (!opts.fallback?.apiUrl || !opts.fallback.model) return null
+  const fp = await chatFallbackScore(stateZh, opts)
+  if (fp === null) return null
+  opts.logger?.info(`decision-fallback model=${opts.fallback.model} p=${fp.toFixed(4)} timeoutMs=${opts.fallback.timeoutMs}`)
+  return { p: fp, lane: 'fallback' }
+}
 /* ── 批量：并发 ≤2 + 整批 deadline + 不重试 ─────────────────────────────── */
 export interface DecisionBatchCandidate {
   /** probs 反查键（调用方口径，如跨桶 candidateKey）。 */
@@ -198,12 +316,16 @@ export interface DecisionBatchResult {
   asked: number
   /** 拿到有效 p 的候选数。 */
   answered: number
+  /** 其中走保底泳道（云端）拿到的个数——口径分离：>0 说明本轮分不是本地 8122 的。 */
+  fallbackAnswered: number
 }
 
 /**
  * 逐候选并发打分：≤DECISION_MAX_CONCURRENCY 个 worker 各自串行取队；
  * 单请求超时 = opts.timeoutMs；**整批 deadline 同值**——worker 每次取任务前检查，
  * 到点即停（不发新请求）。绝不重试（重试把延迟预算吃两遍）。
+ * 保底泳道在场时整批 deadline 取 max(timeoutMs, fallback.timeoutMs)：主端点 fail-fast
+ * （拒连毫秒级）后保底请求需要云端往返时间，沿用 800ms 会把保底全部饿死。
  */
 export async function scoreDecisionBatch(
   state: string,
@@ -211,24 +333,27 @@ export async function scoreDecisionBatch(
   opts: DecisionClientOptions,
 ): Promise<DecisionBatchResult> {
   const t0 = Date.now()
+  const deadlineMs = opts.fallback?.apiUrl ? Math.max(opts.timeoutMs, opts.fallback.timeoutMs) : opts.timeoutMs
   const probs: Record<string, number> = {}
   let asked = 0
   let answered = 0
+  let fallbackAnswered = 0
   const queue = [...candidates]
   const worker = async (): Promise<void> => {
     while (queue.length > 0) {
-      if (Date.now() - t0 >= opts.timeoutMs) return // 整批 deadline：不再发新请求
+      if (Date.now() - t0 >= deadlineMs) return // 整批 deadline：不再发新请求
       const c = queue.shift()!
       asked += 1
       const stateZh = buildDecisionStateZh(state, c.d, c.title, clipDecisionBody(c.body))
-      const p = await scoreCandidateDecision(stateZh, opts)
-      if (p !== null) {
-        probs[c.key] = p
+      const outcome = await scoreCandidateWithLane(stateZh, opts)
+      if (outcome !== null) {
+        probs[c.key] = outcome.p
         answered += 1
+        if (outcome.lane === 'fallback') fallbackAnswered += 1
       }
     }
   }
   const n = Math.max(1, Math.min(DECISION_MAX_CONCURRENCY, candidates.length))
   await Promise.all(Array.from({ length: n }, () => worker()))
-  return { probs, asked, answered }
+  return { probs, asked, answered, fallbackAnswered }
 }

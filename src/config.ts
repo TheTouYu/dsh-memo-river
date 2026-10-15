@@ -153,6 +153,21 @@ export interface InjectConfig {
   decisionTimeoutMs: number
   /** 送打的候选条数上限（只重排头部 N 条，无分候选沉尾保原序；服务上限 25）。 */
   decisionTopN: number
+  /**
+   * **decision 保底泳道**（2026-10-16 用户令，游戏模式停 8122 期间不断流）：
+   * decisionFallbackApiUrl 非空 = 启用。主端点失败后把 ⑥ 问法适配成
+   * `${apiUrl}/v1/chat/completions`（max_tokens=1 + logprobs 读 P(是)/P(否)）。
+   * 留空（缺省）= 不启用，行为与旧版逐字相同（回退红线）。
+   * ⚠️ 云端分与本地 0.8b 分布不等价：保底只兜可用性，金标实验不得混入
+   * （inject-decision 行 viaFallback 计数 + decision-fallback 日志行做口径分离）。
+   */
+  decisionFallbackApiUrl: string
+  /** 保底 key；空 = 沿用 embed.fallbackApiKey（同 openrouter 家族免重配）。 */
+  decisionFallbackApiKey: string
+  /** 保底模型名（openrouter slug，如 deepseek/deepseek-chat）；apiUrl 非空且此字段空 = 配置不完整，不启用并告警。 */
+  decisionFallbackModel: string
+  /** 保底请求超时（云端往返独立预算；批 deadline 在保底在场时取 max(主超时, 此值)）。 */
+  decisionFallbackTimeoutMs: number
 }
 
 export interface NativeConfig {
@@ -393,6 +408,14 @@ export const Config: z<Config> = z.object({
       decisionTimeoutMs: z.number().min(50).max(10_000).default(800),
       /** 只重排头部 N 条（服务上限 25；k=3 是增益最大点，k=8 增益 CI 含 0）。 */
       decisionTopN: z.number().min(1).max(25).default(3),
+      /** decision 保底泳道（2026-10-16）：非空 = 启用 chat 适配保底；空 = 逐字节旧行为。 */
+      decisionFallbackApiUrl: z.string().default(''),
+      /** 空 = 沿用 embed.fallbackApiKey（同 openrouter 家族）。 */
+      decisionFallbackApiKey: z.string().default(''),
+      /** apiUrl 非空且此字段空 = 配置不完整（运行时告警不启用）。 */
+      decisionFallbackModel: z.string().default(''),
+      /** 云端往返独立超时；批 deadline 在保底在场时取 max(主超时, 此值)。实测 openrouter 1.7-3.0s 常态 + 偶发 >6s ⇒ 4000。 */
+      decisionFallbackTimeoutMs: z.number().min(50).max(15_000).default(4000),
     })
     .default({} as InjectConfig),
 
