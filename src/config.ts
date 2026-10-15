@@ -75,10 +75,10 @@ export interface InjectConfig {
   queryLookback: number
   /**
    * 票 01：注入路径嵌入短超时（ms，0 = 用 EmbedClient 宽松默认 60s；缺省 8000）。
-   * 只罩被动注入的合批 embed 调用（查询向量 + 门控锚，一次请求）；超时/失败 →
-   * inject-skip（reason 可区分 embed-timeout）+ 一条模型可见的「召回未生效」短通知
-   * （D214 降级可见化：失败不再沉默）。写侧（memo_write/approve）与主动 memo_recall
-   * 不经此配置，仍走宽松默认 60s。
+   * 只罩被动注入的两次并行 embed 调用（查询向量单发 + 门控锚合批，拆批 1+2 见
+   * recall.ts ① 注释）；超时/失败 → inject-skip（reason 可区分 embed-timeout）+
+   * 一条模型可见的「召回未生效」短通知（D214 降级可见化：失败不再沉默）。写侧
+   * （memo_write/approve）与主动 memo_recall 不经此配置，仍走宽松默认 60s。
    */
   embedTimeoutMs: number
   /**

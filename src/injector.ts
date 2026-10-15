@@ -124,7 +124,8 @@ function recallOptions(config: Config, queryId: string, gateText = '', gateAssis
     queryId,
     gateText,
     gateAssistantText,
-    // 票 01：注入路径嵌入短超时（只罩被动注入的合批 embed；写侧/主动 recall 不传 → 宽松默认）
+    // 票 01：注入路径嵌入短超时（只罩被动注入的拆批 embed——query 单发 + 锚合批并行；
+    // 写侧/主动 recall 不传 → 宽松默认）
     embedTimeoutMs: config.inject.embedTimeoutMs,
   }
 }

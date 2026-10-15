@@ -220,8 +220,9 @@ export interface RecallOptions {
   gateAssistantText?: string
   /**
    * 票 01：注入路径嵌入短超时（ms；0/缺省 = 用 EmbedClient 构造时的宽松默认 60s）。
-   * 只罩本函数发出的合批 embed 调用（查询向量 + 门控锚一次请求）；写侧（tools.ts 的
-   * memo_write 族）不经 recall，主动 memo_recall 也不传 → 均不受影响。
+   * 只罩本函数发出的两次并行 embed 调用（查询向量单发 + 门控锚合批，拆批 1+2 见 recall
+   * ① 注释）；写侧（tools.ts 的 memo_write 族）不经 recall，主动 memo_recall 也不传 →
+   * 均不受影响。
    */
   embedTimeoutMs?: number
   coreTags?: string[]
@@ -416,29 +417,42 @@ export async function recall(
 
   if (!queryText.trim()) return empty('empty-query')
 
-  /* ① 查询场向量 + ①b 门控锚向量 —— 一次批量调用（票 01）
+  /* ① 查询场向量 + ①b 门控锚向量 —— 拆批 1+2 并行（票 01 合批 → 2026-10-15 拆批）
    *
-   * 原来是 2-3 次**串行单条** embed()（queryField 一次 + 每个可用 gate 锚各一次），
-   * 端点单条 RTT 实测 1.19-1.45s（connect 0.4 + TLS 0.8），注入前缀被拉到 2.5-4s+。
-   * 合批后 input=[query, gU 锚, gA 锚] 一个请求一次返回；批内每条向量与单条调用
-   * 逐位等价（同模型同端点，VCP EmbeddingUtils 本来就按批调用），gate 语义与
-   * 日志字段（gateVector/maxKnn/retrievalMaxKnn）不变。
+   * 演进：票 01（09-15）把 2-3 次**串行单条** embed() 合成一请求，消灭的是串行 RTT
+   * （远端端点单条 RTT 1.19-1.45s）。2026-10-15 实测（D265/D272，本地 bge-m3 fp16，
+   * 同 3 条文本：4000 字 query + 9 字 gU + 1200 字 gA）暴露合批的隐性计费：**批内每条
+   * 按最长条 padding 计费**——合批 3 条 1926ms ≈ 3×单发 4000 字（567ms），9 字短指令
+   * 被按 4000 字算钱；拆「长 query 单发 + 短锚合批」两请求并行 → 860ms（-55%）。
+   * 全拆 1+1+1 实测 775ms，仅再省 85ms，不值每轮多一个请求（跳闸计数/远端 fallback
+   * 配额暴露），取 1+2。服务端单锁下墙钟 ≈ enc(query)+enc(锚批)；联邦双桶的同一批
+   * 文本由服务端 in-flight 去重合流（docs/DEBUG-inject-latency-2026-10-15.md）。
+   *
+   * 拆批的向量代价（实测口径，修正本注释旧版「批内每条与单条调用逐位等价」——已被
+   * 2026-10-15 受控实验证伪）：合批 vs 单发**非逐位相等**，逐元素最大差 3.05e-4
+   * （query）/4.88e-4（gU）/4.27e-4（gA），cos 0.999993~0.999998——与 D222 已接受的
+   * provider 漂移（3.8e-4~7.3e-4，cos≥0.99997）同量级。gate 语义与日志字段
+   * （gateVector/maxKnn/retrievalMaxKnn）不变。
    *
    * 锚准入守卫沿用原 scoreAnchor：空文本、或与查询场同文（同文时 gU≡检索向量，
    * 无判别力，见 config.ts gateOnCurrentMessage 注释）的锚不入场；下标显式回填
-   * （guIdx/gaIdx），不用 Map——防 user/assistant 锚同文时键碰撞。
+   * （guIdx/gaIdx 基准 = 合并后 vectors：[queryVector, ...锚向量]），不用 Map——防
+   * user/assistant 锚同文时键碰撞（embed() 内部按文本去重，同文锚得同向量）。
    *
-   * 注入专用短超时（embedTimeoutMs）也只罩这一次调用。超时/失败 = 查询向量拿不到，
-   * 整体降级 inject-skip（§6.5：嵌入不可达就没有召回可言；验收 #9 的死端点口径不变）。
-   * 注：原「查询向量成功 + 锚 embed 失败 → 弃锚退回窗口判定」的部分失败路径随合批
-   * 物理消失（单请求全有或全无）——失败已在入口整体归因，不再有中间态。 */
+   * 注入专用短超时（embedTimeoutMs）分别罩住两次并行调用（墙钟≈慢者；服务端单锁下
+   * ≈两者 enc 之和）。任一请求失败 = 整体降级 inject-skip（§6.5：嵌入不可达就没有
+   * 召回可言；验收 #9 的死端点口径不变）——Promise.all 全有或全无，与票 01 合批口径
+   * 一致；原「查询向量成功 + 锚 embed 失败 → 弃锚退回窗口判定」的部分失败路径仍物理
+   * 消失。跳闸计数按请求累加：一轮失败最多 +2（合批时 +1），连续 2 轮失败即跳闸
+   * （合批要 3 轮）——记录为已知差异。 */
   const trimmedQuery = queryText.trim()
-  const batchTexts = [queryText]
   const gateUserAnchor = options.gate ? (options.gateText ?? '').trim() : ''
   const gateAssistantAnchor = options.gate ? (options.gateAssistantText ?? '').trim() : ''
-  const guIdx = gateUserAnchor && gateUserAnchor !== trimmedQuery ? batchTexts.push(gateUserAnchor) - 1 : -1
+  /* 锚批（请求 B）：push 返回新长度 = 该锚在合并 vectors 里的下标（queryVector 占 [0]）。 */
+  const anchorTexts: string[] = []
+  const guIdx = gateUserAnchor && gateUserAnchor !== trimmedQuery ? anchorTexts.push(gateUserAnchor) : -1
   const gaIdx =
-    gateAssistantAnchor && gateAssistantAnchor !== trimmedQuery ? batchTexts.push(gateAssistantAnchor) - 1 : -1
+    gateAssistantAnchor && gateAssistantAnchor !== trimmedQuery ? anchorTexts.push(gateAssistantAnchor) : -1
   /* 空库短路提前到 embed 之前（2026-09-28）：① 省一次注定无效的 embed 往返；
    * ② embed 间歇超时窗口下 fallbackReason 语义正确——验收 #11 曾在空库上报
    * embed-timeout 而非 empty-corpus。快照窗口变宽（embed 往返期间的新写入本拍
@@ -448,7 +462,15 @@ export async function recall(
   let vectors: Float32Array[]
   const embedCallOpts = (options.embedTimeoutMs ?? 0) > 0 ? { timeoutMs: options.embedTimeoutMs } : undefined
   try {
-    vectors = await embed.embed(batchTexts, embedCallOpts)
+    /* SPLIT-BATCH-1P2-2026-10-15：请求 A [query]（长文本单发，不吃锚的 padding）∥
+     * 请求 B [gU,gA]（两条都短，padding 代价低），Promise.all 并行——数字与机制见上方
+     * 注释块。B 为空（门控关/锚全被守卫拦下）时 embed([]) 内部零请求；任一失败整体
+     * 抛出走下方统一降级，与合批口径一致。 */
+    const [queryVecs, anchorVecs] = await Promise.all([
+      embed.embed([queryText], embedCallOpts),
+      embed.embed(anchorTexts, embedCallOpts),
+    ])
+    vectors = [...queryVecs, ...anchorVecs]
   } catch (e) {
     // 验收 #9：拔掉嵌入 API / 慢端点超预算 → 跳过注入 + 记日志，主流程不受影响。
     // 票 01：超时（embed.ts 已就地打标 embed-timeout 前缀）与其他失败分开归因，
@@ -480,8 +502,9 @@ export async function recall(
    * gA = 最近 ≥150 字助手消息前 1200 字（工作陈述通常在题上，skip 集 gA 0.709-0.881）。
    * 胜选锚进 gateVector，败选锚分值进 diagnostics 取证。 */
   const diagnostics: Record<string, unknown> = {}
-  /* 锚向量直接取自 ① 的合批结果（下标回填；-1 = 锚未入场：门控关 / 空文本 / 与查询场同文
-   * → null，与原 scoreAnchor 的返回条件一致）。锚的 maxKnn 对全库 chunk 逐条余弦取最大。 */
+  /* 锚向量直接取自 ① 的合并结果（请求 A+B 拼接，下标回填；-1 = 锚未入场：门控关 /
+   * 空文本 / 与查询场同文 → null，与原 scoreAnchor 的返回条件一致）。锚的 maxKnn
+   * 对全库 chunk 逐条余弦取最大。 */
   const anchorScore = (idx: number): number | null => {
     const vec = idx >= 0 ? vectors[idx] : undefined
     if (!vec) return null
