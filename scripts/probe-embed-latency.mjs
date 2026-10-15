@@ -28,7 +28,7 @@ const QUICK = process.argv.includes('--quick')
 const { Config: ConfigSchema } = await import('../lib/index.js')
 const { resolveEmbed } = await import('../lib/workspace.js')
 const { workspacePaths } = await import('../lib/runtime.js')
-const { EmbedClient, WRITE_EMBED_OPTIONS } = await import('../lib/embed.js')
+const { EmbedClient, WRITE_EMBED_OPTIONS, WRITE_EMBED_TIMEOUT_MS, WRITE_EMBED_RETRIES } = await import('../lib/embed.js')
 
 const VCP = '/home/h/app/VCPToolBox'
 const config = ConfigSchema({ bucket: '', native: { vcpRoot: VCP } })
@@ -38,7 +38,7 @@ const TMP = mkdtempSync(join(tmpdir(), 'embedlat-'))
 
 const redact = (s) => (typeof s === 'string' && s.length > 8 ? `${s.slice(0, 4)}…${s.slice(-2)}（${s.length} 字符）` : '（未设）')
 console.log('════════ 嵌入端点真实延时核验 ════════')
-console.log(`端点  : ${resolved.apiUrl}   模型: ${resolved.model}   维度: ${resolved.dimension}   来源: ${resolved.source}`)
+console.log(`端点  : ${resolved.apiUrl}   模型: ${resolved.model}   维度: ${resolved.dimension}   来源: ${resolved.source}   providerOrder: ${JSON.stringify(resolved.providerOrder ?? null)}`)
 console.log(`密钥  : ${redact(resolved.apiKey)}   TAG_EMBED_PROXY=${JSON.stringify(process.env.TAG_EMBED_PROXY ?? null)}   NODE_USE_ENV_PROXY=${JSON.stringify(process.env.NODE_USE_ENV_PROXY ?? null)}`)
 console.log(`模式  : ${QUICK ? '--quick（样本减半）' : '完整'}`)
 console.log('')
@@ -49,8 +49,9 @@ const N_CONC_ROUNDS = QUICK ? 1 : 3
 const N_LONG = QUICK ? 3 : 6
 const N_SUSTAIN = QUICK ? 12 : 60
 const BATCH = 32
-const INJECT_BUDGET_MS = 3000
-const WRITE_BUDGET_MS = 15000
+// 预算从**真实配置**读（别硬编码——2026-10-15 教训：预算已从 3000 改成 8000）
+const INJECT_BUDGET_MS = config.inject?.embedTimeoutMs ?? 8000
+const WRITE_BUDGET_MS = WRITE_EMBED_TIMEOUT_MS * (1 + WRITE_EMBED_RETRIES)
 
 let nonce = 0
 const uniq = (s) => `${s} #${++nonce}-${Math.random().toString(36).slice(2, 8)}`
@@ -92,6 +93,7 @@ const makeClient = (tag) => new EmbedClient({
   model: resolved.model,
   dimension: resolved.dimension,
   cachePath: join(TMP, `emb-cache-${tag}.json`),
+  providerOrder: resolved.providerOrder,
   timeoutMs: 60_000,
   logger: { warn: (m) => console.log(`   [warn] ${m}`), info: () => {} },
 })
@@ -269,6 +271,7 @@ const directClient = new EmbedClient({
   model: resolved.model,
   dimension: resolved.dimension,
   cachePath: join(TMP, 'emb-cache-direct.json'),
+  providerOrder: resolved.providerOrder,
   timeoutMs: 8000,
   logger: { warn: () => {}, info: () => {} },
 })
