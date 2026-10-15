@@ -1,0 +1,266 @@
+{
+ "BV1wDhj6wEa8": {
+  "bvid": "BV1wDhj6wEa8",
+  "code": 0,
+  "title": "全网刷屏的 Jev 模型正式开放！保姆级教程 + 实战测评",
+  "desc": "全网爆火的 Jev 模型是什么？有什么用？怎么使用？怎么接入 AI 编程工具（比如 Codex）？效果真的好么？跟 DeepSeek V4 Flash 比速度如何？傻子可懂的 Jev 保姆级实战教程 + 实战测评来啦。\n编程学习教程+实战项目+简历模板：codefather.cn\n免费 AI 编程教程：github.com/liyupi/ai-guide\n记得三连支持、关注鱼皮，让更多朋友学到知识哦~",
+  "owner": "程序员鱼皮",
+  "duration": 745,
+  "pubdate": 1790063441,
+  "tname": "",
+  "view": 191431,
+  "danmaku": 327,
+  "reply": 750,
+  "favorite": 5903,
+  "pages": [
+   {
+    "page": 1,
+    "part": "全网刷屏的 Jev 模型正式开放！保姆级教程 + 实战测评",
+    "cid": 42106031130,
+    "duration": 745
+   }
+  ]
+ },
+ "BV1ZLht69E7b": {
+  "bvid": "BV1ZLht69E7b",
+  "code": 0,
+  "title": "【闪客】这些 Jev 的案例都是骗人的！揭秘 Jev 玩我的世界效果骗局",
+  "desc": "",
+  "owner": "飞天闪客",
+  "duration": 507,
+  "pubdate": 1790159845,
+  "tname": "",
+  "view": 169688,
+  "danmaku": 427,
+  "reply": 792,
+  "favorite": 2482,
+  "pages": [
+   {
+    "page": 1,
+    "part": "【闪客】这些 Jev 的案例都是骗人的！揭秘 Jev 玩我的世界效果骗局",
+    "cid": 42136046735,
+    "duration": 507
+   }
+  ]
+ },
+ "BV1Pfhf6dEkN": {
+  "bvid": "BV1Pfhf6dEkN",
+  "code": 0,
+  "title": "开源决策模型 Laya 实测：14 道 SQL 只对 6 道，微调 3.9 小时后能追平 Jev 吗",
+  "desc": "这期用三组实测数据，看看开源决策模型 Laya 和 TypeSafe 的 Jev 差在哪、为什么，以及微调能补回多少。\n\n14 条 PostgreSQL 语句的逻辑判断：Jev 13/14，Laya 6/14。20 张任务卡片选模型档位：Jev 17/20，Laya 最好 9/20。151 张真实看板卡片的项目归类：Jev 0.871，Laya 0.505。\n\n自造 2924 条数据，训练 2 个 epoch 共 3.9 小时。第 1 个 epoch 在手写的 14 条 SQL 上把安全判定从 7/14 提升到 14/14，但逻辑判断仍漏判 4 类问题。这是小样本实测，不是通用性能保证。\n补充更正：视频中“没教过的 bug”表述不准确，训练数据包含 NULL 比较、CROSS JOIN 等变体；这里反映的是不同上下文中的泛化仍有不足。\n\n数据和脚本：https://github.com/DDnim/jev-vs-laya\n模型：https://huggingface.co/convaiinnovations/laya\n本视频使用 AI 辅助制作画面与配音。",
+  "owner": "WarlockTome",
+  "duration": 682,
+  "pubdate": 1790207410,
+  "tname": "",
+  "view": 8232,
+  "danmaku": 1,
+  "reply": 39,
+  "favorite": 144,
+  "pages": [
+   {
+    "page": 1,
+    "part": "开源决策模型 Laya 实测：14 道 SQL 只对 6 道，微调 3.9 小时后能追平 Jev 吗",
+    "cid": 42148499136,
+    "duration": 682
+   }
+  ]
+ },
+ "BV1X2ag6YEgZ": {
+  "bvid": "BV1X2ag6YEgZ",
+  "code": 0,
+  "title": "开源决策引擎 Laya 实测：能平替 Jev 吗？",
+  "desc": "一个 key 用全球大模型🔴 https://DMXAPI.cn 🚀 国内直连 OpenAI、Claude、Gemini，💰￥1 元起充！\n\n- 加入我的知识星球：https://t.zsxq.com/W5Oj7\n\n上一期，我用两个公开数据集对 Jev 做了 662 次测试。这一期把完全相同的样本、问题和计分脚本交给开源项目 Laya，从本地部署开始，完整展示测试过程和结果。\n\n本期使用 Laya 0.3.11 和英文 base checkpoint `convaiinnovations/laya`，在 Apple M3 的 MPS 上本地运行。测试包括 200 条 SMS Spam 和 462 条 Banking77，统一比较准确率与 Macro F1。\n\n本次结果汇总：\n- SMS Spam：Jev 96.5% / Laya 84.0%；Macro F1 为 0.926 / 0.759\n- Banking77：Jev 81.6% / Laya 39.6%；Macro F1 为 0.806 / 0.346\n- Laya 本地推理中位延迟为 50 ms 和 294 ms；Jev 云端调用为 447 ms 和 432 ms\n\nBanking77 的 77 个选项超过 Laya 官方建议的大约 20 个选项，因此这既是相同条件对比，也是一次架构边界的压力测试。评估只覆盖两个英文数据集、662 条样本，视频展示过程和结果，不把它外推为对两个项目的全面结论。\n\n相关链接：\n- Laya 官方仓库：https://github.com/NandhaKishorM/laya\n- Laya 模型卡：https://huggingface.co/convaiinnovations/laya",
+  "owner": "五里墩茶社",
+  "duration": 758,
+  "pubdate": 1790296882,
+  "tname": "",
+  "view": 4784,
+  "danmaku": 1,
+  "reply": 9,
+  "favorite": 118,
+  "pages": [
+   {
+    "page": 1,
+    "part": "开源决策引擎 Laya 实测：能平替 Jev 吗？",
+    "cid": 42178315485,
+    "duration": 758
+   }
+  ]
+ },
+ "BV13wHh6fEec": {
+  "bvid": "BV13wHh6fEec",
+  "code": 0,
+  "title": "Jev被请下王座，StartLux中国开源决策模型冲上第一",
+  "desc": "",
+  "owner": "波动PDE",
+  "duration": 88,
+  "pubdate": 1790996597,
+  "tname": "",
+  "view": 4581,
+  "danmaku": 3,
+  "reply": 9,
+  "favorite": 155,
+  "pages": [
+   {
+    "page": 1,
+    "part": "Jev被请下王座，StartLux中国开源决策模型冲上第一",
+    "cid": 42415427321,
+    "duration": 88
+   }
+  ]
+ },
+ "BV17uaX6fESz": {
+  "bvid": "BV17uaX6fESz",
+  "code": 0,
+  "title": "JEV快速决策模型 本地部署各大开源方案实测 System One",
+  "desc": "把 7 个\"System One\"式快速决策模型做成像素小怪兽，一起抢答 749 道真实判断题：飞书消息分诊、扫地机器人语音指令、语音助手意图识别、英文客服短文本，还有几千字的保险条款和工时推理。每一题的答案和延迟都是模型真实跑出来的，视频逐帧按数据回放。\n结果速览（逐题准确率 / 中位延迟）：\nJev 1.13（OpenRouter API）：94.7%，332 ms，跑完全程约 $0.018\nQwen3.8 27B（本地 NVFP4）：94.7%，328 ms，显存 24 GB\nDiffusionGemma 26B-A4B：93.6%，119 ms。中文 98.8%，英文 83.3%\nJevK5 0.2（4B + LoRA）：90.7%，47 ms，显存 14 GB。自托管综合最佳\nSemIf 4B：84.4%，53 ms；reflex 4B：83.2%，88 ms\nLaya（encoder 小模型）：51.1%，21 ms，最快最省。但中文只有 47.7%，英文短题能到 95.8%\n测试环境：单卡本地部署（vLLM / NInfer），日期 2026-09-29。",
+  "owner": "麻仓月轩",
+  "duration": 1137,
+  "pubdate": 1790711845,
+  "tname": "",
+  "view": 4540,
+  "danmaku": 10,
+  "reply": 35,
+  "favorite": 197,
+  "pages": [
+   {
+    "page": 1,
+    "part": "JEV快速决策模型 本地部署各大开源方案实测 System One",
+    "cid": 42319351267,
+    "duration": 1137
+   }
+  ]
+ },
+ "BV1y1pJ6XEc5": {
+  "bvid": "BV1y1pJ6XEc5",
+  "code": 0,
+  "title": "[数学基础与PyTorch] 08 Jev 决策模型与概率校准，ECE 计算，RL之后LLM过度自信",
+  "desc": "本期 code（为包月会员私有 github 仓库，私有仓库也包含我日常的大量学习笔记，包月同学后台私信具体的 github 账户信息，我邀请到项目里边来）：\n本期 code:\nhttps://github.com/wdkns/modern_genai_bilibili/blob/main/llms/%E6%9E%B6%E6%9E%84/jev/calibration.ipynb\n往期内容参考：\nBV1Mihq6AEbc：Jev 架构讨论\nBV1pWSvBtEAk：Limits of RLVR，分布锐化\n相关论文：\nhttps://aclanthology.org/2023.emnlp-main.330.pdf\nhttps://arxiv.org/pdf/2507.16806\nhttps://arxiv.org/pdf/2504.13837",
+  "owner": "五道口纳什",
+  "duration": 1539,
+  "pubdate": 1791731238,
+  "tname": "",
+  "view": 3490,
+  "danmaku": 0,
+  "reply": 20,
+  "favorite": 177,
+  "pages": [
+   {
+    "page": 1,
+    "part": "[数学基础与PyTorch] 08 Jev 决策模型与概率校准，ECE 计算，RL之后LLM过度自信",
+    "cid": 42658432128,
+    "duration": 1539
+   }
+  ]
+ },
+ "BV1c7h86wELk": {
+  "bvid": "BV1c7h86wELk",
+  "code": 0,
+  "title": "比Jev快10倍！Laya 本地决策 AI 引擎本地部署教程｜快到起飞 + 实战演示",
+  "desc": "视频中相关资料地址：👉https://www.xgdn.com/81.html",
+  "owner": "X超哥来了",
+  "duration": 554,
+  "pubdate": 1790171677,
+  "tname": "",
+  "view": 3007,
+  "danmaku": 1,
+  "reply": 12,
+  "favorite": 118,
+  "pages": [
+   {
+    "page": 1,
+    "part": "比Jev快10倍！Laya 本地决策 AI 引擎本地部署教程｜快到起飞 + 实战演示",
+    "cid": 42140764400,
+    "duration": 554
+   }
+  ]
+ },
+ "BV1LshX6dE1x": {
+  "bvid": "BV1LshX6dE1x",
+  "code": 0,
+  "title": "开源决策模型 Laya（Jev开源版）架构与训练详解",
+  "desc": "Laya 模型的三大组成部分：\n1、Bert 类编码器\n2、面向选项的决策头\n3、概率训练（RLCD）\n\n笔记、代码会维护在一个私有github仓库，充电all in x系列的小伙伴可私信或者评论区给出github用户名或注册github的邮箱，我来邀请，邀请之后邮箱会受到邀请链接，点进去即可。 \nhttps://github.com/wyf3/all-in-ai/blob/main/notebook/LLM%E6%9E%B6%E6%9E%84.md",
+  "owner": "偷星九月333",
+  "duration": 1122,
+  "pubdate": 1790409281,
+  "tname": "",
+  "view": 6564,
+  "danmaku": 34,
+  "reply": 41,
+  "favorite": 504,
+  "pages": [
+   {
+    "page": 1,
+    "part": "开源决策模型 Laya（Jev开源版）架构与训练详解",
+    "cid": 42215538902,
+    "duration": 1122
+   }
+  ]
+ },
+ "BV1dJaF63EPH": {
+  "bvid": "BV1dJaF63EPH",
+  "code": 0,
+  "title": "0.4B 决策模型 Laya， Github 一周 2 万 Star， 一键部署",
+  "desc": "Laya 项目地址：https://github.com/NandhaKishorM/laya.git\n1Panel 整合 Docker版：https://github.com/1Panel-dev/laya-server.git",
+  "owner": "小北AI开源",
+  "duration": 120,
+  "pubdate": 1790208116,
+  "tname": "",
+  "view": 22649,
+  "danmaku": 4,
+  "reply": 87,
+  "favorite": 1178,
+  "pages": [
+   {
+    "page": 1,
+    "part": "0.4B 决策模型 Laya， Github 一周 2 万 Star， 一键部署",
+    "cid": 42148627030,
+    "duration": 120
+   }
+  ]
+ },
+ "BV1FApP6TE2Y": {
+  "bvid": "BV1FApP6TE2Y",
+  "code": 0,
+  "title": "【实测】最近爆火的Jev模型做量化交易靠不靠谱？（测试台已开源）",
+  "desc": "📦 测试台代码 + 24 小时完整结果 + 补算脚本：\nhttps://github.com/frank-quant/ai-trading-videos/tree/main/EP009_jev-mid-frequency-benchmark\n💾 正式场原始数据（约 320 MB，不方便用 GitHub 的也可以从这里拿）：\nhttps://pan.quark.cn/s/d7cb477f75c3 提取码 PhTk\n\nJev 是 TypeSafe 发布的决策模型（官方叫 System One 模型）：不写文字，只做选择题，直接给出选项和概率，官方称一次 70–500 毫秒。发布第二天就有人开源了 jev-trader，每 0.3 秒问它一次「接下来 30 秒涨还是跌」，然后自动挂单。\n\n我基于 jev-trader 修了两个问题，把市场换成币安 BTC 永续合约，让 Jev 跟 8 条经典中高频策略、DeepSeek 和一枚硬币同场比了 24 小时，一共 279,257 个决策点。\n\n结果：\n· Jev 确实能判断涨跌：30 秒准确率 54.7%（95% 区间 53.6%–55.8%），比抛硬币高 4.6 个点\n· 但不如最好的经典策略：QI 盘口失衡 57.9%，一行公式；8 条里 Jev 赢 4、平 2、输 2\n· 这不是因为慢：按提问那一刻算，Jev 也只有 55.1%\n· Jev 和 jev-trader 自带的基准规则 87% 的时候判断一样；有了 QI 再加上 Jev，准确率没有提升\n· 变不成钱：这 24 小时 BTC 30 秒平均只波动 2.2 个基点，挂单一买一卖手续费就要 4 个基点\n· 跟 DeepSeek 比：DeepSeek 一次约 76 秒，Jev 1.5 秒；5 分钟准确率都在 50% 上下，分不出来\n· 花费：Jev 13.8 万次调用 $15.86，DeepSeek 1,410 次 ¥159.5\n\n🔖 只测了币安 BTC 这 24 小时，换市场、换时间段结论不一定一样。视频里的收益曲线是零手续费的理论上限，现实中做不到。本项目与 TypeSafe、jev-trader 作者均无关联，调用费用自付，没有任何赞助。\n\n⚠️ 免责声明：本视频为纯技术演示，只读公开行情、只做模拟，没有下过任何订单，不构成任何投资、财务或交易建议。加密货币波动剧烈，可能损失全部本金，决策请独立判断。",
+  "owner": "frank-quant",
+  "duration": 487,
+  "pubdate": 1791338400,
+  "tname": "",
+  "view": 14311,
+  "danmaku": 53,
+  "reply": 66,
+  "favorite": 591,
+  "pages": [
+   {
+    "page": 1,
+    "part": "【实测】最近爆火的Jev模型做量化交易靠不靠谱？（测试台已开源）",
+    "cid": 42519560246,
+    "duration": 487
+   }
+  ]
+ },
+ "BV1yna96gEiF": {
+  "bvid": "BV1yna96gEiF",
+  "code": 0,
+  "title": "OpenAI 掏出“多模态版 Jev”——Decisions API：零点几秒操作一次电脑",
+  "desc": "",
+  "owner": "说我糖是夸我甜吧",
+  "duration": 50,
+  "pubdate": 1790731615,
+  "tname": "",
+  "view": 4480,
+  "danmaku": 0,
+  "reply": 4,
+  "favorite": 42,
+  "pages": [
+   {
+    "page": 1,
+    "part": "OpenAI 掏出“多模态版 Jev”——Decisions API：零点几秒操作一次电脑",
+    "cid": 42322690843,
+    "duration": 50
+   }
+  ]
+ }
+}
