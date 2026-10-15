@@ -54,10 +54,17 @@ class EmbedHealthLedger {
     return ev
   }
 
-  /** 待播报事件（最多一条）：新建 + 同 (kind,lane) 已过冷却期。 */
+  /**
+   * 待播报事件（最多一条）：同 (kind,lane) 已过冷却期。
+   *
+   * **`all-failed` 刻意不进对话通道**——它已有既有可见路径：注入失败走 `inject-skip` 的
+   * 「召回未生效」通知、写入失败走工具报错；同一件事报两遍只会挤占每一轮的注入预算
+   * （2026-10-15 实测：多发一条会把验收 #9 的「额外消息数」从 2 顶到 3）。它仍进面板卡片与日志。
+   */
   pending(now = Date.now()): EmbedHealthEvent | null {
     for (let i = this.events.length - 1; i >= 0; i--) {
       const ev = this.events[i]!
+      if (ev.kind === 'all-failed') continue
       const key = `${ev.kind}:${ev.lane}`
       const last = this.announced.get(key)
       if (last !== undefined && now - last < ANNOUNCE_COOLDOWN_MS) continue

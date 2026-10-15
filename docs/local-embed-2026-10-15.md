@@ -133,3 +133,15 @@ embed: { apiUrl: 'http://127.0.0.1:8099', apiKey: 'local', model: 'baai/bge-m3',
 
 改完需重启 dsh-web（须先征得用户同意）。验收：真发一次 `memo_write` + 0.5s RSS 采样 + 桶日志 `inject elapsedMs`（预期 4000ms→300ms 级）+ `embed-timeout/failed` 归零；
 再**故意停掉本地服务**（`systemctl --user stop dsh-embed`）发一次写入 → 应在对话里看到回退通知、面板卡片出现 failover 事件、写入照常成功。
+
+### 8.4 一条产品判断：`all-failed` **不进**对话通道
+
+首次实现时三类事件都发对话通知，**验收 #9 立刻逮住**：它数「decision 额外追加的消息数」，实测 3 而期望 2
+（harness 的 runtime-context + 插件既有的一条「召回未生效」）——我那条 `all-failed` 通知是多余的。
+
+判断：**同一件事不报两遍**。`all-failed`（全链失败）本来就有可见路径——注入失败 = `inject-skip` 的「召回未生效」通知，
+写入失败 = 工具调用报错（浏览器里都能看到、都能复制）。通知通道只留**外部看不见的两类**：
+`failover`（主端点坏了但保底顶上，操作照样成功——不说就没人知道）与 `recovered`。
+`all-failed` 仍进面板卡片与日志（面板是"全量台账"，对话是"必须让人知道的增量"）。
+
+代价：不改测试——**改的是产品行为**（去掉重复通知），验收口径因此保持原样通过。
