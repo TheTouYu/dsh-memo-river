@@ -48,8 +48,10 @@ export interface DecisionClientOptions {
   fetchImpl?: typeof fetch
   /**
    * **保底泳道**（2026-10-16 用户令，游戏模式停 8122 期间 shadow/on 不断流）：
-   * 主端点任何失败（超时/拒连/5xx/坏 JSON/坏形状）后，把同一问法适配成
-   * openrouter 兼容 chat completions（max_tokens=1 + logprobs 读 P(是)/P(否)）。
+   * 主端点任何失败（超时/拒连/5xx/坏 JSON/坏形状）后，走 System One 原生决策接口
+   * `${apiUrl}/v1/systemone`（openrouter 代理 TypeSafe Jev；model 填 System One
+   * 模型名如 jev-latest，**不是** chat 模型 slug）——⑥ 问法以 noul 类型发出，
+   * 响应 `answers.changes.noul` = P(yes) ∈ [0,1] 连续概率。
    * undefined = 不启用（行为与旧版逐字相同）。⚠️ 云端模型与本地 0.8b 分布**不等价**：
    * 保底分只做可用性兜底，H1/H4/H8 金标实验**不得**混入（batch 返回 fallbackAnswered
    * 计数 + `decision-fallback` 日志行供口径分离）。
@@ -57,10 +59,11 @@ export interface DecisionClientOptions {
   fallback?: DecisionFallbackOptions
 }
 
-/** 保底泳道配置（apiUrl 约定同 embed：不带 /v1，请求打到 `${apiUrl}/v1/chat/completions`）。 */
+/** 保底泳道配置（apiUrl 约定同 embed：不带 /v1，请求打到 `${apiUrl}/v1/systemone`）。 */
 export interface DecisionFallbackOptions {
   apiUrl: string
   apiKey: string
+  /** System One 模型名（jev-latest / jev-1.13.0；openrouter 上填 typesafe/jev-* 也被接受并解析）。 */
   model: string
   /** 云端往返独立超时（本地 800ms 预算装不下；批 deadline 在保底在场时取两超时较大值）。 */
   timeoutMs: number
@@ -199,24 +202,19 @@ export async function scoreCandidateDecision(stateZh: string, opts: DecisionClie
   }
 }
 
-/* ── 保底泳道：openrouter chat 适配（2026-10-16）──────────────────────────
- * 主端点死（游戏模式/维护/崩溃）时，把 ⑥ 问法原样装进 user 消息，让云端模型
- * 单 token 作答「是/否」，从 top_logprobs 读两路概率 softmax 得 p(true)。
- * 与本地 8122 的 probs["true"] 同为「读了会改变做法吗」的 P(是)，但模型不同 ⇒
- * 分布不等价——保底分只保可用性（重排不断流），不当实验金标。 */
-const FALLBACK_PROMPT_SUFFIX = `\n\n${DECISION_INSTRUCTION}\n只回答一个字：是 或 否`
-
-function softmax2(la: number, lb: number): number {
-  const m = Math.max(la, lb)
-  const ea = Math.exp(la - m)
-  const eb = Math.exp(lb - m)
-  return ea / (ea + eb)
-}
-
-async function chatFallbackScore(stateZh: string, opts: DecisionClientOptions): Promise<number | null> {
+/* ── 保底泳道：System One / Jev noul 形态（2026-10-16 二稿，用户纠偏）─────────
+ * 第一稿用 chat completions+logprobs 是错误形态（jev-router 把是非题当 chat 路由给
+ * 下游、deepseek-chat 二值化+限流）。正确形态=System One 原生决策接口：
+ *   POST ${apiUrl}/v1/systemone  {model:"jev-latest", state, questions:{id:{type:"noul",instructions}}}
+ *   → answers.<id>.noul = P(yes) ∈ [0,1] 连续概率（TypeSafe Jev，中文判断题第三方
+ *   实测 94.7%；实测往返 ~1.6s、$0.000015/请求）。openrouter 以 /v1/systemone
+ *   代理该 API（TAG_EMBED_KEY 通用认证）。
+ * 与本地 8122 的 probs["true"] 同为 ⑥ 的 P(是)，但模型不同 ⇒ 分布不等价——保底分
+ * 只保可用性（重排不断流），不当实验金标。 */
+async function systemOneFallbackScore(stateZh: string, opts: DecisionClientOptions): Promise<number | null> {
   const fb = opts.fallback!
   const fetchImpl = opts.fetchImpl ?? fetch
-  const url = `${fb.apiUrl.replace(/\/+$/, '')}/v1/chat/completions`
+  const url = `${fb.apiUrl.replace(/\/+$/, '')}/v1/systemone`
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), fb.timeoutMs)
   try {
@@ -227,11 +225,8 @@ async function chatFallbackScore(stateZh: string, opts: DecisionClientOptions): 
         headers: { 'content-type': 'application/json', authorization: `Bearer ${fb.apiKey}` },
         body: JSON.stringify({
           model: fb.model,
-          messages: [{ role: 'user', content: stateZh + FALLBACK_PROMPT_SUFFIX }],
-          max_tokens: 1,
-          temperature: 0,
-          logprobs: true,
-          top_logprobs: 20,
+          state: stateZh,
+          questions: { changes: { type: 'noul', instructions: DECISION_INSTRUCTION } },
         }),
         signal: ac.signal,
       })
@@ -251,31 +246,13 @@ async function chatFallbackScore(stateZh: string, opts: DecisionClientOptions): 
       opts.logger?.warn(`decision-fallback-error kind=bad-json model=${fb.model} msg=${String((e as Error)?.message ?? e)}`)
       return null
     }
-    const choice = (data as { choices?: unknown[] } | null)?.choices?.[0] as
-      | { message?: { content?: unknown }; logprobs?: { content?: Array<{ top_logprobs?: Array<{ token?: unknown; logprob?: unknown }> }> } }
-      | undefined
-    let lpYes: number | null = null
-    let lpNo: number | null = null
-    const tl = choice?.logprobs?.content?.[0]?.top_logprobs
-    if (Array.isArray(tl)) {
-      for (const t of tl) {
-        const tok = String(t?.token ?? '').trim()
-        const lp = Number(t?.logprob)
-        if (Number.isFinite(lp)) {
-          if (tok.startsWith('是') && lpYes === null) lpYes = lp
-          else if (tok.startsWith('否') && lpNo === null) lpNo = lp
-        }
-      }
+    const answer = (data as { answers?: Record<string, { noul?: unknown }> } | null)?.answers?.changes
+    const noul = answer?.noul
+    if (typeof noul !== 'number' || !Number.isFinite(noul)) {
+      opts.logger?.warn(`decision-fallback-error kind=no-noul model=${fb.model} detail=${JSON.stringify(answer ?? null).slice(0, 120)}`)
+      return null
     }
-    if (lpYes !== null && lpNo !== null) return softmax2(lpYes, lpNo)
-    if (lpYes !== null) return 1 // 「否」不在 top-20 ⇒ P(是) 压倒性
-    if (lpNo !== null) return 0
-    // 两路都不在 top_logprobs：退化读正文首字（max_tokens=1，content 即首 token 文本）
-    const content = String(choice?.message?.content ?? '').trim()
-    if (content.startsWith('是')) return 1
-    if (content.startsWith('否')) return 0
-    opts.logger?.warn(`decision-fallback-error kind=no-prob-tokens model=${fb.model} content=${JSON.stringify(content.slice(0, 8))}`)
-    return null
+    return noul
   } finally {
     clearTimeout(timer)
   }
@@ -294,7 +271,7 @@ export async function scoreCandidateWithLane(stateZh: string, opts: DecisionClie
   const p = await scoreCandidateDecision(stateZh, opts)
   if (p !== null) return { p, lane: 'primary' }
   if (!opts.fallback?.apiUrl || !opts.fallback.model) return null
-  const fp = await chatFallbackScore(stateZh, opts)
+  const fp = await systemOneFallbackScore(stateZh, opts)
   if (fp === null) return null
   opts.logger?.info(`decision-fallback model=${opts.fallback.model} p=${fp.toFixed(4)} timeoutMs=${opts.fallback.timeoutMs}`)
   return { p: fp, lane: 'fallback' }

@@ -155,8 +155,9 @@ export interface InjectConfig {
   decisionTopN: number
   /**
    * **decision 保底泳道**（2026-10-16 用户令，游戏模式停 8122 期间不断流）：
-   * decisionFallbackApiUrl 非空 = 启用。主端点失败后把 ⑥ 问法适配成
-   * `${apiUrl}/v1/chat/completions`（max_tokens=1 + logprobs 读 P(是)/P(否)）。
+   * decisionFallbackApiUrl 非空 = 启用。主端点失败后走 System One 原生决策接口
+   * `${apiUrl}/v1/systemone`（openrouter 代理 TypeSafe Jev）——⑥ 问法以 noul 类型
+   * 发出，响应 `answers.changes.noul` = P(yes) ∈ [0,1] 连续概率。
    * 留空（缺省）= 不启用，行为与旧版逐字相同（回退红线）。
    * ⚠️ 云端分与本地 0.8b 分布不等价：保底只兜可用性，金标实验不得混入
    * （inject-decision 行 viaFallback 计数 + decision-fallback 日志行做口径分离）。
@@ -164,9 +165,9 @@ export interface InjectConfig {
   decisionFallbackApiUrl: string
   /** 保底 key；空 = 沿用 embed.fallbackApiKey（同 openrouter 家族免重配）。 */
   decisionFallbackApiKey: string
-  /** 保底模型名（openrouter slug，如 deepseek/deepseek-chat）；apiUrl 非空且此字段空 = 配置不完整，不启用并告警。 */
+  /** System One 模型名（jev-latest；不是 chat 模型 slug）；apiUrl 非空且此字段空 = 配置不完整，不启用并告警。 */
   decisionFallbackModel: string
-  /** 保底请求超时（云端往返独立预算；批 deadline 在保底在场时取 max(主超时, 此值)）。 */
+  /** 保底请求超时（实测往返 ~1.6s；批 deadline 在保底在场时取 max(主超时, 此值)）。 */
   decisionFallbackTimeoutMs: number
 }
 
