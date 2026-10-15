@@ -255,6 +255,15 @@ function slugify(text: string): string {
  * 低于拒绝线 0.95（那是硬闸门），0.80 是引导区：高度相似但未到拒绝——大概率同一主题的延续。 */
 const MERGE_SUGGEST_KNN = 0.8
 
+/* H7（2026-10-16，SPEC-决策模型记忆编目与时效治理 §6）：写入闸门 suggest 档——「推翻信号未结算」检测。
+ * 机制依据：D309/D311 盲测——新篇正文明写「作废/证伪/推翻」的，误引率 78%→~0%（自声明是叙事记忆里
+ * 最强的时效机制）；模型有 supersedes 工具却惰性不用（惰性三缺口②）。此闸门在写入成功时检测：
+ * 正文含推翻信号词 + supersedes 声明为空 + 同主题旧篇在场（twin cos ≥ 阈值，复用 ④.5 去重扫描，
+ * 零额外嵌入）→ 追加建议行（正文首行自声明 + memo_supersede 补账），不阻断（suggest 档）。
+ * 阈值宽于 0.80 引导区：推翻性续写往往措辞变化大，先宽放攒精度数据（h7-supersede-suggest 日志）。 */
+const SUPERSEDE_SIGNAL = /作废|证伪|推翻|勘误|取代|已修复|不再成立|翻案|定谳/
+const H7_SUGGEST_MIN_COS = 0.6
+
 async function relatedDiaries(
   workspace: WorkspaceRuntime,
   content: string,
@@ -468,6 +477,9 @@ export interface WriteDiaryInput {
    * + 写侧会话形态（writeSessionShape）。不传（memo_merge）= 豁免：合并是去枢纽手术工具，
    * 源篇退役净文件数只减不增，拦它等于拦治疗。 */
   hubGate?: { mode: number; scoped: boolean; source: string }
+  /** H7：调用方已声明的 supersedes 条数（memo_write 传 supersedeDs.length；update/merge/approve 缺省 0）。
+   *  >0 时本闸门不触发——已结算的写入不需要再建议。 */
+  supersedeDeclared?: number
   /** 拒绝/成功报告的前置段（memo_write 传写前回注；memo_approve 传草稿出处；memo_update 传改写目标+回注）。
    * 票 03：允许传 Promise——write/update/merge 传 composeReinjection(...) 的**在飞** Promise，
    * 让回注嵌入与 writeDiaryCore 的合批嵌入并行；memo_approve 仍传 string。 */
@@ -669,21 +681,23 @@ async function writeDiaryCoreLocked(
   const pre = healthReport(workspace.store, bucket)
   const slug = slugify(title)
 
-  /* ④.5 内容去重闸门（DESIGN §7.1 步 3.5）：新日记 vs 本桶既有 chunk 的最大余弦。
+  /* ④.5 内容去重闸门（DESIGN §7.1 步 3.5）：新日记 vs 本桶既有 chunk 的最大余弦.
    * 写侧对称物 of inject.dedupeSelection——读侧防重复注入，写侧防重复入库。
-   * 票 03：嵌入已在合批里算好（fullVector），此处不再二次 embed full。 */
+   * 票 03：嵌入已在合批里算好（fullVector），此处不再二次 embed full。
+   * twin 声明在块外（H7 复用）：去重扫描顺带产出「最相似旧篇」，供成功路径的推翻信号建议用。 */
+  let twin: { path: string; score: number; chunkId: number } | null = null
   if (dedupCosine > 0 && fullVector) {
     const bucketChunks = workspace.store.chunks(bucket)
     const fileById = new Map(workspace.store.files(bucket).map((f) => [f.id, f.path]))
     /* 去重豁免（票 02/03）：改写目标与合并声明源自己的旧 chunk 不算孪生——
      * 「自我改写/合并文与原文相近」是合法用例；未声明的第三篇近重复仍受闸门约束。 */
     const exempt = new Set(input.exemptFileIds ?? (input.updateOf ? [input.updateOf.fileId] : []))
-    let twin: { path: string; score: number } | null = null
+    /* twin.chunkId（H7）：D 编号展示口径=chunk id——报告行里指认「最相似旧篇」用。 */
     for (const c of bucketChunks) {
       if (exempt.has(c.file_id)) continue
       if (!c.vector) continue
       const score = cosine(fullVector, c.vector.subarray(0, workspace.resolved.dimension))
-      if (!twin || score > twin.score) twin = { path: fileById.get(c.file_id) ?? `chunk#${c.id}`, score }
+      if (!twin || score > twin.score) twin = { path: fileById.get(c.file_id) ?? `chunk#${c.id}`, score, chunkId: c.id }
     }
     if (twin && twin.score > dedupCosine) {
       logger.info(
@@ -751,6 +765,26 @@ async function writeDiaryCoreLocked(
     healthLines.push(
       `· 【hub 闸门·观察】${hubObserve.tag} 已挂 ${hubObserve.count}/${hubObserve.files} 篇（≥1/3），本会话（${input.hubGate!.source}）又写它——已放行（hubGateMode=1 建议档）`,
       `· 替代建议：${hubObserve.advice.length > 0 ? hubObserve.advice.map((a) => `「${a}」`).join(' ') : '（暂无非枢纽替代词）'}；下次写增量换用替代词，或观察攒证后 memo_tuning hubGateMode=2 收紧为硬拒`,
+    )
+  }
+
+  /* H7 suggest 档（2026-10-16，SPEC §6/H7）：推翻信号未结算检测——正文含信号词 + supersedes 未声明 +
+   * 同主题旧篇在场（复用 ④.5 的 twin，零额外嵌入）→ 建议正文首行自声明 + memo_supersede 补账。
+   * 机制依据 D309/D311：新篇正文明写推翻者误引骤降（78% vs 6%），折叠（L3）已验证 0% 误引——
+   * 自声明是 L1 账目与 L3 折叠的共同前置。suggest 档不阻断；日志行供 G3 结算率统计
+   * （建议出现次数 vs 实际补账次数——H7 上线后的回溯判据）。 */
+  if (
+    (input.supersedeDeclared ?? 0) === 0 &&
+    twin !== null &&
+    twin.score >= H7_SUGGEST_MIN_COS &&
+    SUPERSEDE_SIGNAL.test(content)
+  ) {
+    logger.info(
+      `h7-supersede-suggest bucket=${bucket} chunk=D${written.chunkId} cos=${twin.score.toFixed(2)} twin=D${twin.chunkId} superseded=none`,
+    )
+    healthLines.push(
+      `· 【H7·推翻信号】正文含「作废/证伪/推翻」类信号但未声明 supersedes，且同主题旧篇在场：D${twin.chunkId}（cos=${twin.score.toFixed(2)}）`,
+      `  若本篇确属推翻：①正文首行明写「推翻 D${twin.chunkId}…」（实测自声明防误引 78% vs 6%，D309/D311）；②补账 memo_supersede(old=${twin.chunkId}, replacement=D${written.chunkId})——已取代旧篇不再作为当前事实被动注入`,
     )
   }
 
@@ -1125,6 +1159,10 @@ export function installTools(
         const fromArg = Array.isArray(args.tags) ? (args.tags as unknown[]).map((t) => String(t).trim()).filter(Boolean) : []
         const tags = fromArg.length > 0 ? fromArg : parseTagLine(content)
         const title = typeof args.title === 'string' ? args.title.trim() : ''
+        /* G3 解析上移（H7）：writeDiaryCore 要用「已声明条数」决定是否触发推翻信号建议。 */
+        const supersedeDs = Array.isArray(args.supersedes)
+          ? [...new Set((args.supersedes as unknown[]).map((n) => Number(n)).filter((n) => Number.isFinite(n)))]
+          : []
         const result = await writeDiaryCore(workspace, {
           content,
           tags,
@@ -1139,13 +1177,12 @@ export function installTools(
           },
           newTagReason,
           preamble: reinjection,
+          /* H7：已声明 supersedes 的写入不再触发推翻信号建议。 */
+          supersedeDeclared: supersedeDs.length,
           toolName: 'memo_write',
         })
         /* G3（2026-10-15）：落「取代声明」——放在写入**成功之后**。写失败就不该产生取代关系，
          * 否则一次被拒的写入会留下悬空的取代边，把一篇好日记从被动注入里悄悄摘掉。 */
-        const supersedeDs = Array.isArray(args.supersedes)
-          ? [...new Set((args.supersedes as unknown[]).map((n) => Number(n)).filter((n) => Number.isFinite(n)))]
-          : []
         if (supersedeDs.length === 0) return result.report
         const newChunkId = Number(result.chunkId)
         if (!Number.isFinite(newChunkId)) {
