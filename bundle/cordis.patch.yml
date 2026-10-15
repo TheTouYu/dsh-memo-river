@@ -88,7 +88,18 @@
                 # providerOrder：把 OpenRouter 的按价负载均衡钉到单一 provider。不定它时同一文本会被
                 # 路由到 DeepInfra/Parasail 两家，逐元素差 3.8e-4~7.3e-4（逐位不可复现，见
                 # scripts/probe-embed-provider-routing.mjs）；钉住后连打 3 次逐元素差 0.00e+0。
-                embed: { apiUrl: 'https://openrouter.ai/api', apiKey: !!js process.env.TAG_EMBED_KEY || '', model: 'baai/bge-m3', dimension: 1024, providerOrder: 'Parasail' }
+                # 2026-10-15 切换：主端点 = 本地 bge-m3（RTX 3060 fp16，单条 p50 25ms vs 远端 1.9s）；
+                # 保底 = OpenRouter（主端点失败自动回退，见 src/embed.ts 端点泳道 + src/embed-health.ts 台账）。
+                # 回退无需重启即可演练：systemctl --user stop dsh-embed → 自动走保底。
+                embed:
+                  apiUrl: 'http://127.0.0.1:8099'
+                  apiKey: 'local'
+                  model: 'baai/bge-m3'
+                  dimension: 1024
+                  fallbackApiUrl: 'https://openrouter.ai/api'
+                  fallbackApiKey: !!js process.env.TAG_EMBED_KEY || ''
+                  fallbackModel: 'baai/bge-m3'
+                  fallbackProviderOrder: 'Parasail'
                 inject:
                   gate: true
                   k: 3
