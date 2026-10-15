@@ -41,14 +41,19 @@ export interface EmbedHealthSnapshot {
 class EmbedHealthLedger {
   private seq = 0
   private events: EmbedHealthEvent[] = []
-  private announced = new Map<string, number>() // `${kind}:${lane}` → 上次播报时刻
+  private announced = new Map<string, number>() // `${kind}:${lane}` → 上次播报时刻（冷却窗口用）
+  /** 已播报过的事件 id——**同一事件只报一次**；冷却窗口只用来压同类的"新"事件。 */
+  private announcedIds = new Set<number>()
   counters: Record<string, number> = {}
   lastError: string | null = null
 
   record(e: Omit<EmbedHealthEvent, 'id' | 'at'> & { at?: number }): EmbedHealthEvent {
     const ev: EmbedHealthEvent = { id: ++this.seq, at: e.at ?? Date.now(), ...e }
     this.events.push(ev)
-    if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS)
+    if (this.events.length > MAX_EVENTS) {
+      const dropped = this.events.splice(0, this.events.length - MAX_EVENTS)
+      for (const d of dropped) this.announcedIds.delete(d.id)
+    }
     this.counters[ev.kind] = (this.counters[ev.kind] ?? 0) + 1
     if (ev.kind !== 'recovered') this.lastError = `${ev.reason} @ ${ev.endpoint}`
     return ev
@@ -65,6 +70,9 @@ class EmbedHealthLedger {
     for (let i = this.events.length - 1; i >= 0; i--) {
       const ev = this.events[i]!
       if (ev.kind === 'all-failed') continue
+      // 2026-10-15 实测缺陷：只按 (kind,lane) 做冷却 → 冷却一过，**同一条旧事件**会被重新播报
+      // （用户在同一会话里看到 10:52:34 的回退通知在 11:0x 又出现一次）。同一 id 只报一次。
+      if (this.announcedIds.has(ev.id)) continue
       const key = `${ev.kind}:${ev.lane}`
       const last = this.announced.get(key)
       if (last !== undefined && now - last < ANNOUNCE_COOLDOWN_MS) continue
@@ -75,6 +83,7 @@ class EmbedHealthLedger {
   }
 
   markAnnounced(ev: EmbedHealthEvent, now = Date.now()): void {
+    this.announcedIds.add(ev.id)
     this.announced.set(`${ev.kind}:${ev.lane}`, now)
   }
 
@@ -91,6 +100,7 @@ class EmbedHealthLedger {
   reset(): void {
     this.events = []
     this.announced.clear()
+    this.announcedIds.clear()
     this.counters = {}
     this.lastError = null
     this.seq = 0
