@@ -310,7 +310,7 @@ async function composeReinjection(
   const top = related[0]
   const mergeHint =
     top && top.score >= MERGE_SUGGEST_KNN
-      ? `【写前回注】最相似 D${top.id}《${top.title}》knn=${top.score.toFixed(2)}——同一主题的延续优先 memo_update 并入，别新开复读篇。`
+      ? `【写前回注】最相似 D${top.id}《${top.title}》knn=${top.score.toFixed(2)}——延续优先 memo_update 并入；**推翻**其结论则声明 supersedes:[${top.id}]。`
       : ''
   /* 票03（corpus-governance-0926）：写前最后一句话——Tag 自检。上面那条 hubWarn 说的是**库的当前状态**，
    * 这条说的是**你该怎么写**：枢纽词会被写侧闸门拦下或警告（enforce 档硬拒 / 交互档软警告，见票 06 hubGateMode），
@@ -365,7 +365,15 @@ export function formatRecallResult(
       `· D${c.id}「${c.title}」 score=${c.score.toFixed(4)} knn=${c.knnScore.toFixed(4)} role=${c.role} ` +
         `anchor=${c.anchorBonus.toFixed(3)} topology=${c.topologyBonus.toFixed(3)} ` +
         `omega=${c.omega === null ? 'n/a' : c.omega.toFixed(3)} regime=${c.riverRegime ?? '-'} ` +
-        `tags=${c.matchedTags.join(',') || '-'}${c.rewardSuppressed ? ' [reward-suppressed]' : ''}`,
+        `tags=${c.matchedTags.join(',') || '-'}${c.rewardSuppressed ? ' [reward-suppressed]' : ''}` +
+        /* G3（2026-10-15）：主动召回**照常返回**被取代条目，但要**标注出来**——
+         * 用户问的往往正是「以前是怎么做的」，剔掉会丢决策史；可不说它已过期，
+         * 模型就会把过期结论当当前事实用。标注是这一侧的义务。 */
+        (c.supersededBy === undefined
+          ? ''
+          : c.supersededBy === null
+            ? ' ⚠️已废止（曾被判定不再成立，无继任篇）'
+            : ` ⚠️已被 D${c.supersededByD ?? '?'} 取代：结论可能已过期，先看继任篇`),
     )
     // `truncate` 的语义在这里落地。默认（未传）与 `true` 都给 120 字片段；
     // 只有**显式** `false` 才给全文——那是「深挖」路径，契约里写的正是
@@ -379,6 +387,56 @@ export function formatRecallResult(
   }
   lines.push(`· diagnostics=${JSON.stringify(outcome.diagnostics)} fallbackReason=${outcome.fallbackReason ?? 'none'}`)
   return lines.join('\n')
+}
+
+/* ────────────── G3 取代关系：D 编号 → fileId 的解析与落库（2026-10-15） ────────────── */
+
+/**
+ * 把「D 编号列表」解析成 fileId 并落取代关系；返回给人看的逐行报告（**不静默**）。
+ *
+ * 双口径：D 编号的**展示口径**是 chunk id（`memo_recall` 输出即此），但 `memo_update`
+ * 历来也接受 fileId（D108 记过这个双口径），这里沿用同一兜底——先按 fileId 直接命中，
+ * 再按 chunk id 反查。
+ *
+ * 逐条报出「不存在 / 指向自己 / 已应用」：静默丢掉一条取代声明 = 让过期结论继续被
+ * 当作当前事实注入，正是本机制要治的病。解析 + 落库在同一次 `withDb` 内（SIGBUS 串行闸）。
+ */
+async function markSupersededByD(
+  workspace: WorkspaceRuntime,
+  newChunkId: number,
+  ds: readonly number[],
+  reason: string | null,
+  markedBy: string,
+): Promise<string[]> {
+  return workspace.withDb(async () => {
+    const files = workspace.store.files()
+    const owners = workspace.store.chunkOwners()
+    const newFileId = owners.get(newChunkId)?.fileId ?? files.find((f) => f.id === newChunkId)?.id ?? null
+    if (newFileId === null) {
+      return [`· ⚠️ 取代声明未生效：本篇（chunk D${newChunkId}）解析不到 fileId——请把这条异常报出来（不静默）`]
+    }
+    const lines: string[] = []
+    const applied: string[] = []
+    for (const d of ds) {
+      const oldFileId = files.find((f) => f.id === d)?.id ?? owners.get(d)?.fileId ?? null
+      if (oldFileId === null) {
+        lines.push(`· ⚠️ supersedes D${d}：桶 ${workspace.paths.bucket} 里没有这个 D 编号（**未应用**）`)
+        continue
+      }
+      if (oldFileId === newFileId) {
+        lines.push(`· ⚠️ supersedes D${d}：指向本篇自己（已忽略）`)
+        continue
+      }
+      workspace.store.markSuperseded({ oldFileId, newFileId, reason, markedBy })
+      applied.push(`D${d}`)
+    }
+    if (applied.length > 0) {
+      lines.unshift(
+        `· 已声明取代：${applied.join(' ')} → 本篇（这些旧篇不再作为当前事实**被动注入**；主动 memo_recall 仍可见并标注）`,
+      )
+    }
+    return lines
+  })
 }
 
 /* ────────────── 写入核心（§7.1 硬契约 ②–⑤；memo_write 与 memo_approve 共用） ──────────────
@@ -975,13 +1033,24 @@ export function installTools(
       description:
         '写一篇日记进记忆河流。执行顺序固定：①回注旧 Tag 词汇表 + 语义相关旧日记 + 枢纽警告 ②校验（必须有 Tag 行、3–5 个 Tag、Tag ≤20 字、不得与既有 Tag 同义）' +
         '③新 Tag 闸门（引入库中不存在的 Tag 必须给 newTagReason）④写入 files/file_tags/tags/chunks + 嵌入 + 索引追加 + 资产重建 ⑤返回体检增量。' +
-        '拒绝条件会明确报错，不静默。',
+        '拒绝条件会明确报错，不静默。' +
+        '**若本篇推翻了某篇旧日记的结论**（不是延续、不是补充，而是「以前那样做/那样说，现在不成立了」），' +
+        '用 supersedes 声明那些旧篇的 D 编号——被取代的条目不再作为**当前事实**被被动注入，' +
+        '主动 memo_recall 仍可见并标注「已被本篇取代」。只是主题相似/同一件事的续写，走 memo_update 并入，不要用 supersedes。',
       parameters: {
         content: { type: 'string', required: true, description: '正文（末尾可含 Tag 行）。写清四要素：延续什么/转折什么/因果链/教训。' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Tag 列表（建议；缺省从正文 Tag 行解析）。' },
         title: { type: 'string', description: '标题（缺省取正文首行 # 标题；两者皆无会被拒——不再落「未命名」）。' },
         date: { type: 'string', description: '日期 YYYY-MM-DD（缺省今天）。' },
         folder: { type: 'string', description: '工作区桶名（缺省 = 当前工作区桶）。' },
+        supersedes: {
+          type: 'array',
+          items: { type: 'number' },
+          description:
+            'G3：本篇**推翻**了哪些旧日记的结论（D 编号，可多个；也接受 fileId）。被声明的旧篇不再作为当前事实被动注入，' +
+            '主动召回仍返回并标注。仅用于「结论被取代」；主题相似请改用 memo_update 并入。' +
+            '纯撤回某篇而不指向继任篇（废止），用 memo_supersede。',
+        },
         newTagReason: {
           type: 'string',
           description: '引入库中不存在的新 Tag 时，必须给出「概念确实变了」的理由，否则拒绝。',
@@ -1026,7 +1095,18 @@ export function installTools(
           preamble: reinjection,
           toolName: 'memo_write',
         })
-        return result.report
+        /* G3（2026-10-15）：落「取代声明」——放在写入**成功之后**。写失败就不该产生取代关系，
+         * 否则一次被拒的写入会留下悬空的取代边，把一篇好日记从被动注入里悄悄摘掉。 */
+        const supersedeDs = Array.isArray(args.supersedes)
+          ? [...new Set((args.supersedes as unknown[]).map((n) => Number(n)).filter((n) => Number.isFinite(n)))]
+          : []
+        if (supersedeDs.length === 0) return result.report
+        const newChunkId = Number(result.chunkId)
+        if (!Number.isFinite(newChunkId)) {
+          return `${result.report}\n· ⚠️ 取代声明未生效：本篇 chunkId 不可得（写入返回里没有）——请把这条异常报出来（不静默）`
+        }
+        const g3 = await markSupersededByD(workspace, newChunkId, supersedeDs, null, 'write')
+        return `${result.report}\n${g3.join('\n')}`
       },
     }),
   )
@@ -1140,6 +1220,103 @@ export function installTools(
           updateOf: { fileId: target.id, path: target.path },
         })
         return result.report
+      },
+    }),
+  )
+
+  /* ── memo_supersede（G3 语料有效性：事后标记「这条结论已被取代 / 已废止 / 解除」） ──
+   *
+   * 为什么需要它（而不只是 memo_write(supersedes)）：写的时候常常没想到某篇已经过期，
+   * 是**事后**在诊断/巡检里才发现（本桶现成的例子：换了嵌入端点之后，讲旧端点劣化的
+   * D208/D214 不再是当前事实）。这条通道也是**改回来**的唯一路径——误标、或继任篇自己
+   * 又被推翻而旧篇重新成立，都要能解除。
+   *
+   * 边界：只动「有效性」这一维。不改正文（那是 memo_update）、不删条目（那是 memo_merge）、
+   * 不碰使用台账。 */
+  ctx.tools.register(
+    defineTool({
+      name: 'memo_supersede',
+      description:
+        'G3 语料有效性：把某篇旧日记的**结论**标成「已被取代」（给 replacement）、或「已废止」（void:true，无继任篇）、或解除标记（clear:true）。' +
+        '被取代/废止的条目不再作为**当前事实**被动注入，但主动 memo_recall 仍会返回并标注。' +
+        '适用：事后才发现某篇已经过期（换了端点/改了方案/结论被推翻）。' +
+        '只动「有效性」这一维——改正文用 memo_update，删条目用 memo_merge，本工具不做那两件事。',
+      parameters: {
+        old: { type: 'number', required: true, description: '被取代/废止的目标 D 编号（memo_recall/memo_stats 输出里的 D 编号；也接受 fileId）。' },
+        replacement: { type: 'number', description: '继任篇 D 编号。与 void 二选一。' },
+        void: { type: 'boolean', description: 'true = 废止（本条结论不再成立且没有继任篇）。与 replacement 二选一。' },
+        reason: { type: 'string', description: '为什么取代/废止（一到两句，写清**是什么变了**——三个月后靠它判断能不能解除）。' },
+        clear: { type: 'boolean', description: 'true = 解除标记（误标；或继任篇又被推翻而本条重新成立）。' },
+        folder: { type: 'string', description: '工作区桶名（缺省 = 当前工作区桶）。' },
+      },
+      output: TEXT_OUTPUT,
+      isConcurrencySafe: () => false,
+      async execute(args: Record<string, unknown>, exec: unknown) {
+        const viewer = viewerOf(exec)
+        const { cwd } = viewer
+        const baseWorkspace = deps.getWorkspace(cwd)
+        const routed = routeWorkspaceByFolder(args.folder, baseWorkspace, config)
+        if (!routed.ok) return routed.error
+        const workspace = routed.target
+        const bucket = workspace.paths.bucket
+
+        const oldRaw = Number(args.old)
+        if (!Number.isFinite(oldRaw)) return '❌ memo_supersede：必须给 old（被取代/废止的 D 编号）。'
+        const clear = args.clear === true
+        const wantVoid = args.void === true
+        const replacementRaw = Number(args.replacement)
+        const hasReplacement = Number.isFinite(replacementRaw)
+        const reason = typeof args.reason === 'string' ? args.reason.trim() : ''
+        if (!clear && !wantVoid && !hasReplacement) {
+          return '❌ memo_supersede：给 replacement（继任篇 D 编号）／void:true（废止）／clear:true（解除标记）三者之一。'
+        }
+        if (wantVoid && hasReplacement) {
+          return '❌ memo_supersede：replacement 与 void 互斥——「被取代」必须指继任篇，「废止」不该有继任篇。'
+        }
+
+        return workspace.withDb(async () => {
+          const files = workspace.store.files()
+          const owners = workspace.store.chunkOwners()
+          /* 双口径（与 memo_update 同规则）：D 编号展示口径是 chunk id，但历史上也接受 fileId。 */
+          const resolve = (d: number): number | null => files.find((f) => f.id === d)?.id ?? owners.get(d)?.fileId ?? null
+          const dOfFile = (fid: number): number | null => {
+            for (const [cid, owner] of owners) if (owner.fileId === fid) return cid
+            return null
+          }
+
+          const oldFileId = resolve(oldRaw)
+          if (oldFileId === null) {
+            return `❌ memo_supersede：桶 ${bucket} 里没有 D${oldRaw}（已按 fileId 与 chunk id 两种口径解析；用 memo_stats 看清单）。`
+          }
+          if (clear) {
+            const n = workspace.store.clearSupersession(oldFileId)
+            return n > 0
+              ? `· ✅ 已解除 D${oldRaw} 的取代标记——它重新作为当前事实参与被动注入。`
+              : `· D${oldRaw} 本来就没有取代标记，无需解除。`
+          }
+          const newFileId = wantVoid ? null : resolve(replacementRaw)
+          if (!wantVoid && newFileId === null) {
+            return `❌ memo_supersede：桶 ${bucket} 里没有继任篇 D${replacementRaw}（已按两种口径解析）。`
+          }
+          if (newFileId !== null && newFileId === oldFileId) {
+            return `❌ memo_supersede：D${oldRaw} 不能取代它自己。`
+          }
+          workspace.store.markSuperseded({
+            oldFileId,
+            newFileId,
+            reason: reason || null,
+            markedBy: 'tool:memo_supersede',
+          })
+          const head =
+            newFileId === null
+              ? `· ✅ 已废止 D${oldRaw}：不再作为当前事实被动注入（主动 memo_recall 仍返回并标注）。`
+              : `· ✅ 已标记 D${oldRaw} 被 D${dOfFile(newFileId) ?? replacementRaw} 取代：不再作为当前事实被动注入（主动 memo_recall 仍返回并标注）。`
+          return [
+            head,
+            `· 理由：${reason || '(未给——建议补：三个月后靠它判断能不能解除)'}`,
+            `· 解除：memo_supersede old=${oldRaw} clear:true`,
+          ].join('\n')
+        })
       },
     }),
   )
@@ -1276,6 +1453,9 @@ export function installTools(
             workspace.store.run('DELETE FROM file_tags WHERE file_id = ?', f.id)
             workspace.store.run('DELETE FROM files WHERE id = ?', f.id)
           }
+          /* G3：归档退役会留下取代关系的悬挂行（源篇或继任篇已删）。本表读取时 JOIN files
+           * 已能自动过滤悬挂行，这里顺手清掉——不然误标/解除时报的 D 编号会对不上。 */
+          workspace.store.pruneSupersessions()
           if (retired.length > 0) {
             const ledger = readUsageLedger(workspace.store)
             for (const f of retired) ledger.delete(f.id)
