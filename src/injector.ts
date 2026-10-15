@@ -39,6 +39,7 @@ import { BLOCK_CLOSE, continuationTail, DelegationExtras, renderInjection, rende
 import { embedHealth, formatEmbedEvent } from './embed-health.js'
 import { coldTagSuggest, sameAxisHit, scanTagAxis } from './nudge-guide.js'
 import { buildQueryField, candidateKey, type RecallCandidate, type RecallOptions, type RecallOutcome } from './recall.js'
+import { rerankByDecision, scoreDecisionBatch, shouldSkipDecision, type DecisionBatchCandidate } from './decision.js'
 import { federatedRecall } from './federate.js'
 import { tuningValues } from './tuning.js'
 import { getSession, peekSession, type SessionState } from './session.js'
@@ -590,7 +591,76 @@ export function recallFailureNotice(
           dropped: [...outcome.dropped, ...removed],
         }
 
-  const text = renderInjection(effective, workspace.paths.bucket)
+  /* ═══ P0b 判别式决策重排（2026-10-16）：8122 chinese-decision-0.8b 的轮内重排接缝 ═══
+   *
+   * 设计红线（docs/PLAN-2026-10-15 §P0b 实测判据）：
+   * · **纯轮内重排**——不与检索分加权融合（RRF 0.333 vs 纯重排 0.431，11 个 RRF 列几乎全低）；
+   * · **不当阈值/硬门**——p 只用于排序与日志（概率区间 [0.02,0.81]、8/9 问法分箱非单调）；
+   * · **空上下文先判空**——短 state 跳过（61/185 state 空时 AUC 0.43-0.66）；
+   * · **off = 逐字节旧行为**：off 时零副作用（不发请求、不打日志），
+   *   `finalOutcome === effective` 同引用直通渲染。负对照 =
+   *   scripts/acceptance-decision-rerank.mjs 用**改动前 lib** 录制的 fixture 逐位比对。
+   *
+   * 打分口径 = 逐候选 ⑥ 是非题（p「会改变我下一步做法吗」降序，与离线 gate2 逐字一致，
+   * 见 src/decision.ts 头注释）；并发 ≤2、超时不重试、整批 deadline（延迟预算指令）。
+   *
+   * shadow（观测档）**绝不 await**：inject 行在打分完成前已打印，p 只能落**独立的
+   * `inject-decision mode=shadow` 后续行**；on（生效档）await 重排后再渲染，inject 行
+   * 行尾追加 `decisionP=… decisionRerank=on`（ids= 口径不动——off 逐位一致红线）。 */
+  let finalOutcome: RecallOutcome = effective
+  let decisionSuffix = ''
+  const decisionMode = deps.config.inject.decisionRerank
+  if (decisionMode !== 'off' && effective.selected.length > 1) {
+    const stateText = queryField // buildQueryField 已是 tail-4000 定标口径（recall.ts:245-252）
+    const keyOf = (c: RecallCandidate) => candidateKey(c, workspace.paths.bucket)
+    const dForm = (c: RecallCandidate) => (c.srcBucket ? `D${c.id}@${c.srcBucket}` : `D${c.id}`)
+    if (shouldSkipDecision(stateText)) {
+      logger.info(
+        `decision-skip bucket=${workspace.paths.bucket} mode=${decisionMode} reason=state-too-short chars=${stateText.trim().length} session=${sessionId}`,
+      )
+    } else {
+      const top = effective.selected.slice(0, deps.config.inject.decisionTopN)
+      const cands: DecisionBatchCandidate[] = top.map((c) => ({ key: keyOf(c), d: dForm(c), title: c.title, body: c.body }))
+      const clientOpts = {
+        endpoint: deps.config.inject.decisionEndpoint,
+        timeoutMs: deps.config.inject.decisionTimeoutMs,
+        logger,
+      }
+      if (decisionMode === 'shadow') {
+        // fire-and-forget：失败已由客户端记 decision-error，这里不 await、绝不抛。
+        const t0 = Date.now()
+        void scoreDecisionBatch(stateText, cands, clientOpts)
+          .then((res) => {
+            if (res.answered === 0) return // 全失败已记因；answered>0 才有观测价值
+            logger.info(
+              `inject-decision bucket=${workspace.paths.bucket} mode=shadow ids=${top.map(dForm).join(',')} ` +
+                `decisionP=${top.map((c) => res.probs[keyOf(c)]?.toFixed(2) ?? 'n/a').join('/')} ` +
+                `asked=${res.asked}/${cands.length} elapsedMs=${Date.now() - t0} session=${sessionId}`,
+            )
+          })
+          .catch(() => {
+            /* 不可达（客户端不抛）；防御性兜底 */
+          })
+      } else {
+        // on：await 重排。部分成功（answered>0 但 < cands.length）也重排——无分候选沉尾保序。
+        try {
+          const res = await scoreDecisionBatch(stateText, cands, clientOpts)
+          if (res.answered > 0) {
+            finalOutcome = { ...effective, selected: rerankByDecision(effective.selected, res.probs, keyOf) }
+            decisionSuffix = ` decisionP=${top.map((c) => res.probs[keyOf(c)]?.toFixed(2) ?? 'n/a').join('/')} decisionRerank=on`
+          } else {
+            logger.warn(
+              `decision-degraded bucket=${workspace.paths.bucket} mode=on 顺序保持原样（asked=${res.asked} answered=0，失败已在上行记因）session=${sessionId}`,
+            )
+          }
+        } catch {
+          /* 不可达：scoreDecisionBatch 任何失败都返回空结果；防御性兜底保渲染 */
+        }
+      }
+    }
+  }
+
+  const text = renderInjection(finalOutcome, workspace.paths.bucket)
   if (!text) {
     // 门控不过 / 无候选 / 基础设施失败 / **选中的全都在场或全部过期** → 不注入，带 fallbackReason（§6.3）。
     // 其中**基础设施失败**另发一条模型可见的短通知（见 recallFailureNotice）；
@@ -602,7 +672,7 @@ export function recallFailureNotice(
     state.lastFallbackReason = reason
     noteRecallFailure(state, reason)
     state.skippedCount += 1
-    logger.info(`${renderSkipNotice({ ...effective, fallbackReason: reason }, workspace.paths.bucket)} session=${sessionId}`)
+    logger.info(`${renderSkipNotice({ ...finalOutcome, fallbackReason: reason }, workspace.paths.bucket)} session=${sessionId}`)
     return null
   }
 
@@ -641,7 +711,8 @@ export function recallFailureNotice(
       `injectMode=${isTurnStart ? 'interactive' : 'autonomous'}${compactionFired ? ' trigger=compaction' : ''} ` +
       `session=${sessionId} gate={passed:${outcome.gate.passed},maxKnn:${outcome.gate.maxKnn.toFixed(4)},` +
       `threshold:${outcome.gate.threshold},gateVector:${outcome.gate.gateVector},retrievalMaxKnn:${outcome.gate.retrievalMaxKnn.toFixed(4)}} ` +
-      `elapsedMs=${outcome.elapsedMs}`,
+      // P0b：on 档同步重排后行尾追加 p 值（off/shadow 不追加 ⇒ off 逐位一致红线不破）。
+      `elapsedMs=${outcome.elapsedMs}${decisionSuffix}`,
   )
   return text
 }

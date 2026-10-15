@@ -134,6 +134,25 @@ export interface InjectConfig {
    * 口径为字符（5 万字符 ≈ 2–3 万 token）；与步锚互补——密集工具输出先到增量，稀疏思考先到步数。
    */
   writeNudgeGrowthChars: number
+  /**
+   * P0b 判别式决策重排（2026-10-16，docs/PLAN-2026-10-15 §P0b）：
+   * - 'off'（缺省）= 逐字节旧行为——不发请求、不打日志、渲染输出不变（回退红线）；
+   * - 'shadow' = 异步观测：注入照旧，打分结果落独立 `inject-decision mode=shadow` 行
+   *   （fire-and-forget，绝不 await——inject 行在打分完成前已打印）；
+   * - 'on' = 生效：注入前按 8122 决策模型 p(⑥会改变做法吗) 降序重排头部
+   *   decisionTopN 条；**纯轮内重排**（不与检索分加权——RRF 0.333 vs 纯重排 0.431）、
+   *   **不当阈值**（概率只用于排序与日志）；任何失败降级保原序。
+   */
+  decisionRerank: 'off' | 'shadow' | 'on'
+  /** 8122 决策服务端点（POST /v1/choice；契约与离线口径的逐字一致性见 research/recall-effect/gate2-service-parity.md）。 */
+  decisionEndpoint: string
+  /**
+   * 决策请求超时（ms）。实测单条 p50=94/p95=211/p99=243ms；k=3 串行最坏 ≈730ms ⇒ 保持 800。
+   * 兼作**整批 deadline**：超时后不再发新请求（降 topN/并发，不重试——重试把预算吃两遍）。
+   */
+  decisionTimeoutMs: number
+  /** 送打的候选条数上限（只重排头部 N 条，无分候选沉尾保原序；服务上限 25）。 */
+  decisionTopN: number
 }
 
 export interface NativeConfig {
@@ -361,6 +380,19 @@ export const Config: z<Config> = z.object({
       writeNudgeEverySteps: z.number().min(0).max(10_000).default(40),
       /** 写入节律提醒·自主态增量锚：上下文自锚点累计增长 ≥N 字符 → 提醒（0=关；5 万字符≈2–3 万 token）。 */
       writeNudgeGrowthChars: z.number().min(0).max(10_000_000).default(50_000),
+      /**
+       * P0b 判别式决策重排（2026-10-16）。缺省 'off' = 逐字节旧行为（回退红线，
+       * 由 scripts/acceptance-decision-rerank.mjs 的改动前 fixture 负对照钉住）。
+       * shadow=异步观测（不 await，打分落独立 inject-decision 行）；on=同步重排头部
+       * decisionTopN 条（p 降序，纯轮内重排不与检索分加权；失败降级保原序）。
+       */
+      decisionRerank: z.union([z.const('off'), z.const('shadow'), z.const('on')]).default('off'),
+      /** 8122 决策服务端点。请求形状与离线 ⑥ 口径逐字一致（gate2-service-parity.md）。 */
+      decisionEndpoint: z.string().default('http://127.0.0.1:8122'),
+      /** 单请求超时 = 整批 deadline（超时不再发新请求、不重试）。单条 p99=243ms，k=3 串行最坏 ≈730 ⇒ 800。 */
+      decisionTimeoutMs: z.number().min(50).max(10_000).default(800),
+      /** 只重排头部 N 条（服务上限 25；k=3 是增益最大点，k=8 增益 CI 含 0）。 */
+      decisionTopN: z.number().min(1).max(25).default(3),
     })
     .default({} as InjectConfig),
 

@@ -1,0 +1,11 @@
+{
+  "okW": true,
+  "turn1": "⟨memo-river·被动召回⟩\n[记忆河流·被动召回 | 本桶=决策重排 | Ω=0.010 collapsed | mode=topology_v3 | 动态K×1]\nD2「DATE-SLUG-渲染样本2-顶点数超预算」 role=atomic_concept  reward=suppressed(knn 0.144 < minKnnForReward)  tags=合批策略,材质排序,顶点数\n  结论：渲染卡顿来自顶点数超预算导致合批失败，按材质排序后恢复。\nD1「DATE-SLUG-渲染样本1-阴影贴图档位过高」 role=atomic_concept  reward=suppressed(knn 0.144 < minKnnForReward)  tags=帧率恢复,档位校准,阴影贴图\n  结论：第 1 批的渲染卡顿来自阴影贴图档位过高，降到 1024 后帧率恢复。\nD3「DATE-SLUG-渲染样本3-后处理采样过多」 role=atomic_concept  reward=suppressed(knn 0.140 < minKnnForReward)  tags=后处理,管线简化,采样开销\n  结论：渲染卡顿来自后处理 bloom 采样过多，关掉后帧率恢复。\n⟨/memo-river⟩",
+  "turn2": null,
+  "turn3": "⟨memo-river·被动召回⟩\n[记忆河流·被动召回 | 本桶=决策重排 | Ω=0.010 collapsed | mode=topology_v3 | 动态K×1]\nD5「DATE-SLUG-音频样本5-缓冲区欠载」 role=atomic_concept  reward=suppressed(knn 0.241 < minKnnForReward)  tags=欠载修复,缓冲区,音频稳定\n  结论：音频会议爆音来自 ALSA 缓冲区欠载，加大 buffer 后稳定。\nD4「DATE-SLUG-音频样本4-麦克风增益溢出」 role=atomic_concept  reward=suppressed(knn 0.125 < minKnnForReward)  tags=增益校准,溢出削波,麦克风增益\n  结论：音频会议爆音来自麦克风增益溢出，降到 0.7 后干净。\n[本次未注入 1 条；候选 3 条，截断 1 条]\n[未注入明细] D3(already-in-context)\n⟨/memo-river⟩",
+  "lines": [
+    "inject bucket=决策重排 ids=D2,D1,D3 omega=0.010 regime=collapsed mode=topology_v3 chars=589 candidates=3 dropped=0 deduped=0 superseded=0 inherited=0 injectMode=interactive session=X gate={passed:true,maxKnn:0.1443,threshold:0.55,gateVector:none,retrievalMaxKnn:0.1443} elapsedMs=X",
+    "inject-skip bucket=决策重排 reason=identical-selection ids=D2,D1,D3 chars=589 sinceLastInject=1 turns injectMode=interactive session=X",
+    "inject bucket=决策重排 ids=D5,D4,D3 omega=0.010 regime=collapsed mode=topology_v3 chars=482 candidates=3 dropped=1 deduped=1 dedupedIds=D3 superseded=0 inherited=0 injectMode=interactive session=X gate={passed:true,maxKnn:0.2410,threshold:0.55,gateVector:none,retrievalMaxKnn:0.2410} elapsedMs=X"
+  ]
+}

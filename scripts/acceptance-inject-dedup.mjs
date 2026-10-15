@@ -391,9 +391,11 @@ try {
     const rawInput = /liveInjectedKeys\(\[\.\.\.rawHistory,/.test(src)
     const historyInput = /liveInjectedKeys\(\[\.\.\.history,/.test(src)
     const usesFilter = /filterLiveDuplicates\(outcome\.selected/.test(src)
-    // 顺序：过滤必须在渲染之前（否则过滤不到已渲染的文本）
+    // 顺序：过滤必须在渲染之前（否则过滤不到已渲染的文本）。
+    // 2026-10-16 P0b 接缝后渲染入参改名 finalOutcome（off 档与 effective 同引用；
+    // on 档是重排后的拷贝）——顺序性质不变：filter 仍先于 render。
     const iFilter = src.indexOf('filterLiveDuplicates(outcome.selected')
-    const iRender = src.indexOf('renderInjection(effective')
+    const iRender = src.indexOf('renderInjection(finalOutcome')
     const ordered = iFilter > 0 && iRender > iFilter
     // 只剔不补：召回层不得再出现 excludeKeys 那套「腾出席位给后位候选」的路径
     const noBackfill = !/excludeKeys/.test(recallSrc)
