@@ -24,6 +24,7 @@
 import { readFileSync, writeFileSync, readdirSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
+import httpsMod from 'node:https'
 
 const ARGS = process.argv.slice(2)
 const arg = (n, d) => {
@@ -44,7 +45,14 @@ const FREE = (() => {
 
 const BASE_URL = arg('url', 'https://open.bigmodel.cn/api/coding/paas/v4')
 const MODEL = arg('model', 'glm-5.3-flash')
-const QUESTION = arg('question', '哪些召回的记忆对你起到了真正的作用？')
+// ⚠️ 必须显式挡住"接着干原任务"：实测 genshin-ts 那轮模型回了「继续。先补最后一批取证…」，
+// 完全无视提问（因为上下文末尾是它自己的助手回复，追加的 user 提问被读成"继续"）。
+const QUESTION = arg('question',
+  '【元问题·不要继续原任务】上面那些自动召回并注入的记忆里，哪些对你起到了真正的作用？' +
+  '只回答这个问题：逐条给「起作用（并指出用在了哪个具体决策上）/ 只是话题相关 / 没用上」，不要接着做原任务。' +
+  // 汇总行是**输出格式**要求，不碰输入（输入仍是一字不改的原文）——首版自由文本没法机器聚合：
+  // 我的正则把「D262」当成数字 2/262，算出「注入 1 条起作用 2 条」这种不可能值。
+  ' 最后单独一行给汇总，格式严格为：SUMMARY 注入=<本块条目总数> 起作用=<真正起作用的条数> 反作用=<引错的条数>')
 const DIR = arg('dir', '')
 const LIMIT = Number(arg('limit', 0))
 const OUT = arg('out', '')
@@ -52,7 +60,11 @@ const DRY = flag('dry-run')
 /** 并发数：每轮 glm-flash 要花 3000+ 推理 token，串行太慢（用户 2026-10-15「速度有点慢了」）。
  *  并发只影响吞吐，不影响每一发的请求内容——上下文仍是一字不改的原文。 */
 const CONC = Math.max(1, Number(arg('concurrency', 4)))
-const TIMEOUT_SEC = Math.max(30, Number(arg('timeout-sec', 900)))  // 单发上限；glm-flash 长思考+长上下文实测最慢 153s，留足余量
+const TIMEOUT_SEC = Math.max(30, Number(arg('timeout-sec', 900)))  // 单发上限；实测最慢 286s
+/** 提速的唯一真杠杆：**推理 token**（实测单发 2400-5900 个 reasoning_tokens，占掉绝大部分墙钟）。
+ *  prompt 缓存实测**不命中**（同一请求连发两次 cached_tokens=0），且即便命中也不省生成时间。
+ *  `--think off` 试关思考；`--think low|medium|high` 试标准档位。 */
+const THINK = String(arg('think', 'default'))
 
 /* ── 凭证：~/.dsh/.credentials.yaml 的 refs 段。只读需要的那个键，不打印值 ── */
 function readCredential(name) {
@@ -80,21 +92,49 @@ function buildPayload(req) {
   const last = messages[messages.length - 1]
   if (last && last.role === 'user') last.content += `\n\n【提问】${QUESTION}`
   else messages.push({ role: 'user', content: QUESTION })
-  return { model: MODEL, messages, temperature: 0.2, stream: false }
+  const body = { model: MODEL, messages, temperature: 0.2, stream: false }
+  if (THINK === 'off') body.thinking = { type: 'disabled' }
+  else if (THINK !== 'default') body.reasoning_effort = THINK
+  return body
 }
 
-async function callOnce(payload) {
-  const res = await fetch(`${BASE_URL}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${KEY}` },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(TIMEOUT_SEC * 1000),
+/**
+ * ⚠️ 必须用 node:https，**不能用 fetch**：undici 的 `headersTimeout` 默认 300s，
+ * 它会在模型还没吐完时就掐断，报成 `TypeError: fetch failed`——而这是**与我设的
+ * TIMEOUT_SEC 无关的第二个 300s**（实测同一轮连续两次都恰好卡在 300s，即使传了
+ * `--timeout-sec 1200`）。用 https 才拿得回超时控制权。
+ */
+function callOnce(payload) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(`${BASE_URL}/chat/completions`)
+    const body = JSON.stringify(payload)
+    const req = httpsMod.request({
+      hostname: u.hostname, port: u.port || 443, path: u.pathname, method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${KEY}`,
+        'Content-Length': Buffer.byteLength(body),
+      },
+      timeout: TIMEOUT_SEC * 1000,
+    }, (res) => {
+      let raw = ''
+      res.setEncoding('utf8')
+      res.on('data', (c) => { raw += c })
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(new Error(`HTTP ${res.statusCode}: ${raw.slice(0, 400)}`))
+        }
+        try {
+          const j = JSON.parse(raw)
+          resolve({ content: j.choices?.[0]?.message?.content ?? '', usage: j.usage, model: j.model })
+        } catch (e) { reject(new Error(`响应不是 JSON：${raw.slice(0, 200)}`)) }
+      })
+    })
+    req.on('timeout', () => { req.destroy(new Error(`本地超时 ${TIMEOUT_SEC}s`)) })
+    req.on('error', reject)
+    req.write(body)
+    req.end()
   })
-  const text = await res.text()
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 400)}`)
-  const j = JSON.parse(text)
-  const content = j.choices?.[0]?.message?.content ?? ''
-  return { content, usage: j.usage, model: j.model }
 }
 
 const files = DIR
@@ -117,7 +157,9 @@ async function runOne(f) {
     console.log(`\n════ ${head} ════  ${secs}s`)
     console.log(r.content)
     if (OUT) {
-      const scope = basename(join(f, '..', '..'))   // 产物目录名（含桶）
+      // ⚠️ 作用域必须取 req 里的**真实桶名**：所有题面都写在同一个 judge-packets/ 里，
+      // 用产物目录名会让跨桶的 req-01 互相覆盖（实测 24 发只剩 <24 个文件）。
+      const scope = String(req.bucket || basename(join(f, '..', '..'))).replace(/[^\w.-]+/g, '_')
       writeFileSync(join(OUT, `${scope}-${basename(f).replace(/^req-/, 'v').replace(/\.json$/, '.md')}`),
         `<!-- ${head} -->\n<!-- question: ${QUESTION} -->\n<!-- evidence: 上下文原样 + 末尾追加提问，${payload.messages.length} 条消息 / ${chars} 字；模型 ${r.model ?? MODEL}；usage=${JSON.stringify(r.usage)} -->\n\n${r.content}\n`)
     }

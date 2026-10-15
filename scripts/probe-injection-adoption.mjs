@@ -99,7 +99,8 @@ const EMIT_PACKETS = flag('packets')   // 输出判官题面：raw-NN.md（原�
 const EMIT_DIGEST = flag('packets-digest')  // 额外出摘要式题面（做 A/B：加工到底有没有害）
 const PIN = String(arg('pin', ''))
 const EXCLUDE_BUCKET = String(arg('exclude-bucket', ''))  // 逗号分隔：排掉自指/低价值桶
-const ONLY_BUCKET = String(arg('only-bucket', ''))      // 逗号分隔：只取这些桶（跨桶分层取样用）          // 把轮次钉死成某次产物里的那几轮（A/B 必须同一批样本）
+const ONLY_BUCKET = String(arg('only-bucket', ''))      // 逗号分隔：只取这些桶（跨桶分层取样用）
+const PER_BUCKET = Number(arg('per-bucket', 0))        // 每桶最多取几轮（0=不限制）——分层取样，防一批全落一个桶          // 把轮次钉死成某次产物里的那几轮（A/B 必须同一批样本）
 const ONLY = String(arg('criteria', '')).split(',').map((s) => s.trim()).filter(Boolean)
 
 const MEMO_HOME = process.env.MEMO_HOME || join(homedir(), '.dsh', 'memo-river')
@@ -333,6 +334,14 @@ function alignRound(fact, sess) {
     turn,
     step: anchor.data?.step,
   }
+}
+
+
+/** 从 memo 块的正文里解析**真正渲染出来的**条目编号。
+ *  块里「注入了这些」与「[未注入明细]」用同一种 D 编号形态，所以只认条目行 `D<n>「标题」`。
+ *  实测证据：v08 那轮日志 7 条 / 去重后 4 条 / 块内只 3 条（多出的一条在 [未注入明细](token-budget) 里）。 */
+function parseBlockIds(text) {
+  return [...text.matchAll(/^D(\d+)「/gm)].map((m) => Number(m[1]))
 }
 
 /* ══════════════ 3. 原数据：条目正文 + 桶内 df ══════════════ */
@@ -590,24 +599,48 @@ if (PIN && existsSync(PIN)) {
   picked = picked.filter((f) => want.has(`${f.session}|${f.tsIso}`))
   log(`  --pin：钉死 ${picked.length} 轮（目标 ${want.size}）`)
 }
-picked = picked.slice(0, LIMIT)
+if (PER_BUCKET > 0) {
+  // ⚠️ 分层取样：不这么做，`--limit 18` 会把最新 18 轮全取在一个桶里（实测 16/16 全 dsh-plugins）。
+  const byBucket = new Map()
+  for (const f of picked) {
+    const arr = byBucket.get(f.bucket) ?? []
+    if (arr.length < PER_BUCKET) { arr.push(f); byBucket.set(f.bucket, arr) }
+  }
+  const merged = [...byBucket.values()].flat().sort((a, b) => b.t - a.t)
+  log(`  --per-bucket ${PER_BUCKET}：分层后 ${merged.length} 轮 / ${byBucket.size} 个桶`)
+  picked = merged
+} else picked = picked.slice(0, LIMIT)
 log(`  窗口内 ${facts.filter((f) => f.t >= cutoff).length} 条 → 取 ${picked.length} 条${EMIT_PACKETS ? '（同时输出判官题面）' : ''}`)
 
-let aligned = 0, noSession = 0, noAssistant = 0, noBody = 0
+let aligned = 0, noSession = 0, noAssistant = 0, noBody = 0, blockVsLogMismatch = 0
 for (const f of picked) {
   const sess = loadSession(f.session)
   if (!sess?.events?.length) { noSession++; continue }
   const al = alignRound(f, sess)
   if (!al) { noAssistant++; continue }
   const store = openBucket(f.hash)
+  /* ⚠️ 2026-10-15 数据质量定谳：**只有块是真相**。
+   * 日志 `ids=` 是入选集，扣掉 deduped/superseded 仍不等于"模型看到的"——被 token 预算丢掉的
+   * 只出现在块的 `[未注入明细]` 行里。而一个 turn 内可能有**多个**注入块（pre-step 每步都跑），
+   * 所以正确口径 = **该 turn 内所有 memo 块的条目并集**。 */
+  const blockIds = [...new Set(al.timeline
+    .filter((e) => e.k === 'INJECTED_MEMORY_BLOCK')
+    .flatMap((e) => parseBlockIds(e.t)))]
+  const useBlock = blockIds.length > 0
+  const wanted = useBlock ? blockIds.map((d) => ({ d, foreignBucket: null })) : f.items
   const items = []
-  for (const it of f.items) {
-    if (it.foreignBucket) continue // v1：跨桶条目先跳过（正文在另一个库）
+  for (const it of wanted) {
     const { body, tokens } = uniqueTokens(store, it.d, new Set())
     if (!body) { noBody++; continue }
     items.push({ d: it.d, body, tokens })
   }
   if (items.length === 0) { noBody++; continue }
+  if (useBlock && items.length !== f.items.length) {
+    blockVsLogMismatch++
+    if (blockVsLogMismatch <= 5) {
+      log(`    [口径] ${f.tsIso.slice(11, 19)} 日志入选 ${f.items.length} → 块内并集 ${items.length}`)
+    }
+  }
   const ctx = {
     assistant: al.assistant,
     sentences: sentences(al.assistant),
@@ -722,6 +755,8 @@ for (const f of picked) {
     ts: f.tsIso, session: f.session, bucket: f.bucket, hash: f.hash, workspace: sess?.workspace ?? null,
     turn: al.turn, step: al.step,
     injectedIds: items.map((i) => `D${i.d}`),
+    idsSource: useBlock ? 'block-union' : 'log',
+    logSelectedCount: f.items.length,
     decoyIds: decoys.map((i) => `D${i.d}`),
     assistantChars: al.assistant.length,
     blockChars: al.blockText.length,
@@ -781,6 +816,7 @@ const lines = []
 lines.push('# 注入 → 被用上：实验室汇总', '')
 lines.push(`- 窗口：近 ${SINCE_HOURS}h ｜ 取 ${picked.length} 条注入 → **成功对齐 ${aligned} 轮**`)
 lines.push(`- 丢弃：无会话 ${noSession} ｜ 无助手正文 ${noAssistant} ｜ 桶里取不到条目正文 ${noBody}`)
+lines.push(`- 注入集口径：**从块解析（该 turn 内所有 memo 块的并集）**；与日志入选集不同的轮次 = ${blockVsLogMismatch}/${aligned}`)
 lines.push(`- 判据：${active.map((c) => c.id).join(', ')}（阈值为起点值，**看分布再定**）`)
 lines.push(`- 嵌入：${USE_EMBED ? EMBED_URL : '未使用'} ｜ 调用 ${embedder.stats().calls} 批 / ${embedder.stats().chars} 字 / 失败 ${embedder.stats().fails}`)
 lines.push('', '## 主判据：注入组 vs 对照组（**lift 才是信号；lift≈0 ⇒ 该判据在测"话题重合"而不是"被用上"**）', '')
