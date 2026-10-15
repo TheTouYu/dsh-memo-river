@@ -1,0 +1,485 @@
+[isolated-env] 隔离柜缺 3 个夹具（教室建模归档/教室建模孤岛/教室建模写入测试）→ 在 /tmp/memo-river-acc-RLVPty 内铺台（REAL_EMBED=1 真向量，约 30~60s）…
+
+$ node scripts/import-dailynote.mjs --force --src /home/h/app/VCPToolBox/dailynote/教室建模归档 --cwd /home/h/dsh-plugins/dsh-memo-river/.selftest/教室建模归档 --bucket 教室建模归档
+工作区: /tmp/memo-river-acc-RLVPty/dsh-home/memo-river/9c454860ef9e103e
+库文件: /tmp/memo-river-acc-RLVPty/dsh-home/memo-river/9c454860ef9e103e/knowledge_base.sqlite
+桶    : 教室建模归档
+嵌入  : https://api.relayrouter.ai model=gemini-embedding-2-preview dim=3072 source=config.env
+
+① 嵌入 11 篇正文 + 15 个 Tag（命中缓存则不重复消耗额度）
+   缓存条数=26
+
+② 写入 VCP schema（files / chunks / tags / file_tags）
+   D1 ← 2026-09-10-20_10_00.txt tags=[教室建模,Blender管线,盲测验收,法证级真实]
+   D2 ← 2026-09-10-20_32_00.txt tags=[渲染性能,资源占用,环境问题]
+   D3 ← 2026-09-10-23_08_00.txt tags=[渲染性能,因果排查,Blender管线,迭代速度]
+   D4 ← 2026-09-11-00_15_00.txt tags=[资源占用,环境问题,因果排查]
+   D5 ← 2026-09-11-00_26_00.txt tags=[接触阴影,因果排查,裁判机制,教室建模]
+   D6 ← 2026-09-11-00_50_00.txt tags=[接触阴影,盲测验收,裁判机制,交付物,教室建模]
+   D7 ← 2026-09-11-16_28_00.txt tags=[盲测验收,裁判机制,法证级真实]
+   D8 ← 2026-09-11-18_29_00.txt tags=[渲染性能,资源占用,Blender管线,迭代速度]
+   D9 ← 2026-09-11-19_47_00.txt tags=[视频编码,帧率达标,网页实时播放]
+   D10 ← 2026-09-11-20_12_00.txt tags=[视频编码,帧率达标,网页实时播放]
+   D11 ← 2026-09-11-20_18_00.txt tags=[视频编码,帧率达标,交付物,教室建模]
+
+③ 结果：{"tags":15,"files":11,"chunks":11,"fileTags":40}
+
+$ node scripts/build-island-corpus.mjs --out /home/h/dsh-plugins/dsh-memo-river/.selftest/island-corpus
+孤岛语料已物化 → /home/h/dsh-plugins/dsh-memo-river/.selftest/island-corpus
+  篇数=11  Tag 槽位=54  唯一 Tag=54
+  复用检查：全部只出现 1 次（孤岛）
+  文件：2026-09-10-20_10_00.txt 2026-09-10-20_32_00.txt 2026-09-10-23_08_00.txt 2026-09-11-00_15_00.txt 2026-09-11-00_26_00.txt 2026-09-11-00_50_00.txt 2026-09-11-16_28_00.txt 2026-09-11-18_29_00.txt 2026-09-11-19_47_00.txt 2026-09-11-20_12_00.txt 2026-09-11-20_18_00.txt
+
+$ node scripts/import-dailynote.mjs --force --src /home/h/dsh-plugins/dsh-memo-river/.selftest/island-corpus --cwd /home/h/dsh-plugins/dsh-memo-river/.selftest/教室建模孤岛 --bucket 教室建模孤岛
+工作区: /tmp/memo-river-acc-RLVPty/dsh-home/memo-river/44351c4a9924d8b0
+库文件: /tmp/memo-river-acc-RLVPty/dsh-home/memo-river/44351c4a9924d8b0/knowledge_base.sqlite
+桶    : 教室建模孤岛
+嵌入  : https://api.relayrouter.ai model=gemini-embedding-2-preview dim=3072 source=config.env
+
+① 嵌入 11 篇正文 + 54 个 Tag（命中缓存则不重复消耗额度）
+   缓存条数=65
+
+② 写入 VCP schema（files / chunks / tags / file_tags）
+   D1 ← 2026-09-10-20_10_00.txt tags=[高中教室,Blender,法证级真实,盲测判据,从零建模]
+   D2 ← 2026-09-10-20_32_00.txt tags=[渲染卡顿,WSL内存,多会话互相卡住,脚本占用,Edge加GPU方案]
+   D3 ← 2026-09-10-23_08_00.txt tags=[GPU用法存疑,macbook对比,CPU渲染,显卡闲置,渲染耗时]
+   D4 ← 2026-09-11-00_15_00.txt tags=[浏览器标签泄漏,内存不足,技能规则修订,资源占用]
+   D5 ← 2026-09-11-00_26_00.txt tags=[桌子漂浮,零接触阴影,裁判盲区,minY等于0,接触阴影烘焙]
+   D6 ← 2026-09-11-00_50_00.txt tags=[六轮盲测,零误判,接触阴影修复,未覆盖维度,终局报告]
+   D7 ← 2026-09-11-16_28_00.txt tags=[法证级盲测,12格contact_sheet,fresh裁判,微对比度sigma,国标尺寸]
+   D8 ← 2026-09-11-18_29_00.txt tags=[渲染太慢,单帧耗时,Cycles_CPU,迭代速度,用户叫停]
+   D9 ← 2026-09-11-19_47_00.txt tags=[60帧视频,网页实时播放,2K分辨率,MediaRecorder,帧率质疑]
+   D10 ← 2026-09-11-20_12_00.txt tags=[ffmpeg,NVENC,像素困在浏览器,逐帧搬运瓶颈,30fps上限]
+   D11 ← 2026-09-11-20_18_00.txt tags=[classroom-tour-60fps-true,2560x1440,1629帧,27秒,交付投递]
+
+③ 结果：{"tags":54,"files":11,"chunks":11,"fileTags":54}
+
+写入测试工作区 → /tmp/memo-river-acc-RLVPty/dsh-home/memo-river/c4bc5b11af56bfc7/knowledge_base.sqlite {"tags":15,"files":11,"chunks":11,"fileTags":40}
+
+✅ 三个工作区已就绪
+[isolated-env] 铺台结束 rc=0 用时 47.2s，仍缺 0 个 ✅
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+环境自检
+════════════════════════════════════════════════════════════════════════════════════════════════
+node=v26.11.1
+河流语料：cwd=/home/h/dsh-plugins/dsh-memo-river/.selftest/教室建模归档
+          db=/tmp/memo-river-acc-RLVPty/dsh-home/memo-river/9c454860ef9e103e/knowledge_base.sqlite
+孤岛语料：cwd=/home/h/dsh-plugins/dsh-memo-river/.selftest/教室建模孤岛
+          db=/tmp/memo-river-acc-RLVPty/dsh-home/memo-river/44351c4a9924d8b0/knowledge_base.sqlite
+
+注册的 systemPrompt 段：memo-river:contract
+注册的 systemPrompt 上下文：(无)
+注册的工具：memo_tuning, memo_recall, memo_tags, memo_stats, memo_patrol, memo_write, memo_update, memo_merge, memo_drafts, memo_approve, memo_discard
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#2 前缀缓存不破（system 段零动态）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #2】前缀缓存不破（system 段文本 hash 相等）  →  ✅ PASS
+    与 DESIGN.md §6.1 围栏块逐字一致：true（2266 bytes）
+    sha256(注册文本) = 5a5d65e26d8b592e8e003cf6276142d87b2932415a39decf57ca38a5cfc633f7
+    sha256(DESIGN §6.1) = 5a5d65e26d8b592e8e003cf6276142d87b2932415a39decf57ca38a5cfc633f7
+    src/prompt.ts 记录的常量 hash = 5a5d65e26d8b592e8e003cf6276142d87b2932415a39decf57ca38a5cfc633f7
+    第 1 轮 hash = 5a5d65e26d8b592e8e003cf6276142d87b2932415a39decf57ca38a5cfc633f7
+    第 2 轮 hash = 5a5d65e26d8b592e8e003cf6276142d87b2932415a39decf57ca38a5cfc633f7
+    两轮相等：true
+    含动态痕迹（{{}} / 日期 / 时刻）：false
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#1 注入时机正确（注入块在模型请求的消息数组尾部，且在 assistant 回答之前）
+════════════════════════════════════════════════════════════════════════════════════════════════
+[memo-kernel] 🛡️ SQLite keepalive retained for /tmp/memo-river-acc-rlvpty/dsh-home/memo-river/9c454860ef9e103e/knowledge_base.sqlite
+
+【验收 #1】注入块出现在请求消息数组尾部且在 assistant 回答之前  →  ✅ PASS
+    请求 messages 总数 = 4（最后一条 role=user）
+    注入块下标 = 3（尾部下标 = 3）
+    块之后是否还有 assistant 消息 = false
+    llm/stream 终点是否被 next() 委托到 = DELEGATED-TO-ADAPTER
+    注入块 sha256 = 81f5301ad6535ada9c14e74fd82cbf5c…
+    注入块首行：⟨memo-river·被动召回⟩
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#4 证据分级透出（role / 奖励 / Ω / regime）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #4】注入文本含 role= 与 Ω=/regime=  →  ✅ PASS
+    role= 出现：true
+    Ω= 出现：true
+    regime(sparse|dense) 出现：true
+    奖励字段出现：true
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#5 未注入说明存在
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #5】有候选被截断时注入块末行含「本次未注入」  →  ✅ PASS
+    含「本次未注入」：true
+    尾行：[本次未注入 7 条；候选 11 条，截断 7 条] | [未注入明细] D7(token-budget) D9(token-budget) D1(token-budget) D6(token-budget) D5(token-budget) D10(token-budget) D4(token-budget)
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#3 门控生效（无关查询不注入 + fallbackReason）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #3】无关查询 → 不注入，且带 fallbackReason（单条 + 多轮历史两档）  →  ✅ PASS
+    (a) 单条消息：注入=false  fallbackReason=gate-below-threshold
+        门控 maxKnn=0.4907 < 0.55（gateVector=window）
+        日志行：[2026-10-14T16:14:39.226Z] [info] inject-skip bucket=教室建模归档 reason=gate-below-threshold gate={"passed":false,"maxKnn":0.49068063406565243,"threshold":0.55,"enabled":true,"gateVector":"window","retrievalMaxKnn":0.49068063406565243} elapsedMs=1 session=sess-gate-2
+    (b) 多轮历史：注入=false  fallbackReason=gate-below-threshold
+        gateVector=current  门控 maxKnn=0.4536（当前消息向量）
+        检索 maxKnn=0.7478（窗口向量，已被前几轮稀释）
+        ← 解耦前（gateText=''）：检索 maxKnn=0.7478 ≥ 0.55 → **误通过**（这就是原判据漏掉的那档）
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#9 不阻塞主流程（拔掉嵌入 API）
+════════════════════════════════════════════════════════════════════════════════════════════════
+  9a 真死端点 http://127.0.0.1:9 → 1ms 抛错：embed-request-failed: fetch failed (cause: bad port)
+     返回向量：无（符合预期）
+
+【验收 #9】嵌入不可用 → 注入跳过 + 记日志 + 一条模型可见的失败通知，主流程正常返回  →  ✅ PASS
+    9a 真死端点抛错：embed-request-failed: fetch failed (cause: bad port)
+    9a 耗时 1ms（未挂起）
+    9b seam 未抛异常：true（异常=null）
+    9b decision 额外追加的消息数 = 2（2 = harness 的 runtime-context + 插件的一条「召回未生效」通知；0 注入块）
+    9b 通知首行：[memo-river·召回未生效] 记忆插件通知，非新任务：本轮自动召回失败（embed-failed: ENETUNREACH 127.0.0.1:9 (simulated outage)），桶=教室建模归档 的记忆没有注入（本会话连续
+    9b 不含 BLOCK_CLOSE（不冒充召回块）= true
+    9b seam 耗时 1ms
+    9b 日志行：[2026-10-14T16:14:52.887Z] [info] inject-skip bucket=教室建模归档 reason=embed-failed: ENETUNREACH 127.0.0.1:9 (simulated outage) gate={"passed":false,"maxKnn":0,"threshold":0.55,"enabled":true,"gateVector":"none","retrievalMaxKnn":0} elapsedMs=1 session=sess-outage
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#10 并发隔离（按 session id 键，无全局 lastXxx）
+════════════════════════════════════════════════════════════════════════════════════════════════
+[memo-kernel] 🛡️ SQLite keepalive retained for /tmp/memo-river-acc-rlvpty/dsh-home/memo-river/44351c4a9924d8b0/knowledge_base.sqlite
+
+【验收 #10】两会话同时注入互不串（含跨工作区），且并发 == 串行  →  ❌ FAIL
+    sess-A 本桶=教室建模归档 候选=[9,8,1,3]
+    sess-B 本桶=教室建模归档 候选=[9,10,11,7]
+    sess-A ≠ sess-B 的候选序列：true
+    并发 == 串行（同一查询、同一桶，逐名次比对）：false
+      串行 A=[2,3,9,8] B=[10,11,9,5]
+    sess-C（孤岛工作区）本桶=教室建模孤岛 候选=[3,8,2,11,9]
+    会话状态按 session id 键：sess-A/B/C 三条独立记录（Map<sessionId, SessionState>）
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#7 体检抓孤岛（孤岛语料必须报连通分量 11）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #7】孤岛语料 → 连通分量 11 警告；河流语料 → 1  →  ✅ PASS
+    孤岛桶「教室建模孤岛」：连通分量 = 11，规模分布 = [5,5,5,5,5,5,5,5,5,5,4]
+      规模：11 篇 / 54 Tag / 54 共现
+      告警：连通分量 11（必须 = 1）：孤岛语料下「现象→真因」的多跳通路在数学上不存在，任何参数都救不回来 ‖ 未覆盖率 54.5%（>50%）：6/11 篇入库后从未被召回
+    河流桶「教室建模归档」：连通分量 = 1，规模分布 = [15]
+      枢纽：教室建模 4/11 = 36.4%（判据 <33.3%）
+      未覆盖率：2/11
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#6 写入契约（memo_write 拒绝条件不静默）
+════════════════════════════════════════════════════════════════════════════════════════════════
+  memo_write 工具对象字段：name, description, parameters, output, execute, isConcurrencySafe
+[memo-kernel] 🛡️ SQLite keepalive retained for /tmp/memo-river-acc-rlvpty/dsh-home/memo-river/c4bc5b11af56bfc7/knowledge_base.sqlite
+
+【验收 #6】无 Tag 行 → 拒绝；新 Tag 无 reason → 拒绝；有 reason → 写入  →  ✅ PASS
+    ① 无 Tag 行 → ✅ 拒绝：❌ memo_write 被拒绝：missing-tag-line：必须有 Tag 行
+    ② 6 个 Tag → ✅ 拒绝：❌ memo_write 被拒绝：too-many-tags：6 个 Tag 超过单篇上限 5
+    ③ 新 Tag 无理由 → ✅ 拒绝：❌ memo_write 被拒绝：unconfirmed-new-tags：引入库中不存在的 Tag 必须给 newTagReason
+    ④ 新 Tag 有理由 → ✅ 写入：✅ 已写入 D1「新概念有理由」 → /tmp/memo-river-acc-RLVPty/dsh-home/memo-river/c4bc5b11af56bfc7/dailynote/教室建模写入测试/2026-10-14-mv8b9m3v-新概念有理由.md
+       写前回注行：【写前回注】旧 Tag 词汇表（top 0）：(空库) ⏎ 【写前回注】语义相关旧日记：(无) ⏎ 【写前回注】枢纽检查：当前最大 Tag 频次 n/a（<1/3 ✅）；当前连通分量 = 0（判据 =1） ⏎ 【写前回注】Tag 自检：跨篇 ≥1/3 的枢纽词会被写侧闸门拦下或警告；不确定就写内容词（主题/机制/对象/判据）。 ⏎ 【写前回注】质量四要素：写清——延续什么 / 转折什么 / 因果链 / 教训（读者是三个月后的自己或接手的兄弟代理）。
+       桶内规模：1 篇 / 3 Tag（写入后 +1 篇、+1 Tag）
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#11 闭环：空库(0 篇) → memo_write 写一篇 → 被动注入把它捞回来
+════════════════════════════════════════════════════════════════════════════════════════════════
+[memo-kernel] 🛡️ SQLite keepalive retained for /tmp/memo-river-acc-rlvpty/dsh-home/memo-river/8a3a03be5f09ec1c/knowledge_base.sqlite
+
+【验收 #12】入选集合去重：连续同集合不重复注入（键=id 集合而非文本）  →  ✅ PASS
+    ① 连续 4 轮同一 query：实际注入 1 次（要求 ≥1，且少于 4 次）
+    ② identical-selection 跳过行数：3（要求 ≥1）
+       证据行：[2026-10-14T16:15:27.864Z] [info] inject-skip bucket=闭环测试 reason=identical-selection ids=D1,D2 chars=337 sinceLastInject=1 turns injectMode=interactive session=sess-dedup-12
+
+【验收 #13】每条入选日记都带正文行（截断路径不吞正文）  →  ✅ PASS
+    预算压到 200 → 条目 2 条，其中带正文 2 条（要求相等）
+    首条正文：读 PROMPT-classroom-max.md 开工。
+
+【验收 #11】空库 → memo_write → 被动注入捞回（日志自动召回闭环）  →  ✅ PASS
+    ① 写前库：0 篇 / 0 chunk / 0 Tag
+       写前 pre-step：注入=false（要求 false），fallbackReason=empty-corpus（要求 empty-corpus）
+       日志行：[2026-10-14T16:15:16.298Z] [info] inject-skip bucket=闭环测试 reason=empty-corpus gate={"passed":false,"maxKnn":0,"threshold":0.55,"enabled":true,"gateVector":"none
+    ② 空库首次写入不带理由 → ✅ 被拒 unconfirmed-new-tags（空库=所有 Tag 都新，DESIGN.md:243）
+    ③ 带 newTagReason 写入：✅ ✅ 已写入 D1「闭环测试缓存击穿」 → /tmp/memo-river-acc-RLVPty/dsh-home/memo-river/8a3a03be5f09ec1c/dailynote/闭环测试/2026-10-14-mv8b9p6a-闭环测试缓存击穿.md
+    ④ 复用旧 Tag 写第二篇（不带理由）：✅ 通过（写前回注词汇生效） 
+    ⑤ 写后库：2 篇 / 2 chunk / 3 Tag
+       写后 pre-step：注入块 1 段，命中新日记「闭环测试缓存击穿」=true
+       注入块内容：⟨memo-river·被动召回⟩ ⏎ [记忆河流·被动召回 | 本桶=闭环测试 | Ω=0.010 collapsed | mode=topology_v3 | 动态K×1] ⏎ D1「2026-10-14-mv8b9p6a-闭环测试缓存击穿」 role=atomic_concept  reward=none  tags=并发,缓存击穿,闭环测试 ⏎   结论：缓存击穿是热点 key 过期瞬间请求全打到数据库。用互斥重建 + 逻辑过期两道闸解决。
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#8 与原生直跑一致（对比 sandbox/classroom-flow/native.cjs 的 native-result.json）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #8】同一语料 + 同一查询，名次与 native.cjs 一致  →  ❌ FAIL
+      QA KNN     插件=[3,8,9,2,11,5,1,6,7,4,10] 原生=[3,8,9,2,11,5,1,6,7,4,10] ✅
+      QA 读出    插件=[8,3,2,11,9,1,6,5,7,10,4] 原生=[8,3,2,9,11,1,6,5,7,10,4] ❌  Ω=0.6268 regime=dense
+      QB KNN     插件=[5,2,6,4,3,9,1,8,11,7,10] 原生=[5,2,6,4,3,9,1,8,11,7,10] ✅
+      QB 读出    插件=[5,4,6,3,2,9,11,1,8,7,10] 原生=[5,4,6,3,2,11,9,8,1,7,10] ❌  Ω=0.7975 regime=dense
+      QC KNN     插件=[9,11,10,3,2,6,7,8,5,1,4] 原生=[9,11,10,3,2,6,7,8,5,1,4] ✅
+      QC 读出    插件=[9,11,10,3,7,6,8,2,5,1,4] 原生=[9,11,10,3,7,8,6,2,5,1,4] ❌  Ω=0.6136 regime=dense
+      浮点差上界 = 0（要求 <1e-6；实测名次完全一致，无翻转）
+      注：native.cjs 本机已不可直接运行（better-sqlite3 为 NODE_MODULE_VERSION 127，Node 26 需 147），
+          故对比其**已归档输出** native-result.json.bak（同语料、同查询、同嵌入缓存向量）。
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ approved/；不足 3 个跳过；丢弃 → rejected/
+════════════════════════════════════════════════════════════════════════════════════════════════
+[memo-kernel] 🛡️ SQLite keepalive retained for /tmp/memo-river-acc-rlvpty/dsh-home/memo-river/11e7e6a0c81e1ca5/knowledge_base.sqlite
+
+【验收 #14】草稿消费通道：批准入库走 memo_write 同一闸门 + 文件出队；空词表（内容判定不足 3 个）跳过；丢弃可追溯  →  ❌ FAIL
+    ① 种子词汇：✅（空库 3-Tag 写入，供草稿 Tag 策展）
+    ② memo_drafts all=true 列队：✅ 两篇都列出（分属两桶）（输出 421 字符）
+    ③ memo_approve（bucket=草稿测试）：❌
+       · ⏭ 2026-09-12-渲染还是卡-t8.md：内容 Tag 命中 0 个（无）< 3，待人工 memo_write 撰写后 memo_discard 本草稿 ⏎ · 小计：批准 0 / 跳过 1（跳过项留在 pending/） ⏎ · 耗时 30.0s（并行度 1，有界并行）
+    ④ 空词表桶（bucket=草稿测试空桶）的草稿：✅ 内容判定不足 ⇒ 跳过且留在 pending/ · ⏭ 2026-09-12-turn-t9.md：内容 Tag 命中 0 个（无）< 3，待人工 memo_write 撰写后 memo_discard 本草稿 ⏎ · 小计：批准 0 / 跳过 1（跳过项留在 pending/） ⏎ · 耗时 3.8s（并行度 1，有界并行）
+    ⑤ memo_discard：✅ 移入 rejected/ 不入库 【记忆河流·memo_discard】待处理 1 篇（⚠️ 跨桶操作：桶=草稿测试空桶，当前工作区桶=草稿测试）
+       库规模：主桶 1 → 1 篇（批准后）；空桶 0 篇；丢弃后两桶合计不变
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#15–#18 自主态节律注入：cadence / 压缩联动 / 步维刷新 / 中途新输入
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #15】自主态节律：每 N 步重评一次，中间步零尝试  →  ✅ PASS
+    注入块出现于步：[1,5]（要求 ⊆ [1,5,9]；非 1 的块=节律步选集漂移，属正确重注）
+    尝试总数=3（要求 3：step1 回合首发 + step5/9 节律各一；中间步零尝试的证明）
+    state：injected=2 skipped=1 lastAutoStep=9（要求 9）
+
+【验收 #16】压缩事件：新 compactionId 立即重注并绕过同集合去重；同 id 不重复触发  →  ✅ PASS
+    step1 首发：注入块=1；step2（压缩后）：注入块=1（要求 1=绕过去重重注）
+    step3（同 id）：注入块=0（要求 0=不重复触发）；state.injected=2（要求 2）
+    lastCompactionId=acc16-c1（要求 acc16-c1）
+
+【验收 #17】步维刷新：自主尝试次数达 dedupeRefreshTurns → 强制重注同集合  →  ❌ FAIL
+    step1 注入=1；step3 跳=1；step5 跳=0；step7（第 3 跳）重注=1（要求 1）
+    state.injected=3（要求 2）autoAttemptsSinceInject=0（重注后归零要求 0）
+
+【验收 #18】中途新用户输入（step>1）按回合首发立即评估；无输入且节律未到则零尝试  →  ✅ PASS
+    step1 后：injected=1 skipped=0 lastAutoStep=1（要求 1/0/1）
+    step5 后：skipped=0 lastAutoStep=1（要求不变 0/1=零尝试）
+    step6 后：lastAutoStep=6（要求 6=立即评估）；尝试总数=2（要求 2）
+    step6 注入块=1（选集未变时被同集合去重跳过=记忆已在上下文，属正确行为）
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#19 近因保底：k-limit 挤掉最近日记时保留一席；关掉开关即纯分数序
+════════════════════════════════════════════════════════════════════════════════════════════════
+[memo-kernel] 🛡️ SQLite keepalive retained for /tmp/memo-river-acc-rlvpty/dsh-home/memo-river/37058aa3280dfcc4/knowledge_base.sqlite
+
+【验收 #19】近因保底：k-limit 挤掉最近日记时保留一席；关掉开关即纯分数序  →  ✅ PASS
+    开保底(k=2, floor=7d) 入选：[2026-01-05-mv8bchsu-旧渲染卡顿一月 | 2026-10-14-mv8bcn0y-今天新写的会议纪要]（要求含今天日记且 top1 仍是渲染旧篇）
+    开保底出现 recency-floor-evicted：true（要求 true=最低分席被挤）
+    关保底(floor=0) 入选：[2026-01-05-mv8bchsu-旧渲染卡顿一月 | 2026-02-08-mv8bclhv-旧渲染卡顿二月]（要求纯分数序、无今天日记、无 evicted）
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#20 写入节律提醒：有未入河进展+冷却过 → 注入提醒；同回合不重复；memo_write 观测重置时钟
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #20】写入节律提醒：触发 / 每回合限流 / memo_write 观测重置时钟  →  ✅ PASS
+    ① 冷却过+有进展：提醒✅ 出现（lastWriteNudgeTurn=4）
+    ② 同回合第 2 步：✅ 不重复
+    ③ memo_write 被观测：✅ 时钟重置，其后✅ 静默
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#21 写入去重闸门：近重复日记被拒并指认孪生篇；不同内容放行；dedupCosine=0 关闸
+════════════════════════════════════════════════════════════════════════════════════════════════
+[memo-kernel] 🛡️ SQLite keepalive retained for /tmp/memo-river-acc-rlvpty/dsh-home/memo-river/5058e6ce42c55885/knowledge_base.sqlite
+
+【验收 #21】写入去重：近重复被拒（near-duplicate-diary+指认孪生）；不同主题放行；dedupCosine=0 关闸放行  →  ❌ FAIL
+    ① 首写 A：✅ 入库
+    ② 近重复 A'：❌ 未拦截（报告头：【写前回注】⚠️ 枢纽警告：「写入去重」已出现 1/1 篇（≥1/3），再堆它会让直接锚泛化；当前连通分量 = 1（判据 =1））
+    ③ 不同主题 B：✅ 放行
+    ④ 关闸重写：✅ 放行
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#23 调参通道：memo_tuning 工具 + tuning.json 双域 + evaluateWriteNudge 吃到覆盖值
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #23】调参通道：memo_tuning 工具（get/set 双域）+ tuning.json 落盘 + 求值链吃到覆盖值  →  ✅ PASS
+    ① get 四键齐全：✅（输出含全部 TUNING_SPEC 键）
+    ② preset set：✅ 落盘+config 即时变异（minutes=9）
+    ③ session set：✅ 仅 sess-tune 生效（5 vs 40）
+    ④ 求值链集成：✅ step6 开火（会话覆盖）且默认会话静默
+    ⑤ 非法键：✅ 拒绝且文件未动
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#22 写入节律·汇报轮锚：两轮实质汇报未写 → 提醒；聊天回合不触发；memo_write 推进轮锚
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #22】写入节律·汇报轮锚：两轮实质汇报未写 → 提醒；提醒后轮锚重置；聊天回合不触发；写入推进轮锚  →  ✅ PASS
+    ① 两轮汇报未写：✅ 提醒出现（lastWriteNudgeTurn=5）
+    ② 提醒后一轮汇报：✅ 不重复
+    ③ 聊天回合（3 轮未写但非实质汇报）：✅ 不触发
+    ④ memo_write 观测推进轮锚：✅ lastDiaryWriteTurn=8
+    默认值：minutes=7（要求 7）/ turns=2（要求 2）
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#24 时间锚思考口径：空闲/工具时间不计入，只有 llm/stream 思考累计才触发
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #24】时间锚思考口径：空闲墙钟不计入；llm/stream 思考累计达阈值才触发；锚随写入/提醒重置  →  ✅ PASS
+    ① 空闲 8 小时（activeMs 无增量）：✅ 不触发
+    ② 思考累计 11 分钟：✅ 触发（文案「已主动思考」）
+    ③ 锚重置：✅ activeMsAnchor 跟进；5 分钟无思考：✅ 静默；2 分钟内重发：✅ 被 5 分钟最小间隔压制；再思考 11 分钟且过间隔：✅ 触发
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#25 近因保底·写入时间戳：同日平局由写入时刻决胜（票06，生产 09-14 场景：3 分钟前刚写的落选）
+════════════════════════════════════════════════════════════════════════════════════════════════
+[memo-kernel] 🛡️ SQLite keepalive retained for /tmp/memo-river-acc-rlvpty/dsh-home/memo-river/9fd7d261e8417f45/knowledge_base.sqlite
+
+【验收 #25】近因保底·写入时间戳：同日平局由写入时刻决胜；关掉开关即纯分数序  →  ✅ PASS
+    开保底(k=2, floor=7d) 入选：[2026-01-05-mv8be3t1-旧渲染卡顿一月 | 2026-10-14-mv8be79m-同日晚些的会议纪要]（要求含晚写的会议纪要且 top1 仍是渲染旧篇）
+    evicted 标记：✅ recency-floor-evicted；关保底控制组：[2026-01-05-mv8be3t1-旧渲染卡顿一月 | 2026-10-14-mv8be5qe-同日早晨的部署记录]
+
+【验收 #26】近因保底·退路：写入时间戳缺失时回退标题日期（同日平局退化为分数序，不崩溃）  →  ✅ PASS
+    置空 updated_at(成功) 后开保底入选：[2026-01-05-mv8be3t1-旧渲染卡顿一月 | 2026-10-14-mv8be5qe-同日早晨的部署记录]（标题日期同日 → 平局按分数序；要求选集非空且无异常）
+    原始返回：渲染又卡了，上次是怎么解决的来着？ Current runtime context. This snapshot supersedes earlier runtime-context snapshots. ⟨memo-river·被动召回⟩ [记忆河流·被动召回 | 本桶=时间戳保底测试 | Ω=0.257 sparse | mode=topology_v3 | 动态K×1] D1「2026-01-05-mv8be3t1-旧渲染卡顿一月」 role=atomic_concept  reward=none  tags
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#27 空桶注入留痕：inject-skip reason=empty-corpus 落桶日志且带 session（票03——生产排查 f23d80 时疑缺此行）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #27】空桶：注入评估留 empty-corpus 跳过行 + session 归因（票02/03）  →  ✅ PASS
+    桶日志片段：[2026-10-14T16:18:52.162Z] [info] inject-skip bucket=空桶测试 reason=empty-corpus gate={"passed":false,"maxKnn":0,"threshold":0.55,"enabled":true,"gateVector":"none","retrievalMaxKnn":0} elapsedMs=0 session=sess-empty-27
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#28 注入日志可归因：inject 成功行带 session + gate 分数（票02——校准实验缺通过样本分布的补齐）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #28】注入成功行带 session id 与 gate 分数块（maxKnn/threshold/gateVector/retrievalMaxKnn）  →  ✅ PASS
+    本会话日志行数=3；inject 行 gate 块：gate={passed:true,maxKnn:0.6966,threshold:0.55,gateVector:current,retrievalMaxKnn:0.7141} 
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#29 增量锚工具输出封顶（截尾均值）+ 最小重发间隔（票05 用户拍板口径）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #29】截尾均值封顶 + 5 分钟最小重发间隔 + write-nudge 触发行落桶日志（票01+05）  →  ✅ PASS
+    封顶：warm=✅60000→2000；cold=✅→4000；small=✅25 不折
+    间隔：2分钟内=✅压制；6分钟后=✅触发；桶日志 write-nudge 行=✅ write-nudge session=sess-nudge-29h turn=1 step=3 reason=上下文自上次提醒已增 0K 
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#30 digest 现取：自主态锚用最近助手实质文本，交互态锚优先回合摘要（票05）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #30】自主态 digest=最近助手实质文本（非陈旧 draft）；交互态 digest=回合摘要优先  →  ✅ PASS
+    自主态：✅ 用鲜弹药
+    交互态：✅ draft 优先
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#31 压缩后查询锚：注入选材取压缩后首段内容而非摘要摊平的旧热点（票07 生产场景复现）
+════════════════════════════════════════════════════════════════════════════════════════════════
+[memo-kernel] 🛡️ SQLite keepalive retained for /tmp/memo-river-acc-rlvpty/dsh-home/memo-river/8add73d6be53b0e3/knowledge_base.sqlite
+
+【验收 #31】压缩联动注入选材=压缩后内容（热载篇）而非摘要旧热点（渲染篇）；日志带 trigger 与 session  →  ✅ PASS
+    入选：[2026-10-14-mv8beq23-预设热载方案]（k=1 强制二选一；要求热载篇胜出）
+    日志：trigger=compaction+session=✅
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#32 gate 锚拼接 max(gU,gA)：短指令误杀修复（校准 A 方案）+ 回滚开关 + 无误放
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #32】gate 锚拼接：max(gU,gA)@0.55 短指令误杀 0/17 口径落地；开关可回滚；无误放  →  ✅ PASS
+    (a) handler：注入=✅  gateVector:assistant=✅
+    (a2) 数学：passed=✅  vector=assistant  gU(留痕)=0.5121  gA(胜选)=0.7517
+    (b) 回滚开关(false)：压制=✅（回到用户锚单选）
+    (c) 误放防线：离题长助手陈述 → ✅ 仍压制
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#33 artifactSig 确定性：同库连打 3 次构建 sig 逐位一致（票⑥A Rust 浮点定序回归线）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #33】artifactSig 确定性：HashMap 迭代序×f64 累加定序后，同库多次构建逐位一致（跨进程版见 scripts/probe-sig-determinism.mjs）  →  ✅ PASS
+    构建器真跑=✅ 3 次  nodes=15
+    sig 唯一数=✅ 1  sig=570c6139fb6c81dd65535e76…
+    修复前基线：全新副本库 6/6 唯一（D24）；Rust 修复=build_transport 三处排序化（memo_artifact_builder.rs）
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#34 artifact 行换代清理：每 schema 保最新 K 代；幂等；runOnce 挂钩触发（票⑥B）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #34】artifact 行换代清理：每 schema 保最新 K 代（活跃代永不删）；幂等；守护轮挂钩  →  ✅ PASS
+    (a) 单元=✅ 5→3 代，留最新三行（本轮跨 schema 共清 2 行，含 real schema 历史漂移残留）
+    (b) 幂等=✅ 二次调用 0 删除
+    (c) runOnce 接线=✅ guardian artifact-gc 日志行出现
+    生产存量对照：dsh-memo-river 桶 218 行 / preset-composer 桶 136 行（票⑥A 修复前漂移产物，首轮守护即清）
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#35 草稿队列可见性：nudge 带队列数与最老年龄；面板常显各桶计数（票05）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #35】草稿队列可见性：nudge 带队列计数与最老年龄；面板常显各桶 pending（空=0）  →  ✅ PASS
+    (a) 面板读数=✅ pending=2（目录实际 2 篇）最老=27.0h
+    (b) nudge 带队列=✅「草稿队列 2 篇待批（最老 27 小时）——可提示用户处理（看草稿 / 批准 / 丢弃）。」
+    (c) 空队列不显示数字=✅ 无队列行，原两行提醒保留
+    (d) 空桶显示 0=✅ pending=0 / oldest=null；面板 HTML 队列区=✅；全局桶数=8
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#36 守护预审三态：垃圾稳定「建议丢弃」；Tag 边界「需人工」；可批「可一键批」；纯只读不代批（票06）
+════════════════════════════════════════════════════════════════════════════════════════════════
+[memo-kernel] 🛡️ SQLite keepalive retained for /tmp/memo-river-acc-rlvpty/dsh-home/memo-river/9e1ccf6f5afc1a3d/knowledge_base.sqlite
+
+【验收 #36】守护预审三态：discard 稳定/边界 manual/可批 ok/近重复 manual；纯只读；面板+列表+出队联动  →  ✅ PASS
+    (a) 三态判定=✅ ok→ok、嵌入失败→manual、junk→discard、孪生→manual
+    (b) D10 红线（垃圾稳定丢弃，Tag 够也拦）=✅ 空用户+空助手（D10 机械批准污染样本形态）——无可入库内容，建议 memo_…
+    (c) 近重复指认=✅ score=1.0000 twin=note/预审测试/2026-10-14-mv8bfhsk-种子-预审基线.md
+    (d) GuardianRound/日志=✅ {"ok":1,"manual":2,"discard":1,"failures":0}（嵌入批调用=9 次）
+    (e) 只读红线（.md 字节+mtime+库计数不变）=✅；孤儿清扫=✅；守护前 unchecked=✅ 4/4
+    (f) 队列读数=✅ {ok:1,manual:2,discard:1,unchecked:0}；面板三态列=✅；memo_drafts 三态=✅
+    (g) 出队联动=✅ approved/ 同进 .md+.status.json；队列余 pending=3（ok=0/manual=2/discard=1）；批准回报头：【记忆河流·memo_approve】待处理 1 篇
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+#37 write-nudge 场景感知：普通含质量锚≤3行；委托变体（depth/工具闩锁）；memo_write 后回落；四锚参数不动（票05）
+════════════════════════════════════════════════════════════════════════════════════════════════
+
+【验收 #37】write-nudge 场景感知：普通形态含质量锚（≤3 行）；委托变体三要素；memo_write 回落；四锚不动（票05）  →  ✅ PASS
+    (a) 普通快照=✅ 2 行含锚；带队列=✅ 3 行
+    (b) 委托快照=✅ 三要素（先落盘/读者点明/锚）齐；带队列=✅ 4 行
+    (c) 探测链路：普通触发=✅；subagent 闩锁=✅ 变体；memo_write 回落=✅ 闩清+普通形态
+    (d) delegationDepth=2=✅ 变体（纯 depth，非闩锁）；日志 delegation 标记=✅ 1(depth+latch)/0 两态
+    (e) 四锚默认=✅ 7min/2turns/40steps/50K
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+验收汇总
+════════════════════════════════════════════════════════════════════════════════════════════════
+  # 1 ✅  注入块出现在请求消息数组尾部且在 assistant 回答之前
+  # 2 ✅  前缀缓存不破（system 段文本 hash 相等）
+  # 3 ✅  无关查询 → 不注入，且带 fallbackReason（单条 + 多轮历史两档）
+  # 4 ✅  注入文本含 role= 与 Ω=/regime=
+  # 5 ✅  有候选被截断时注入块末行含「本次未注入」
+  # 6 ✅  无 Tag 行 → 拒绝；新 Tag 无 reason → 拒绝；有 reason → 写入
+  # 7 ✅  孤岛语料 → 连通分量 11 警告；河流语料 → 1
+  # 8 ❌  同一语料 + 同一查询，名次与 native.cjs 一致
+  # 9 ✅  嵌入不可用 → 注入跳过 + 记日志 + 一条模型可见的失败通知，主流程正常返回
+  #10 ❌  两会话同时注入互不串（含跨工作区），且并发 == 串行
+  #11 ✅  空库 → memo_write → 被动注入捞回（日志自动召回闭环）
+  #12 ✅  入选集合去重：连续同集合不重复注入（键=id 集合而非文本）
+  #13 ✅  每条入选日记都带正文行（截断路径不吞正文）
+  #14 ❌  草稿消费通道：批准入库走 memo_write 同一闸门 + 文件出队；空词表（内容判定不足 3 个）跳过；丢弃可追溯
+  #15 ✅  自主态节律：每 N 步重评一次，中间步零尝试
+  #16 ✅  压缩事件：新 compactionId 立即重注并绕过同集合去重；同 id 不重复触发
+  #17 ❌  步维刷新：自主尝试次数达 dedupeRefreshTurns → 强制重注同集合
+  #18 ✅  中途新用户输入（step>1）按回合首发立即评估；无输入且节律未到则零尝试
+  #19 ✅  近因保底：k-limit 挤掉最近日记时保留一席；关掉开关即纯分数序
+  #20 ✅  写入节律提醒：触发 / 每回合限流 / memo_write 观测重置时钟
+  #21 ❌  写入去重：近重复被拒（near-duplicate-diary+指认孪生）；不同主题放行；dedupCosine=0 关闸放行
+  #22 ✅  写入节律·汇报轮锚：两轮实质汇报未写 → 提醒；提醒后轮锚重置；聊天回合不触发；写入推进轮锚
+  #23 ✅  调参通道：memo_tuning 工具（get/set 双域）+ tuning.json 落盘 + 求值链吃到覆盖值
+  #24 ✅  时间锚思考口径：空闲墙钟不计入；llm/stream 思考累计达阈值才触发；锚随写入/提醒重置
+  #25 ✅  近因保底·写入时间戳：同日平局由写入时刻决胜；关掉开关即纯分数序
+  #26 ✅  近因保底·退路：写入时间戳缺失时回退标题日期（同日平局退化为分数序，不崩溃）
+  #27 ✅  空桶：注入评估留 empty-corpus 跳过行 + session 归因（票02/03）
+  #28 ✅  注入成功行带 session id 与 gate 分数块（maxKnn/threshold/gateVector/retrievalMaxKnn）
+  #29 ✅  截尾均值封顶 + 5 分钟最小重发间隔 + write-nudge 触发行落桶日志（票01+05）
+  #30 ✅  自主态 digest=最近助手实质文本（非陈旧 draft）；交互态 digest=回合摘要优先
+  #31 ✅  压缩联动注入选材=压缩后内容（热载篇）而非摘要旧热点（渲染篇）；日志带 trigger 与 session
+  #32 ✅  gate 锚拼接：max(gU,gA)@0.55 短指令误杀 0/17 口径落地；开关可回滚；无误放
+  #33 ✅  artifactSig 确定性：HashMap 迭代序×f64 累加定序后，同库多次构建逐位一致（跨进程版见 scripts/probe-sig-determinism.mjs）
+  #34 ✅  artifact 行换代清理：每 schema 保最新 K 代（活跃代永不删）；幂等；守护轮挂钩
+  #35 ✅  草稿队列可见性：nudge 带队列计数与最老年龄；面板常显各桶 pending（空=0）
+  #36 ✅  守护预审三态：discard 稳定/边界 manual/可批 ok/近重复 manual；纯只读；面板+列表+出队联动
+  #37 ✅  write-nudge 场景感知：普通形态含质量锚（≤3 行）；委托变体三要素；memo_write 回落；四锚不动（票05）
+
+  通过 32/37

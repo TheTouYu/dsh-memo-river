@@ -19,6 +19,20 @@
     "cordis": ">=4.0.0-rc <5",
     "schemastery": "^3.18.0"
   },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "cordis": {
+      "optional": true
+    },
+    "schemastery": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^24.13.3",
     "typescript": "^5.9.0"

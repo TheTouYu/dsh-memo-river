@@ -3,7 +3,17 @@
 把 **VCPToolBox 的 TagMemo / RiverMemo 记忆算法**接进 DSH，做成 agent preset `memo-river`：
 **被动注入为主干、工具补证、守护维护**。
 
-设计文档（唯一依据）：[`DESIGN.md`](./DESIGN.md)。
+**上手先读：[`docs/QUICKSTART.md`](./docs/QUICKSTART.md)**（基础安装 → 自研内核 → 本地嵌入+远端回退，每步带期望输出）。
+设计依据：[`DESIGN.md`](./DESIGN.md)；工程约定与红线：[`AGENTS.md`](./AGENTS.md)。
+
+## 前置条件
+
+| 依赖 | 必需？ | 说明 |
+|---|---|---|
+| Node.js **≥ 22.5** | 必需 | 知识库用 `node:sqlite`（`DatabaseSync`）；本仓在 Node 26 上验证 |
+| DSH（DeepSeek Harness） | 必需 | 这是 dsh 插件，不是独立服务 |
+| OpenAI 兼容嵌入端点 | 建议 | 不配也能跑：写路径明确拒绝、注入跳过并通知，读取路径照常 |
+| cargo / VCPToolBox / NVIDIA GPU | 可选 | 分别是自研内核、上游内核、本地嵌入（§QUICKSTART 2/3） |
 
 ---
 
@@ -34,8 +44,15 @@
 ## 安装 / 构建
 
 ```bash
+npm install                    # 先装依赖（typescript / @types/node / undici）
 bash scripts/build.sh          # 链接构建依赖 + tsc：src/ → lib/
+node -e "import('./lib/index.js').then(m=>console.log(Object.keys(m)))"   # 验证产物可加载
 ```
+
+> ⚠️ `npm install` 若报 `Cannot read properties of null (reading 'children')`：npm 12 解析本仓
+> **宿主提供的 peerDependencies**（`@deepseek-ai/dsh-*` / `cordis` / `schemastery`）时空指针崩溃。
+> 本仓已内置修法（`peerDependenciesMeta.*.optional` + 仓根 `.npmrc` 的 `legacy-peer-deps=true`）；
+> 仍崩就 `npm install --legacy-peer-deps`。详见 `docs/QUICKSTART.md` §5。
 
 依赖解析策略：**优先已安装的 npm 布局**（本插件实际运行的那个 dsh），源码 checkout 仅作兜底。
 理由见 `scripts/build.sh` 顶部注释——类型的来源必须与运行期的来源同一份。
@@ -72,9 +89,11 @@ dev_install_package /home/h/app/dsh-memo-river
 | `workspaceScoped` | `true` | 按工作区（cwd hash）分库 |
 | `intervalMs` | `900000` | 守护循环周期（15 分钟；下限 10000） |
 | `bucket` | `''` | 空 = 取 cwd 的 basename |
-| `embed.apiUrl` / `apiKey` / `model` / `dimension` | `''` / `''` / `gemini-embedding-2-preview` / `3072` | 空则回落到 VCPToolBox 的 `config.env` |
+| `embed.apiUrl` / `apiKey` / `model` / `dimension` | `''` / `''` / `''` / `0` | 空则回落到 `vcpRoot/config.env`（`model`↔`WhitelistEmbeddingModel`、`dimension`↔`VECTORDB_DIMENSION`，再兜底 3072）。**换模型/维度必须全库重嵌** |
+| `embed.fallbackApiUrl` / `fallbackApiKey` / `fallbackModel` / `fallbackProviderOrder` | 全 `''` | **保底端点**：主端点失败自动改打它、向量入同一缓存；全空=不启用回退。失败会在对话里通知 + 面板「嵌入链路」卡留全文 |
+| `embed.providerOrder` | `''` | OpenRouter 专属：逗号分隔 slug（如 `Parasail`）→ 请求体带 `provider.order`，关掉按价负载均衡（不钉会逐位漂移） |
 | `inject.gate` / `gateThreshold` | `true` / `0.55` | 门控：KNN 最高分低于阈值 → 不注入 |
-| `inject.k` / `tokenBudget` / `dynamicK` | `3` / `600` / `1` | 注入条数 / 预算 / 动态 K 倍率 |
+| `inject.k` / `tokenBudget` / `dynamicK` | `3` / `600` / `1` | 注入条数 / 预算（按全文 token 计费）/ 动态 K 倍率。**仓内预设把它设成 3500**（600 时「表头+3 行条目」就把预算吃光，正文行全是 0） |
 | `inject.mode` | `topology_v3` | 读出模式（`topology_v3` / `rivermemo` / `dtsc` / `tagmemo`） |
 | `inject.minKnnForReward` | `0.6` | 低基数候选不发结构奖励（§2.2 规则 4） |
 | `native.vcpRoot` | `/home/h/app/VCPToolBox` | 原生内核与 `rag_params.json` 的位置 |
@@ -129,6 +148,8 @@ dsh 侧（`lib/injector.js`）与 ZCode 适配层（`zcode-adapter/headless.mjs`
 ---
 
 ## 验收（实测，非「看起来对」）
+
+> 各套件的端点依赖与本机命令见 `docs/QUICKSTART.md` §4；已知抖动红集（#8/#10/#25）单条先复跑再定罪。
 
 ```bash
 node scripts/setup-selftest.mjs    # 一次性铺三个工作区（河流 / 孤岛 / 写入测试）

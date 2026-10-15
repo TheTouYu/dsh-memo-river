@@ -9,6 +9,7 @@
 
 ## 构建红线
 
+- **外人路径（新克隆先跑这个）**：`npm install` → `bash scripts/build.sh`（build.sh 自动从已安装的 dsh 建 junction，并用本仓 `node_modules/.bin/tsc` 编译）。`npm install` 若报 `Cannot read properties of null (reading 'children')` 是 npm 12 解析**宿主提供的 peerDependencies** 时空指针崩——本仓已内置 `peerDependenciesMeta.*.optional` + `.npmrc legacy-peer-deps=true`，仍崩就加 `--legacy-peer-deps`。详见 `docs/QUICKSTART.md`。
 - **勿信 `.bin/tsc`**（兄弟仓 billion-context-dsh 的是 0 字节坏壳——退出码 0 零输出假成功）。编译：`node ../billion-context-dsh/node_modules/typescript/lib/tsc.js -p .`，编完 `grep -c <新标记> lib/<文件>.js` 必须非零。
 - 内核改动：`cd kernel && cargo build --release && cp target/release/libmemo_kernel.so memo-kernel.linux-x64-gnu.node`。
 
