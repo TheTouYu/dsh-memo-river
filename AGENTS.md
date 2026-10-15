@@ -16,7 +16,7 @@
 ## 验证闸门（改动分级）
 
 - **内核/写路径改动**（kernel/、store.ts、workspace.ts、daemon.ts）：`node kernel/tools/diff-runner.mjs` 五腿 PASS（判据分数差 ≤1e-6，健康史 1.11e-16）+ `node scripts/acceptance.mjs` 37/37（reimpl 轨跑法：`MEMO_NATIVE_KERNEL=reimpl node scripts/acceptance.mjs`）。#8 已改为**读出链名次快照**（2026-10-15 v2 基准，bge-m3@OpenRouter·钉 Parasail、查询向量现场嵌）：换嵌入模型/端点后名次会变属预期——用 `MEMO_ACC_RERECORD_SNAPSHOT=1` 重录、人工核对 generated.json 后贴回 SNAPSHOT 常量，**不许静默自愈**；「与上游一致」由 diff-runner 专责，不再比 native-result.json.bak（跨模型旧档，已死档）。
-- **注入/查询场/降级路径改动**（injector.ts、render.ts、session.ts）：`node scripts/acceptance-queryfield.mjs` 6/6（**无端点依赖**，含 source.kind 白名单逐条 + 同日志新旧实现负对照 + 失败通知集成）+ `node scripts/acceptance.mjs`。⚠️ 主套件跑真嵌入端点，**端点劣化时整套会随机红 6-8 条**（2026-10-14 实测：同一份代码两次跑红集不相交 #1/#4/#5/#31 ↔ #17/#32/#37）——红一条先复跑、再看桶日志里的 `inject-skip reason=embed-*` 占比，别急着归因代码。
+- **注入/查询场/降级路径改动**（injector.ts、render.ts、session.ts）：`node scripts/acceptance-queryfield.mjs` 6/6（**无端点依赖**，含 source.kind 白名单逐条 + 同日志新旧实现负对照 + 失败通知集成）+ `node scripts/acceptance.mjs`。⚠️ 主套件跑真嵌入端点，**端点劣化时整套会随机红 6-8 条**（2026-10-14 实测：同一份代码两次跑红集不相交 #1/#4/#5/#31 ↔ #17/#32/#37）——红一条先复跑、再看桶日志里的 `inject-skip reason=embed-*` 占比，别急着归因代码。复跑仍红且端点健康时，用**负对照定罪**：`git stash` 掉自己的改动跑基线，红集相同=预存抖动，放行并另案登记（2026-10-15 实证：{#8,#10,#25} 与 logger 补线零关联，正是此法洗清）。
 - 生产内核轨切换：双轨 acceptance 全绿才允许改 `~/.config/systemd/user/dsh-web.service.d/kernel-reimpl.conf` 的 `Environment=MEMO_NATIVE_KERNEL`，改后 daemon-reload + restart dsh-web。
 
 ## 测量与断言纪律（2026-10-14/15 复盘提炼，每条都有血）
