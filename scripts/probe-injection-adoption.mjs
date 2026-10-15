@@ -97,7 +97,9 @@ const packetsDir = join(OUT, 'judge-packets')
 const USE_EMBED = !flag('no-embed')
 const EMIT_PACKETS = flag('packets')   // 输出判官题面：raw-NN.md（原对话时间线）+ 可选 digest-NN.md
 const EMIT_DIGEST = flag('packets-digest')  // 额外出摘要式题面（做 A/B：加工到底有没有害）
-const PIN = String(arg('pin', ''))          // 把轮次钉死成某次产物里的那几轮（A/B 必须同一批样本）
+const PIN = String(arg('pin', ''))
+const EXCLUDE_BUCKET = String(arg('exclude-bucket', ''))  // 逗号分隔：排掉自指/低价值桶
+const ONLY_BUCKET = String(arg('only-bucket', ''))      // 逗号分隔：只取这些桶（跨桶分层取样用）          // 把轮次钉死成某次产物里的那几轮（A/B 必须同一批样本）
 const ONLY = String(arg('criteria', '')).split(',').map((s) => s.trim()).filter(Boolean)
 
 const MEMO_HOME = process.env.MEMO_HOME || join(homedir(), '.dsh', 'memo-river')
@@ -217,16 +219,21 @@ const sessionCache = new Map()
 function loadSession(sessionId) {
   if (sessionCache.has(sessionId)) return sessionCache.get(sessionId)
   let result = null
-  for (const dir of existsSync(SESS_HOME) ? readdirSync(SESS_HOME) : []) {
-    const d = join(SESS_HOME, dir, sessionId)
+  /* ⚠️ 2026-10-15 数据集质量修正：原来只扫**一个**工作区目录
+   * (`~/.dsh/sessions/--home-h-dsh-plugins-dsh-memo-river--`)，于是全部样本都来自本桶——
+   * 而本桶这段时间的会话**本身就在讨论记忆系统**，是最容易假阳性的自指样本。
+   * 现在扫**全部**工作区目录，跨桶取样。 */
+  const allWorkspaces = existsSync(SESS_HOME) ? readdirSync(SESS_HOME) : []
+  for (const ws of allWorkspaces) {
+    const d = join(SESS_HOME, ws, sessionId)
     if (!existsSync(d)) continue
     const z = readdirSync(d).find((f) => f.endsWith('.jsonl.zstd'))
     if (!z) continue
     try {
       const evs = unzstd(join(d, z)).split('\n').filter(Boolean).map((l) => JSON.parse(l))
-      result = { dir, events: evs }
+      result = { dir: d, workspace: ws, events: evs }
     } catch (e) {
-      result = { dir, events: [], error: String(e).slice(0, 120) }
+      result = { dir: d, workspace: ws, events: [], error: String(e).slice(0, 120) }
     }
     break
   }
@@ -564,6 +571,18 @@ log(`  注入事实 ${facts.length} 条（另有 inject-skip ${skippedRounds} �
 
 const cutoff = Date.now() - SINCE_HOURS * 3600_000
 let picked = facts.filter((f) => f.t >= cutoff)
+if (ONLY_BUCKET) {
+  const on = new Set(ONLY_BUCKET.split(',').map((x) => x.trim()).filter(Boolean))
+  const before = picked.length
+  picked = picked.filter((f) => on.has(f.bucket))
+  log(`  --only-bucket：命中 ${picked.length} 条（原 ${before}）`)
+}
+if (EXCLUDE_BUCKET) {
+  const ex = new Set(EXCLUDE_BUCKET.split(',').map((x) => x.trim()).filter(Boolean))
+  const before = picked.length
+  picked = picked.filter((f) => !ex.has(f.bucket))
+  log(`  --exclude-bucket：排掉 ${before - picked.length} 条`)
+}
 if (PIN && existsSync(PIN)) {
   const want = new Set(readFileSync(PIN, 'utf8').split('\n').filter(Boolean).map((l) => {
     try { const r = JSON.parse(l); return `${r.session}|${r.ts}` } catch { return '' }
@@ -642,6 +661,27 @@ for (const f of picked) {
     }
     writeFileSync(join(packetsDir, `raw-${idx}.md`), tl.join('\n'))
 
+    /* ── 请求体（用户 2026-10-15：「你直接构造一个一样的请求不好吗？上下文一个字不变，
+     *    只追加提问」）── 按**真实的 role 顺序**重建这一轮的 messages，末尾追加一句提问。
+     *    这是给 `scripts/judge-replay.mjs` 直发模型用的（不经过 subagent，无任何包装）。 */
+    const msgs = []
+    for (const ev of al.timeline) {
+      if (ev.k === 'user') msgs.push({ role: 'user', content: ev.t })
+      else if (ev.k === 'INJECTED_MEMORY_BLOCK') msgs.push({ role: 'user', content: ev.t })
+      else if (ev.k === 'assistant') msgs.push({ role: 'assistant', content: ev.t })
+      else if (ev.k === 'tool/result') {
+        const last = msgs[msgs.length - 1]
+        const piece = `[工具返回]\n${ev.t.slice(0, RC)}`
+        if (last && last.role === 'user' && last.__tools) last.content += '\n\n' + piece
+        else msgs.push({ role: 'user', content: piece, __tools: true })
+      }
+    }
+    for (const m of msgs) delete m.__tools
+    writeFileSync(join(packetsDir, `req-${idx}.json`), JSON.stringify({
+      ts: f.tsIso, session: f.session, bucket: f.bucket, workspace: sess?.workspace ?? null,
+      turn: al.turn, injectedIds: items.map((i) => `D${i.d}`), messages: msgs,
+    }, null, 1))
+
     /* ── 题面 B：我加工过的**摘要式题面**（保留做 A/B，验证"加工到底有没有害"）── */
     if (EMIT_DIGEST) {
       const P = TUNING.packetChars
@@ -679,7 +719,7 @@ for (const f of picked) {
     }
   }
   rounds.push({
-    ts: f.tsIso, session: f.session, bucket: f.bucket, hash: f.hash,
+    ts: f.tsIso, session: f.session, bucket: f.bucket, hash: f.hash, workspace: sess?.workspace ?? null,
     turn: al.turn, step: al.step,
     injectedIds: items.map((i) => `D${i.d}`),
     decoyIds: decoys.map((i) => `D${i.d}`),
