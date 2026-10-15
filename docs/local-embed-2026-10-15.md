@@ -145,3 +145,29 @@ embed: { apiUrl: 'http://127.0.0.1:8099', apiKey: 'local', model: 'baai/bge-m3',
 `all-failed` 仍进面板卡片与日志（面板是"全量台账"，对话是"必须让人知道的增量"）。
 
 代价：不改测试——**改的是产品行为**（去掉重复通知），验收口径因此保持原样通过。
+
+### 8.5 ⚠️ 切换的生产配置面：**同名 id 在每个预设各有一份行**（第一次切换就栽在这）
+
+**事实**：`dsh --profile web --dump-config` 里 `- id: memo-river-plugin` 会出现 **4 次**（每个预设一份）：
+
+| 预设 | 行 | embed 来源 | 切换后 |
+|---|---|---|---|
+| `memo-river` | 1460 | **仓内** `bundle/cordis.patch.yml`（唯一入库的那份） | ✅ 本地+保底 |
+| `qxqy-river` | 1839 | `~/.dsh/preset-bundles/qxqy-river/cordis.patch.yml` | ✅ 补 |
+| **`river-acp`**（`agent-preset-registry.selectedDefault`，**实际在跑的就是这条**） | 2080 | `~/.dsh/preset-bundles/river-acp/cordis.patch.yml` | ✅ 补 |
+| `river-acp-dev` | 2290 | `~/.dsh/preset-bundles/river-acp-dev/cordis.patch.yml` | ✅ 补 |
+
+**症状（改错对象时的可观测特征，全部实测）**：只改仓内 bundle + 重启后——
+① 注入 `elapsedMs` 毫无改善（3557ms vs 切换前 3735/3751/5051）；
+② 停掉本地服务后 `memo_recall` 仍成功、且面板台账**没有** `failover` 事件；
+③ **`ss -tnp | grep 8099` 没有连接**（keep-alive 本应长挂 240s）；
+④ 本地服务 CPU 时间几乎不动（+0.45s）。
+后三条是"生产根本没在用本地端点"的铁证——比看 `dump-config` 的第 1466 行可靠得多。
+
+**判据（验证生产真在用本地端点，按可靠性排序）**：
+1. `ss -tnp | grep 8099` 有 ESTABLISHED（dsh-web ↔ 本地服务，keep-alive 常挂）；
+2. 停服务后主动 recall：应记一条 `failover` 事件 + 对话里出现回退通知；
+3. `systemctl --user show dsh-embed -p CPUUsageNSec` 在几次 recall 后的增量（毫秒级累加）；
+4. 桶日志 `inject ... elapsedMs` 显著下降（预期 4000ms → 300ms 级）。
+
+**教训**：**"改生产配置"之前先答"这条会话用哪个预设"**——`selectedDefault` 决定实际挂载哪份行，而 `dump-config` 里同名 id 会有多份。只看第一处命中就改，会改到一个没人在用的预设上（本次代价 = 一次无谓重启 + 一轮误判）。
