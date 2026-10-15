@@ -465,6 +465,21 @@ hr('#9 不阻塞主流程（拔掉嵌入 API）')
 
 hr('#10 并发隔离（按 session id 键，无全局 lastXxx）')
 {
+  /* 本项测的是**并发隔离**（三会话互不串台 + 并发名次 == 串行名次），**不是**选择权重的时序。
+   * 票04 的选择权重（tagCap/exposureCap/recencyCap）读的是工作区**共享曝光台账**：并发相位里
+   * A 的写与 B 的读交错，串行相位里 A2 写完 B2 才读——同一份正确实现下两相位的名次本来就有
+   * 可能不同（2026-10-15 六轮实测：默认权重翻 2~3 次；三个权重全零 → 0 次）。
+   * 所以本项临时把三个权重归零，只测「并发不改名次」这条真不变量；权重自身语义由
+   * #19（近因保底）/ #25 / #26 / adaptive-k 组覆盖。跑完必还原（try/finally，见块尾）。 */
+  const weightsSaved = {
+    tag: config.inject.selectionTagCap,
+    exposure: config.inject.selectionExposureCap,
+    recency: config.inject.selectionRecencyCap,
+  }
+  config.inject.selectionTagCap = 0
+  config.inject.selectionExposureCap = 0
+  config.inject.selectionRecencyCap = 0
+  try {
   const qRiver = '我这边现在渲染又卡了，上次教室那个是怎么解决的？'
   const agentA = createAgent('sess-A', WS_RIVER, [])
   const agentB = createAgent('sess-B', WS_RIVER, [])
@@ -514,7 +529,13 @@ hr('#10 并发隔离（按 session id 键，无全局 lastXxx）')
     `  串行 A=[${idsOfSerial(serialA).join(',')}] B=[${idsOfSerial(serialB).join(',')}]`,
     `sess-C（孤岛工作区）本桶=${bucketOf(textC)} 候选=[${idsOf(textC).join(',')}]`,
     `会话状态按 session id 键：sess-A/B/C 三条独立记录（Map<sessionId, SessionState>）`,
+    `本项在 selectionTagCap/ExposureCap/RecencyCap = 0 下跑（隔离测试口径，见块首注释）`,
   ])
+  } finally {
+    config.inject.selectionTagCap = weightsSaved.tag
+    config.inject.selectionExposureCap = weightsSaved.exposure
+    config.inject.selectionRecencyCap = weightsSaved.recency
+  }
 }
 
 /* ══════════════════════ #7 体检抓孤岛 ══════════════════════ */
