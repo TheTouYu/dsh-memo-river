@@ -56,6 +56,9 @@ junction，供 tsc 取类型、也供运行期解析 `schemastery` 这类真依�
 === 构建完成 ===
 ```
 
+> ⚠️ **假绿陷阱**：tsc **报类型错时仍然会 emit**，`lib/` 照样“能加载”。所以构建后务必再看一眼错误数——
+> `bash scripts/build.sh 2>&1 | grep -c "error TS"` 必须是 **0**（退出码也要 0）。
+
 ### 1.3 验证构建产物
 
 ```bash
@@ -267,6 +270,8 @@ node scripts/probe-embed-local-parity.mjs  # 本地 vs 远端向量一致性：�
 | 症状 | 根因 | 处置 |
 |---|---|---|
 | `npm install` → `Cannot read properties of null (reading 'children')` | npm 12 解析**宿主提供的 peerDependencies** 时空指针崩 | 本仓已修（`peerDependenciesMeta.optional` + `.npmrc`）；仍崩就 `npm install --legacy-peer-deps` |
+| `npm install` → `EALLOWREMOTE: Refusing to fetch "…"` | npm 12 拒取"外部"tarball：锁文件里 `resolved` 的主机与当前 `--registry` 不一致（例如锁钉 npmmirror、你却用默认 registry） | 本仓锁文件已钉**官方 registry**（官方/镜像两种网络实测都通过）；若你换镜像仍撞：`npm install --no-package-lock`，或在干净目录重生成锁 |
+| 全新克隆 `npm install` 说成功，`build.sh` 却报 `Cannot find module 'undici'` | 锁文件是在**已有 `node_modules`（尤其含 build.sh 建的 junction）的目录里**生成的 → 宿主包被记成相对路径条目、真依赖被记成 `link` → 新克隆只建链接、不装包 | 锁文件必须在**干净目录**生成：`rm -rf node_modules package-lock.json && npm install --package-lock-only`，再把 `package-lock.json` 提回仓库（本仓已修） |
 | `build: 找不到 tsc（$DSH_CHECKOUT/node_modules/.bin/tsc 或 PATH 上的 tsc）` | 没装依赖（`node_modules` 不存在），而 DSH 安装布局里自带 typescript | 先 `npm install`（本仓 `typescript` 是 devDependency，build.sh 的第二优先级正好用它） |
 | 构建报类型错、指向 `cordis`/`schemastery` | junction 没建成功（DSH 没找到） | 确认 `command -v dsh` 有输出；或 `DSH_CHECKOUT=<dsh 源码 checkout> bash scripts/build.sh` |
 | 加载期 `native.kernel 未知取值` | `native.kernel` 写了别的值 | 只能是 `vcp` \| `reimpl`（故意不静默回退） |
