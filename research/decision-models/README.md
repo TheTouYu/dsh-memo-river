@@ -18,6 +18,7 @@
 | `round2-chinese-speed-perf.md` | 第二轮中文/速度专项：**采用结论的出处**。StartLux 零中文证据判负；Chinese-Jev（复旦/NUS 322M）权重未发布；社区 `chinese-decision-0.8b` 全量 CJ-Bench 实测胜出，含分题型数字与局限清单（单一作者、发布 2 天、基线数字转引论文） | 决策模型调查子代理（第二轮），受 session-d382c913 委托 | 2026-10-15 |
 | `jev-mem-analysis.md` | Jev-Mem 论文（arXiv:2609.23986，UT Dallas三方）完整拆解：决策模型控制记忆系统读/写路径的架构、22 个决策点清单（写 8/巩固 5/读 14）、LoCoMo 0.777 与 6.6× 构建加速、Adversarial +22 点——决策模型做记忆门控的最强方法学参照 | 论文精读子代理 | 2026-10-15 |
 | `memory-papers-quality-sweep.md` | 高质量论文补扫（用户标准=有实测/可复现/生产级）：A 级「Suggested Is Not Superseded」（arXiv 2610.15710）**否决全自动退役路线**——二元门 39.2% 误伤，须三态+待确认缓冲，直接约束 memo_supersede 自动化红线；含 Mem0 生产延迟数字（p50 75ms） | 论文补扫子代理 | 2026-10-15 |
+| `adopt-chinese-decision-contract.md` | **采用模型的契约调查**：权重真实位置（HF `quincyqiang/chinese-decision-0.8b`）、接口逐字段 + 官方示例原样照抄、`(logits/T).softmax` 读法、`run_gate.py` 零偏差对账、**10 条坑清单**（含「单条绝不 pad」判据与 ECE 两口径矛盾）、**判决=有重大保留**（反事实问法 OOD ⇒ 软排序可用、二元硬门禁用） | 采用模型调查子代理 | 2026-10-15 |
 | `bili/` | B站「决策模型/Jev/StartLux」三关键词搜索 round1 原始结果：`bvids.txt`（12 个候选 BV）、`details.json`（视频详情）、`round1-{关键词,-all}.json`（搜索命中清单，含播放量/时长）——用于筛可学的中文视频，全部落选（无字幕/无实测数字） | B站搜索线（bilibili-learn 方法） | 2026-10-15 |
 
 ## 与仓库其他部分的关系
