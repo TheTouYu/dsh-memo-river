@@ -18,6 +18,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
+import torch
 
 ARGS = None
 MODEL = None
@@ -44,6 +45,12 @@ def encode(texts):
             return_sparse=False,
             return_colbert_vecs=False,
         )
+    # 显存优化（2026-10-15）：FlagEmbedding 每次 forward 的中间张量落进 PyTorch caching
+    # allocator，长跑后 reserved 累积到 3.2G——而本服务真实工作集按文档实测只有 1.15G（fp16）。
+    # 每次编码后归还缓存块：代价是下一次分配重走 cudaMalloc（微秒级），换来常驻显存下降。
+    # 另在 unit 里开 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True 抑制碎片。
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return np.asarray(out["dense_vecs"], dtype=np.float32)
 
 

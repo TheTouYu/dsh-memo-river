@@ -17,16 +17,18 @@ WorkingDirectory=%h/dsh-plugins/dsh-memo-river
 Environment=NO_PROXY=localhost,127.0.0.1,::1
 Environment=no_proxy=localhost,127.0.0.1,::1
 Environment=HF_HUB_OFFLINE=1
+# 显存优化（2026-10-15）：抑制 PyTorch caching allocator 碎片，配合 server.py 的 empty_cache
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # 需要重拉/首次下载时再开（直连 hf-mirror 约 5.7MB/s；走代理仅 ~1MB/s）
 # Environment=HF_ENDPOINT=https://hf-mirror.com
 Environment=LOCAL_EMBED_VENV=%h/.local/share/dsh-embed/venv
 Environment=LOCAL_EMBED_SNAPSHOT=%h/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181
-ExecStart=/bin/sh -c 'exec "$LOCAL_EMBED_VENV/bin/python" scripts/local-embed/server.py --port 8099 --device cuda:0 --model "$LOCAL_EMBED_SNAPSHOT"'
+ExecStart=/bin/sh -c 'exec "$LOCAL_EMBED_VENV/bin/python" scripts/local-embed/server.py --port 8099 --device cuda:0 --batch-size 8 --max-length 4096 --model "$LOCAL_EMBED_SNAPSHOT"'
 Restart=always
 RestartSec=3
 # 冷启动要加载模型 + CUDA 初始化（实测 ~12s），给足启动窗口
 TimeoutStartSec=180
-# 显存常驻约 1.15GB（fp16）；不设 MemoryMax——模型在显存，进程 RSS 很小（~1GB CPU 侧封顶太多）
+# 显存常驻：真实工作集 1.15GB（fp16）；2026-10-15 加 empty_cache+expandable_segments 前实测常驻 3.2G（缓存/碎片），加后见验收记录。不设 MemoryMax。
 
 [Install]
 WantedBy=default.target
