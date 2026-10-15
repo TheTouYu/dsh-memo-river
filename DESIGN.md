@@ -179,7 +179,10 @@ export { name, inject, Config, apply } from 'file:///home/h/app/dsh-memo-river/l
 · 每轮我在形成回答之前，相关历史日记片段已经进入上下文（被动注入）；片段带 role 字段：
   atomic_concept 是块的固有分类（默认档，可信度须自行判断）/ structural_explanation 是结构推理 /
   thematic_neighbor 仅主题邻近（omega 偏低时由结构档降级而来）/ direct_answer 是锚强度过 frontier 后提升的最高档。
-· 工具：memo_recall 主动补证 / memo_write 写日记 / memo_stats 语料体检 / memo_tags 查看 Tag 词汇表 / memo_drafts 草稿队列。
+· 工具：memo_recall 主动补证 / memo_write 写日记 / memo_stats 语料体检 / memo_tags 查看 Tag 词汇表 / memo_drafts 草稿队列 / memo_buckets 桶地图。
+· 记忆按工作区分桶，本桶≠全世界：环境、路径、全局裁决这类跨项目知识可能住在其他工作区的桶里。
+  memo_buckets 列桶地图（桶名/规模/继承关系）；memo_recall 的 folder 参数（桶名或 16 位哈希）跨桶补证，错桶名会报错并列出全部可用桶。
+  对环境/位置/路径类主题，别只信本桶结论——先跨桶复核再下结论；跨项目事实写进权威桶，别散落进子项目桶。
 · 写日记规范（来自记忆系统作者）：
   ① 写入前先看本轮已注入的相关旧日记与 memo_tags 的词汇表；
   ② Tag 是**检索锚**不是工作流标签——写内容词（主题/机制/对象/判据）；只有概念真正变化时才创建新 Tag，跨篇 ≥1/3 的枢纽词不再复用；

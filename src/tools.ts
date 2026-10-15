@@ -9,7 +9,7 @@
  * `memo_write` 的执行顺序**不可省略**：回注 → 校验 → 新 Tag 闸门 → 写入 → 返回体检增量。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { basename, join } from 'node:path'
 import type { Config } from './config.js'
@@ -36,7 +36,8 @@ import { tieBreakerParamsFrom } from './tiebreaker.js'
 import { listSessions, peekSession } from './session.js'
 import type { RecallOptions } from './recall.js'
 import type { Logger } from './runtime.js'
-import { acquireBucketRuntime, resolveBucket, type WorkspaceRuntime } from './workspace.js'
+import { memoRiverRoot } from './runtime.js'
+import { acquireBucketRuntime, listBuckets, readInheritConfig, resolveBucket, type WorkspaceRuntime } from './workspace.js'
 
 const TEXT_OUTPUT = {
   schema: { type: 'string' as const },
@@ -941,6 +942,51 @@ export function installTools(
           lines.push('· 写新日记时优先复用以上 Tag；只有概念真正变化时才创建新 Tag（需在 memo_write 里给出 newTagReason）。')
           return lines.join('\n')
         })
+      },
+    }),
+  )
+
+  /* ── memo_buckets（桶地图：本机全部记忆桶清单/规模/继承——folder 跨桶补证的正门。
+   * 设计取舍：纯文件系统读（manifest + dailynote 目录），不开任何桶的 sqlite——
+   * WAL 双库契约下为列桶跨 30 个桶开库是事故配方；篇数=文件数近似即可。 ── */
+  ctx.tools.register(
+    defineTool({
+      name: 'memo_buckets',
+      description:
+        '记忆桶地图：列出本机全部记忆桶（桶名/16位哈希/工作区路径/篇数/最近活动/继承的上级桶；★=当前会话本桶）。' +
+        '记忆按工作区分桶，本桶≠全世界——环境、路径、全局裁决这类跨项目知识可能住在其他桶：' +
+        '对这类主题下结论前先看地图，再用 memo_recall 的 folder=桶名 跨桶复核。',
+      parameters: {},
+      output: TEXT_OUTPUT,
+      isConcurrencySafe: () => true,
+      async execute(_args: Record<string, unknown>, exec: unknown) {
+        const { cwd } = viewerOf(exec)
+        const me = deps.getWorkspace(cwd)
+        const entries = listBuckets()
+        if (entries.length === 0) return `【记忆河流·memo_buckets】状态根下没有桶（${memoRiverRoot()}）。`
+        const lines = [`【记忆河流·memo_buckets】本机共 ${entries.length} 个桶（按最近活动排序；★=当前会话本桶）`]
+        for (const e of entries.slice(0, 30)) {
+          const diaryDir = join(e.root, 'dailynote', e.bucket)
+          let count = 0
+          let act = e.updatedAt
+          try {
+            const files = readdirSync(diaryDir).filter((f) => f.endsWith('.md') || f.endsWith('.txt'))
+            count = files.length
+            act = Math.max(act, statSync(diaryDir).mtimeMs)
+          } catch {
+            /* 目录缺失：篇数记 0 */
+          }
+          const when = act > 0 ? new Date(act).toISOString().slice(0, 16).replace('T', ' ') : '—'
+          const inherit = readInheritConfig(e.root)
+          const star = e.hash === me.paths.hash ? '★' : '·'
+          lines.push(
+            `${star} ${e.bucket}@${e.hash.slice(0, 16)}  ${count}篇  ${when}  ${e.cwd ?? e.root}` +
+              (inherit.length > 0 ? `  继承→${inherit.join('、')}` : ''),
+          )
+        }
+        if (entries.length > 30) lines.push(`· …还有 ${entries.length - 30} 个（folder 可传 16 位哈希点名访问）`)
+        lines.push('· 跨桶补证：memo_recall folder=桶名或16位哈希（错名报错会列出全部可用桶）；跨项目事实写进权威桶，别散落子项目桶。')
+        return lines.join('\n')
       },
     }),
   )
