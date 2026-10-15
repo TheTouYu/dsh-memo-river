@@ -58,6 +58,15 @@ const TUNING = {
   contrastMargin: 0.02,
   /** 嵌入批大小 */
   embedBatch: 32,
+  /**
+   * 判官题面长度上限（`--packets`）。**题面只能由这里生成**——首版我在另一个脚本里
+   * 重写了一遍对齐逻辑，结果把整个会话的正文都收进去（62112 字），题面全废。
+   * 教训：**对齐只有一份实现**，产物必须从同一个 ctx 出。
+   */
+  packetChars: { mem: 340, tools: 800, asst: 2600 },
+  /** 原始题面的总字数上限与单条工具输出上限（原对话可以很大：一轮的回复实测有 6 万字级） */
+  timelineCharCap: 40000,
+  toolResultCap: 12000,
   /** 每轮最多取多少字符的助手正文参与比对（防超长正文拖慢） */
   assistantCharCap: 12000,
   /**
@@ -82,7 +91,13 @@ const SINCE_HOURS = Number(arg('since-hours', 72))
 const LIMIT = Number(arg('limit', 200))
 const OUT = String(arg('out', '/tmp/mr-adoption-lab'))
 const EMBED_URL = String(arg('embed', 'http://127.0.0.1:8099'))
+// 题面目录必须在主循环**之前**建（const 在循环后声明会落进 TDZ）
+mkdirSync(join(OUT, 'judge-packets'), { recursive: true })
+const packetsDir = join(OUT, 'judge-packets')
 const USE_EMBED = !flag('no-embed')
+const EMIT_PACKETS = flag('packets')   // 输出判官题面：raw-NN.md（原对话时间线）+ 可选 digest-NN.md
+const EMIT_DIGEST = flag('packets-digest')  // 额外出摘要式题面（做 A/B：加工到底有没有害）
+const PIN = String(arg('pin', ''))          // 把轮次钉死成某次产物里的那几轮（A/B 必须同一批样本）
 const ONLY = String(arg('criteria', '')).split(',').map((s) => s.trim()).filter(Boolean)
 
 const MEMO_HOME = process.env.MEMO_HOME || join(homedir(), '.dsh', 'memo-river')
@@ -172,16 +187,25 @@ function loadInjectFacts() {
       if (!ts || !session) continue
       const t = Date.parse(ts)
       if (!Number.isFinite(t)) continue
-      const items = idsRaw
-        .split(',')
-        .filter(Boolean)
-        .map((tok) => {
-          const m = tok.match(/^D(\d+)(?:@(\S+))?$/)
-          return m ? { d: Number(m[1]), foreignBucket: m[2] ?? null } : null
-        })
-        .filter(Boolean)
+      /* ⚠️ 2026-10-15 重大修正：`ids=` 是**入选集**，不是"模型看到的"。
+       * 块里真正渲染的是 `ids= − dedupedIds= − supersededIds=`。
+       * 实测（5 轮）：日志 37 条，块里只有 15 条——**40% 的"注入"模型压根没看到**。
+       * 首版把入选集当注入集 → 所有判据的分母被污染，判官也被错误前提喂出假 A。
+       * 现在两套都留：`items` 只含真进块的；`selected` 留全集供取证。 */
+      const listOf = (key) => {
+        const m = line.match(new RegExp(`\\b${key}=([^ ]*)`))
+        return (m?.[1] ?? '').split(',').filter(Boolean)
+      }
+      const dedupedIds = new Set(listOf('dedupedIds'))
+      const supersededIds = new Set(listOf('supersededIds'))
+      const parseTok = (tok) => {
+        const m = tok.match(/^D(\d+)(?:@(\S+))?$/)
+        return m ? { d: Number(m[1]), foreignBucket: m[2] ?? null } : null
+      }
+      const selected = idsRaw.split(',').filter(Boolean).map(parseTok).filter(Boolean)
+      const items = selected.filter((it) => !dedupedIds.has(`D${it.d}`) && !supersededIds.has(`D${it.d}`))
       if (items.length === 0) continue
-      facts.push({ t, tsIso: ts, hash, bucket, session, items })
+      facts.push({ t, tsIso: ts, hash, bucket, session, items, selected })
     }
   }
   facts.sort((a, b) => b.t - a.t)
@@ -264,14 +288,33 @@ function alignRound(fact, sess) {
   // ③ 助手正文 = 该 turn 的全部正文（不是第一条）
   const asstParts = []
   const exTool = [], exUser = [], toolCalls = []
+  /**
+   * 原始时间线：**按事件顺序**保留这一轮的对话全貌。
+   *
+   * 用户 2026-10-15 指出我的方向错了：「我以为你会直接加载生产对话，然后给 glm-flash 发送
+   * 『你认为哪些召回的记忆真正起到了作用了』」——我第一版把题面**加工**成
+   * 「记忆摘录(340字) + 工具摘录(800字) + 回复(2600字)」，而真实一轮的回复有 6 万字级，
+   * **加工极可能正好把判官要的证据切掉**。原文时间线是保真度最高的输入。
+   */
+  const timeline = []
   for (const e of evs) {
     if (!inTurn(e)) continue
     if (e.type === 'assistant/message') {
       const t = textOf(e)
-      if (t.trim()) asstParts.push(t)
-    } else if (e.type === 'tool/result') exTool.push(JSON.stringify(e.data))
-    else if (e.type === 'tool/call') toolCalls.push({ name: e.data?.name, args: String(e.data?.arguments ?? '') })
-    else if (e.type === 'user/message' && !isMemoBlock(e)) exUser.push(textOf(e))
+      if (t.trim()) { asstParts.push(t); timeline.push({ k: 'assistant', t }) }
+    } else if (e.type === 'tool/result') {
+      const s = JSON.stringify(e.data)
+      exTool.push(s)
+      timeline.push({ k: 'tool/result', t: s })
+    } else if (e.type === 'tool/call') {
+      const c = { name: e.data?.name, args: String(e.data?.arguments ?? '') }
+      toolCalls.push(c)
+      timeline.push({ k: 'tool/call', t: `${c.name}(${c.args})` })
+    } else if (e.type === 'user/message') {
+      const t = textOf(e)
+      if (isMemoBlock(e)) timeline.push({ k: 'INJECTED_MEMORY_BLOCK', t })
+      else { exUser.push(t); timeline.push({ k: 'user', t }) }
+    }
   }
   if (asstParts.length === 0) return null
   return {
@@ -279,6 +322,7 @@ function alignRound(fact, sess) {
     assistant: asstParts.join('\n').slice(0, TUNING.assistantCharCap),
     excludeText: [...exTool, ...exUser].join('\n').slice(0, 200000),
     toolCalls,
+    timeline,
     turn,
     step: anchor.data?.step,
   }
@@ -519,8 +563,16 @@ const { facts, skippedRounds } = loadInjectFacts()
 log(`  注入事实 ${facts.length} 条（另有 inject-skip ${skippedRounds} 条）`)
 
 const cutoff = Date.now() - SINCE_HOURS * 3600_000
-const picked = facts.filter((f) => f.t >= cutoff).slice(0, LIMIT)
-log(`  窗口内 ${facts.filter((f) => f.t >= cutoff).length} 条 → 取 ${picked.length} 条`)
+let picked = facts.filter((f) => f.t >= cutoff)
+if (PIN && existsSync(PIN)) {
+  const want = new Set(readFileSync(PIN, 'utf8').split('\n').filter(Boolean).map((l) => {
+    try { const r = JSON.parse(l); return `${r.session}|${r.ts}` } catch { return '' }
+  }))
+  picked = picked.filter((f) => want.has(`${f.session}|${f.tsIso}`))
+  log(`  --pin：钉死 ${picked.length} 轮（目标 ${want.size}）`)
+}
+picked = picked.slice(0, LIMIT)
+log(`  窗口内 ${facts.filter((f) => f.t >= cutoff).length} 条 → 取 ${picked.length} 条${EMIT_PACKETS ? '（同时输出判官题面）' : ''}`)
 
 let aligned = 0, noSession = 0, noAssistant = 0, noBody = 0
 for (const f of picked) {
@@ -566,6 +618,48 @@ for (const f of picked) {
 
   const per = {}
   const perDecoy = {}
+  if (EMIT_PACKETS) {
+    const idx = String(rounds.length + 1).padStart(2, '0')
+    /* ── 题面 A：**原始对话时间线**（用户 2026-10-15 指出的正解）──
+     * 不加工、不摘要、不重排，就是这一轮里模型实际看到/说过的事件序列。
+     * 判官要回答的那句话极短：「你认为哪些召回的记忆真正起到了作用？」 */
+    const TC = TUNING.timelineCharCap
+    const RC = TUNING.toolResultCap
+    const tl = [`# 一轮完整的生产对话（原文，按事件顺序）`, '', `时间：${f.tsIso}　会话：${f.session}　轮次：${al.turn}`, '']
+    for (const ev of al.timeline) {
+      if (ev.k === 'INJECTED_MEMORY_BLOCK') {
+        tl.push('---- 以下 ◆ 是这一轮系统自动召回并注入给模型的记忆 ----', '', ev.t, '')
+      } else if (ev.k === 'assistant') {
+        tl.push('---- 助手回复 ----', '', ev.t, '')
+      } else if (ev.k === 'user') {
+        tl.push('---- 用户消息 ----', '', ev.t.slice(0, 2000), '')
+      } else if (ev.k === 'tool/call') {
+        tl.push(`---- 助手调用工具 ----`, '', ev.t.slice(0, 4000), '')
+      } else if (ev.k === 'tool/result') {
+        tl.push(`---- 工具返回 ----`, '', ev.t.slice(0, RC) + (ev.t.length > RC ? `\n…（此条工具输出共 ${ev.t.length} 字，此处截断）` : ''), '')
+      }
+      if (tl.join('\n').length > TC) { tl.push(`…（题面已达 ${TC} 字上限，后续事件省略）`); break }
+    }
+    writeFileSync(join(packetsDir, `raw-${idx}.md`), tl.join('\n'))
+
+    /* ── 题面 B：我加工过的**摘要式题面**（保留做 A/B，验证"加工到底有没有害"）── */
+    if (EMIT_DIGEST) {
+      const P = TUNING.packetChars
+      const pk = [`# 轮 ${rounds.length + 1}  (${f.tsIso})  会话=${f.session}`, '']
+      pk.push(`## ① 这一轮注入给模型的记忆（共 ${items.length} 条，正文各截前 ${P.mem} 字）`, '')
+      for (const it of items) {
+        pk.push(`### D${it.d}`)
+        pk.push(it.body.slice(0, P.mem) || '(空)')
+        pk.push('')
+      }
+      pk.push(`## ② 同一轮的工具输出/用户消息节选（前 ${P.tools} 字）`, '')
+      pk.push('```')
+      pk.push(al.excludeText.slice(0, P.tools) || '(这一轮没有工具输出)')
+      pk.push('```', '')
+      pk.push(`## ③ 模型这一轮的回复（前 ${P.asst} 字）`, '', '```', al.assistant.slice(0, P.asst), '```', '')
+      writeFileSync(join(packetsDir, `digest-${idx}.md`), pk.join('\n'))
+    }
+  }
   for (const c of active) {
     try {
       const r = await c.run(ctx)
