@@ -19,6 +19,14 @@
 - **注入/查询场/降级路径改动**（injector.ts、render.ts、session.ts）：`node scripts/acceptance-queryfield.mjs` 6/6（**无端点依赖**，含 source.kind 白名单逐条 + 同日志新旧实现负对照 + 失败通知集成）+ `node scripts/acceptance.mjs`。⚠️ 主套件跑真嵌入端点，**端点劣化时整套会随机红 6-8 条**（2026-10-14 实测：同一份代码两次跑红集不相交 #1/#4/#5/#31 ↔ #17/#32/#37）——红一条先复跑、再看桶日志里的 `inject-skip reason=embed-*` 占比，别急着归因代码。
 - 生产内核轨切换：双轨 acceptance 全绿才允许改 `~/.config/systemd/user/dsh-web.service.d/kernel-reimpl.conf` 的 `Environment=MEMO_NATIVE_KERNEL`，改后 daemon-reload + restart dsh-web。
 
+## 测量与断言纪律（2026-10-14/15 复盘提炼，每条都有血）
+
+- **采样器/监控锚定「从此刻起」**：只统计启动之后的行，绝不回填历史。首版注入时延采样器把日志尾部整段回填 → 1193 条换端点前的旧样本混进来，p50 假报 3115ms（`scripts/probe-inject-sampler.mjs` 已修；`--out=` 可隔离多实例）。
+- **对照按状态变更点切窗；n≥10 才报分布；报分位数不报单点**。2026-10-15 拆批上线：先用**单个** 457ms 宣布见效、后用旧分布的**低端三例**当基线宣布没改善——全量三段对账（n=48/44/12）才看清真账：服务端 in-flight 去重 **-67%** 是主功、拆批再 **-18%**（p90 未动，尾部成本在流水线别处）。
+- **恒等断言先冻结「按设计就带状态」的输入**：provider 负载均衡 → `makeConfig` 钉 `providerOrder`；选择权重读工作区共享曝光台账 → #10 块内冻结三权重 + `try/finally` 还原（三连跑 37/37）。冻结了什么必须写进 `check` 明细（可审计），且被冻结的机制自身要另有用例覆盖（#19/#25/#26/adaptive-k）。
+- **部署验证用「新旧代码产出不同的观测量」**：「进程启动晚于 lib 编译」只是必要条件。拆批的判据 = 本地服务请求形状 `n=3`（旧）→ `n=1+n=2`（新）；通知去重的判据 = 直接对**已部署 lib** 调 `record/markAnnounced/pending(t+6min)` 断行为，而不是等 5 分钟看界面。
+- **凡「我记得我写过 / 这是唯一一份」必回读真源**：无头 `.bin`（`headerEnsured` 的内存记忆 vs 盘上头）、配置面 4 份预设（`dump-config` 出全部实例）、116MB 缓存全量重写——三处同源事故，见 `docs/retrospective-2026-10-14-15-whale-to-split-batch.md` §三。
+
 ## WAL 双库契约（BUG-0930 血案，违者静默丢数据）
 
 同进程内 node:sqlite（store 长连接）与 rusqlite 是**两份独立编译的 sqlite**——任何在活桶上开 readwrite 的代码路径**必须保 keepalive**（对照 `kernel/src/memo_artifact_builder.rs` 的 `ensure_sqlite_keepalive`：static SQLITE_KEEPALIVES 每 dbPath 一条永生连接，禁止每次构建开→commit→close）。close 从第二实例视角会重置 -wal，把 node 侧未 checkpoint 的提交行在进程边界静默回卷（integrity_check 仍是 ok——回卷不是损坏）。健康信号：health.log 出现 `ROLLBACK-TRIPWIRE files=N→M` 行 = 回卷实锤，立即取证（-wal 尺寸、最近重启、journal）。
