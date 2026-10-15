@@ -33,7 +33,19 @@ const { EmbedClient, WRITE_EMBED_OPTIONS, WRITE_EMBED_TIMEOUT_MS, WRITE_EMBED_RE
 const VCP = '/home/h/app/VCPToolBox'
 const config = ConfigSchema({ bucket: '', native: { vcpRoot: VCP } })
 const paths = workspacePaths(join(tmpdir(), 'memo-river-embedlat-probe'), '')
-const resolved = resolveEmbed(config, paths)
+let resolved = resolveEmbed(config, paths)
+// 覆盖：把探针指向别的端点（如本地 bge-m3 服务），同一套方法学做 A/B
+if (process.env.PROBE_EMBED_API_URL) {
+  resolved = {
+    ...resolved,
+    apiUrl: process.env.PROBE_EMBED_API_URL,
+    apiKey: process.env.PROBE_EMBED_API_KEY ?? "local",
+    model: process.env.PROBE_EMBED_MODEL ?? "BAAI/bge-m3",
+    dimension: Number(process.env.PROBE_EMBED_DIM ?? 1024),
+    providerOrder: process.env.PROBE_EMBED_PROVIDER ?? undefined,
+    source: "PROBE_EMBED_API_URL 覆盖",
+  }
+}
 const TMP = mkdtempSync(join(tmpdir(), 'embedlat-'))
 
 const redact = (s) => (typeof s === 'string' && s.length > 8 ? `${s.slice(0, 4)}…${s.slice(-2)}（${s.length} 字符）` : '（未设）')
