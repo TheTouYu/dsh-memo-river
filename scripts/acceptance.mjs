@@ -171,7 +171,11 @@ function makeConfig(overrides = {}) {
    * 负载均衡——同一文本会落到 DeepInfra/Parasail 两家，逐元素差 3.8e-4~7.3e-4（2026-10-15 实测，
    * scripts/probe-embed-provider-routing.mjs 邻件）。方向几乎不变（cos ≥0.99997），但**逐位不可
    * 复现**，会让「同一查询、并发 == 串行、逐名次比对」这类恒等断言（#10）随机变红——那测的是路由
-   * 抖动而非插件逻辑。这里与生产 bundle 同策：钉 Parasail。显式 override 仍优先。 */
+   * 抖动而非插件逻辑。这里与生产 bundle 同策：钉 Parasail。显式 override 仍优先。
+   * 另注（2026-10-15 晚）：生产已切「主=本地 8099 bge-m3 + 保底=OpenRouter/Parasail」
+   * （预设里的 fallbackProviderOrder），而套件不带 apiUrl → 走 config.env = OpenRouter 单通道。
+   * 套件量的是插件逻辑，不是生产端点实现；两边 bge-m3 向量 cos≈0.99997
+   * （docs/local-embed-2026-10-15.md §五），#8 名次快照以套件端点为准。 */
   cfg.embed.providerOrder = overrides.embed?.providerOrder ?? 'Parasail'
   return cfg
 }
@@ -724,44 +728,72 @@ hr('#11 闭环：空库(0 篇) → memo_write 写一篇 → 被动注入把它�
 
 /* ══════════════════════ #8 与原生直跑一致 ══════════════════════ */
 
-hr('#8 与原生直跑一致（对比 sandbox/classroom-flow/native.cjs 的 native-result.json）')
+hr('#8 读出链端到端名次快照（教室语料 × 3 查询；基准 v2 = 2026-10-15 重录）')
 {
   const ws = acquireWorkspace(WS_RIVER, config)
-  const refPath = join(VCP, 'sandbox', 'classroom-flow', 'native-result.json.bak')
-  const ref = JSON.parse(readFileSync(refPath, 'utf8'))
   const QS = {
     A: '我这边现在渲染又卡了，上次教室那个是怎么解决的？',
     B: '上次那个桌子漂浮的问题，后来到底是怎么发现原因的？',
     C: '那个视频到底是怎么做到真 60 帧的？编码卡在哪一步？',
   }
+  /* 基准 v2（2026-10-15 重录）：bge-m3@OpenRouter·钉 Parasail、1024 维、查询向量现场嵌。
+   * 旧基准 sandbox/classroom-flow/native-result.json.bak（09-28、gemini·3072 向量时代）随
+   * 「换模型 + 换维」结构性失效，且 native.cjs 本机不可运行（better-sqlite3 为
+   * NODE_MODULE_VERSION 127，Node 26 需 147）。「与上游一致」的验收职责由 kernel/tools/
+   * diff-runner.mjs 专责（oracle=上游 vexus-lite vs 复刻内核，判据 ≤1e-6）；本项改为
+   * **插件读出链端到端名次快照**，防 JS 选择层 / 内核升级造成名次漂移：
+   *   KNN 腿 = 朴素余弦全维排序（旧代码 subarray(0,3072) 是 1024 维夹具上的维度错配脏比较，已去）；
+   *   读出腿 = ws.recall(topology_v3)。
+   * 换嵌入模型/端点后名次会变：`MEMO_ACC_RERECORD_SNAPSHOT=1 node scripts/acceptance.mjs`
+   * 重录 → 人工核对 acceptance-snapshot-classroom.generated.json → 贴回本常量；不许静默自愈。 */
+  const SNAPSHOT = {
+    A: { knn: [2, 3, 8, 11, 1, 6, 9, 4, 7, 5, 10], readout: [2, 8, 3, 11, 9, 1, 4, 6, 7, 10, 5] },
+    B: { knn: [5, 4, 6, 2, 3, 7, 8, 1, 11, 9, 10], readout: [4, 5, 2, 8, 3, 6, 1, 7, 11, 9, 10] },
+    C: { knn: [11, 9, 10, 8, 2, 3, 1, 7, 6, 5, 4], readout: [9, 11, 10, 8, 1, 7, 2, 3, 6, 4, 5] },
+  }
+  const rerecord = process.env.MEMO_ACC_RERECORD_SNAPSHOT === '1'
+  const qvecs = await ws.embed.embed(Object.values(QS))
   const rows = []
+  const recorded = {}
   let allMatch = true
-  let maxFloatDelta = 0
+  let idx = 0
   for (const [k, q] of Object.entries(QS)) {
+    const qv = qvecs[idx]
+    idx += 1
     const outcome = await ws.recall(q, {
       mode: 'topology_v3', k: 11, tokenBudget: 1e9, dynamicK: 1, gate: false,
       gateThreshold: 0, minKnnForReward: 0, queryId: `classroom-${k}`,
     })
     const mine = outcome.candidates.map((c) => c.id)
-    const row = ref.find((x) => x.k === k)
     const knnMine = [...ws.store.chunks().filter((c) => c.vector)]
-      .map((c) => ({ id: c.id, score: cosine(Float32Array.from(JSON.parse(readFileSync(join(VCP, 'sandbox', 'classroom-flow', 'emb-cache.json'), 'utf8'))[q]), c.vector.subarray(0, 3072)) }))
+      .map((c) => ({ id: c.id, score: cosine(qv, c.vector) }))
       .sort((a, b) => b.score - a.score)
       .map((c) => c.id)
-    const readoutMatch = JSON.stringify(mine) === JSON.stringify(row.dtsc)
-    const knnMatch = JSON.stringify(knnMine) === JSON.stringify(row.knn)
+    recorded[k] = { knn: knnMine, readout: mine }
+    if (rerecord) continue
+    const snap = SNAPSHOT[k]
+    const readoutMatch = JSON.stringify(mine) === JSON.stringify(snap.readout)
+    const knnMatch = JSON.stringify(knnMine) === JSON.stringify(snap.knn)
     if (!readoutMatch || !knnMatch) allMatch = false
     rows.push(
-      `  Q${k} KNN     插件=[${knnMine.join(',')}] 原生=[${row.knn.join(',')}] ${knnMatch ? '✅' : '❌'}`,
-      `  Q${k} 读出    插件=[${mine.join(',')}] 原生=[${row.dtsc.join(',')}] ${readoutMatch ? '✅' : '❌'}  Ω=${outcome.omega === null ? 'n/a' : outcome.omega.toFixed(4)} regime=${outcome.regime}`,
+      `  Q${k} KNN     实测=[${knnMine.join(',')}] 快照=[${snap.knn.join(',')}] ${knnMatch ? '✅' : '❌'}`,
+      `  Q${k} 读出    实测=[${mine.join(',')}] 快照=[${snap.readout.join(',')}] ${readoutMatch ? '✅' : '❌'}  Ω=${outcome.omega === null ? 'n/a' : outcome.omega.toFixed(4)} regime=${outcome.regime}`,
     )
   }
-  check(8, '同一语料 + 同一查询，名次与 native.cjs 一致', allMatch, [
-    ...rows,
-    `  浮点差上界 = ${maxFloatDelta}（要求 <1e-6；实测名次完全一致，无翻转）`,
-    `  注：native.cjs 本机已不可直接运行（better-sqlite3 为 NODE_MODULE_VERSION 127，Node 26 需 147），`,
-    `      故对比其**已归档输出** native-result.json.bak（同语料、同查询、同嵌入缓存向量）。`,
-  ])
+  if (rerecord) {
+    const genPath = join(import.meta.dirname, 'acceptance-snapshot-classroom.generated.json')
+    writeFileSync(genPath, JSON.stringify(recorded, null, 2) + '\n')
+    check(8, '【重录模式】快照基准已写出，不判定 pass/fail', true, [
+      `  → ${genPath}`,
+      `  人工核对后把 knn/readout 数组贴回本文件 SNAPSHOT 常量，再以普通模式跑一遍确认。`,
+      `  换端点/换模型属预期漂移；同配置下漂移 = 读出链回归，先怀疑代码再重录。`,
+    ])
+  } else {
+    check(8, '读出链端到端名次快照（v2 基准：KNN 朴素余弦 + topology_v3 读出）', allMatch, [
+      ...rows,
+      `  注：与上游一致由 diff-runner 专责（≤1e-6）；本项防的是插件读出链的名次漂移。`,
+    ])
+  }
 }
 
 /* ══════════════════════ #14 草稿消费通道（§7.5：memo_drafts / memo_approve / memo_discard） ══════════════════════ */
@@ -1391,13 +1423,16 @@ hr('#25 近因保底·写入时间戳：同日平局由写入时刻决胜（票0
   const on = await runTs(7)
   const off = await runTs(0)
   const lateIn = on.selectedTitles.some((t) => t.includes(lateTitle))
-  const topStays = on.selectedTitles[0]?.includes('渲染卡顿')
+  /* 2026-10-15 重定标：原断言把「top1 == 渲染旧篇」写死——换 bge-m3 后部署记录（正文渲染词密度高）
+   * 与渲染旧篇名次翻转，属模型产地差异而非保底机制失效。改为**机制不变量**：保底只挤「最低分席」
+   * 给晚写者、不动 top1——on[0] === off[0]，与嵌入模型无关。 */
+  const topStays = on.selectedTitles.length > 0 && on.selectedTitles[0] === off.selectedTitles[0]
   check(
     25,
     '近因保底·写入时间戳：同日平局由写入时刻决胜；关掉开关即纯分数序',
     lateIn && topStays && on.evicted && !off.selectedTitles.some((t) => t.includes(lateTitle)) && !off.evicted,
     [
-      `开保底(k=2, floor=7d) 入选：[${on.selectedTitles.join(' | ')}]（要求含晚写的会议纪要且 top1 仍是渲染旧篇）`,
+      `开保底(k=2, floor=7d) 入选：[${on.selectedTitles.join(' | ')}]（要求含晚写的会议纪要，且 top1 与关保底一致——保底只动边界席）`,
       `evicted 标记：${on.evicted ? '✅ recency-floor-evicted' : '❌ 缺失'}；关保底控制组：[${off.selectedTitles.join(' | ')}]`,
     ],
   )

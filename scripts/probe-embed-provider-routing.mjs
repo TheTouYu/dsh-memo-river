@@ -13,6 +13,8 @@
  *   P3 providerOrder 缺省/空 → 请求体**不含** provider 字段（旧行为逐字不变，非 OpenRouter 端点安全）
  *   P4 model / input 仍在请求体里（没被 spread 挤掉）
  *   P5 请求路径 = `${apiUrl}/v1/embeddings`（apiUrl 不带 /v1 的约定）
+ *   P6 双通道：primary 拒连 → fallback lane 接管，且 fallback 请求体同样带 provider 字段
+ *     （2026-10-15 晚生产形态：主 = 本地 8099 bge-m3，保底 = OpenRouter/Parasail fallbackProviderOrder）
  */
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -91,6 +93,32 @@ check(4, 'model / input 仍在请求体里（未被 spread 挤掉）',
 check(5, '请求路径 = `${apiUrl}/v1/embeddings`',
   received.every((r) => r.path === '/v1/embeddings'),
   `实际路径集合=${JSON.stringify([...new Set(received.map((r) => r.path))])}（共 ${hits} 次请求）`)
+
+/* P6：双通道——primary 指向必然拒连的端口（127.0.0.1:1），fallback 指向回显且带 providerOrder。
+ * 期望：embed() 整体成功（lane 切换生效），且回显收到的那条请求体带 provider:{order:['Parasail']}。 */
+{
+  const p6Cache = join(tmpdir(), `probe-provider-routing-p6-${process.pid}.bin`)
+  rmSync(p6Cache, { force: true })
+  const c6 = new EmbedClient({
+    apiUrl: 'http://127.0.0.1:1', apiKey: 'probe', model: 'baai/bge-m3', dimension: DIM,
+    cachePath: p6Cache, timeoutMs: 3_000,
+    fallback: { apiUrl: `http://127.0.0.1:${port}`, apiKey: 'probe', model: 'baai/bge-m3', providerOrder: 'Parasail' },
+    logger: { warn: () => {}, info: () => {} },
+  })
+  const before = received.length
+  let ok = false
+  let detail = ''
+  try {
+    await c6.embed(['探针文本-回退'])
+    const fb = received[received.length - 1]
+    ok = received.length === before + 1
+      && JSON.stringify(fb?.body?.provider) === JSON.stringify({ order: ['Parasail'] })
+    detail = `fallback 收到 provider=${JSON.stringify(fb?.body?.provider)}（primary 拒连后由 fallback 承接）`
+  } catch (e) {
+    detail = `embed 抛错（lane 未切换？）：${String(e.message).slice(0, 100)}`
+  }
+  check(6, "primary 拒连 → fallback lane 接管，且 fallback 请求体带 provider:{order:['Parasail']}", ok, detail)
+}
 
 server.close()
 const failed = results.filter((r) => !r.pass)

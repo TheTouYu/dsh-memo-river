@@ -27,3 +27,8 @@ kernel/tools/diff-report/
 .scratch/corpus-governance-0926/07-after-samples-suite*.log
 .scratch/corpus-governance-0926/02-baseline-suite.log
 .scratch/whale-fix/
+
+# 验收快照重录产物（人工核对后贴回 acceptance.mjs，本身不入库）
+scripts/acceptance-snapshot-classroom.generated.json
+# 本地嵌入服务的 Python 字节码缓存
+__pycache__/
