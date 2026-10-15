@@ -78,6 +78,19 @@ export interface SelectionDiagnostics {
   tagDemotions: number
 }
 
+/**
+ * 候选的**唯一键**（跨桶命名空间）。
+ *
+ * 桶继承下各桶 id 独立自增——`5@父桶` 与 `5@本桶` 是两篇日记，必须区分。
+ * 约定 = `${srcBucket ?? homeBucket}:${id}`：合并时父桶条目才被盖章（`src/federate.ts:74`），
+ * 故调用方要把**主桶名**当基准传进来（注入侧用 `workspace.paths.bucket`）。
+ * 缺 `homeBucket` 时退回裸 id 形态（仅兼容旧调用点；新代码都该给）。
+ */
+export function candidateKey(c: { id: number; srcBucket?: string }, homeBucket?: string): string {
+  if (homeBucket) return `${c.srcBucket ?? homeBucket}:${c.id}`
+  return c.srcBucket ? `${c.srcBucket}:${c.id}` : String(c.id)
+}
+
 export interface RecallCandidate {
   /** chunk id（VCP 里就是日记的 D<id>）。 */
   id: number
@@ -104,6 +117,22 @@ export interface RecallCandidate {
   body: string
   /** 桶继承（federate）：该条目来自哪个父桶；本桶条目缺省（渲染不标注）。 */
   srcBucket?: string
+  /**
+   * G3（2026-10-15）：该条目的**结论**已被哪一篇取代。`undefined` = 无标记；
+   * `null` = 已废止（无继任篇）；数字 = 继任篇的 **fileId**（稳定标识，改写不变）。
+   *
+   * 语义：过程/教训仍有价值，但结论已不是当前事实。**被动注入剔除**（injector，
+   * 并在「未注入明细」里归因 `superseded-by-D<n>`），**主动 memo_recall 照常返回**
+   * 并在渲染端标注——两者共用这一份 outcome，剔除责任放在消费方。
+   */
+  supersededBy?: number | null
+  /**
+   * 继任篇的**当前 D 编号**（= chunk id，供展示用）。fileId 反查而来，**随 `memo_update`
+   * 改写而变**，故每次 recall 重新计算；无继任篇或解析不到时为 `null`。
+   * 展示为什么不用 fileId：`D<fileId>` 与用户看到的 `D<chunkId>` 是两套编号，
+   * 混用会让模型去错篇（D108 已记过这个双口径教训）。
+   */
+  supersededByD?: number | null
 }
 
 export interface RecallOutcome {
@@ -590,6 +619,30 @@ export async function recall(
       .sort((a, b) => b.score - a.score)
 
     if (rows.length === 0) return empty('no-candidates', { candidateCount: knn.length })
+
+    /* ④.6 G3 语料有效性（2026-10-15）：盖「已被取代」标。
+     *
+     * **只盖标不剔除**——被动注入的剔除由 `injector` 做（那里同时把被剔条目写进
+     * 「未注入明细」归因，满足不静默）；主动 `memo_recall` 原样返回、由渲染端展示
+     * 「⚠️已被 D<n> 取代」。读路径共用一份 outcome，剔除责任放**消费方**，才不会
+     * 出现「主动查历史也看不到全貌」。
+     *
+     * 全表读一次（表极小）后 Map 打点，不做 N 次查询；`supersessions()` 内部 JOIN files，
+     * 源篇被归档删除后的悬挂行自动不可见。 */
+    const superseded = store.supersessions()
+    if (superseded.size > 0) {
+      /* 继任篇的**展示口径**是 D 编号（= chunk id，与 memo_recall 输出一致），但 chunk id
+       * **不稳定**——`memo_update` 原地改写会换 chunk（D108 记过这个双口径）。所以表里存
+       * 的是稳定的 fileId，D 编号每次 recall 现算：fileId → 该篇当前 chunk id。 */
+      const dNumOfFile = new Map<number, number>()
+      for (const [chunkId, owner] of owners) if (!dNumOfFile.has(owner.fileId)) dNumOfFile.set(owner.fileId, chunkId)
+      for (const r of rows) {
+        const s = superseded.get(r.fileId)
+        if (!s) continue
+        r.supersededBy = s.newFileId
+        r.supersededByD = s.newFileId == null ? null : (dNumOfFile.get(s.newFileId) ?? null)
+      }
+    }
 
     /* ④.5 票 05：Rust 读出后的**有界 tie-breaker**（options.tieBreaker 缺省/关闭 → applyUsageTieBreaker
        原样返回同一引用，分数与顺序逐位不变）。只认台账**主动**信号，上界 cap=0.05（≪ 锚 0.18），

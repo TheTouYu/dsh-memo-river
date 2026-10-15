@@ -118,6 +118,26 @@ export function renderSkipNotice(outcome: RecallOutcome, bucket: string): string
   return `inject-skip bucket=${bucket} reason=${outcome.fallbackReason ?? 'unknown'} gate=${JSON.stringify(outcome.gate)} elapsedMs=${outcome.elapsedMs}`
 }
 
+/**
+ * 降级可见化（2026-10-14，D214）：召回**基础设施失败**时给模型一条极短通知。
+ *
+ * 为什么必须说：嵌入超时/跳闸/端点 400 都会让整轮注入**静默消失**——模型只看到
+ * 「这轮没有记忆」，既不知道失败了，也不会退而求其次主动 memo_recall。
+ * 生产实锤（session-df68235a 15:28:21 / 15:29:48 两轮，reason=embed-timeout）：
+ * 用户必须人工提醒「去记忆桶里查相关知识」才补上召回。
+ * 正常的选择性不注入（门控不过 / 同集合已注入 / 空库）**不发**——那不是故障。
+ *
+ * 文本必须短（每轮都占上下文），且**不得含 BLOCK_CLOSE**（验收 #1 靠它定位注入块）。
+ */
+export function renderRecallNotice(reason: string, bucket: string, streak: number): string {
+  return (
+    `[memo-river·召回未生效] 记忆插件通知，非新任务：本轮自动召回失败（${reason}），` +
+    `桶=${bucket} 的记忆没有注入（本会话连续失败 ${streak} 次）。\n` +
+    `这是**通道故障**，不代表桶里没有：需要过往结论时用 memo_recall 定向检索（folder 可指定桶）——` +
+    `若主动检索报同样的通道错误，那是端点故障，等恢复后重试即可，别反复重试。`
+  )
+}
+
 /** 草稿队列年龄的人类可读形态（<1h / 小时 / ≥72h 折天；nudge 与面板口径一致）。 */
 export function ageText(hours: number): string {
   if (!Number.isFinite(hours) || hours < 0) return '未知'

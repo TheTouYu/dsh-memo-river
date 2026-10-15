@@ -35,9 +35,9 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Config } from './config.js'
 import { recordOmega, recordUsage } from './health.js'
-import { BLOCK_CLOSE, continuationTail, DelegationExtras, renderInjection, renderSkipNotice, renderWriteNudge } from './render.js'
+import { BLOCK_CLOSE, continuationTail, DelegationExtras, renderInjection, renderRecallNotice, renderSkipNotice, renderWriteNudge } from './render.js'
 import { coldTagSuggest, sameAxisHit, scanTagAxis } from './nudge-guide.js'
-import { buildQueryField, type RecallOptions } from './recall.js'
+import { buildQueryField, candidateKey, type RecallCandidate, type RecallOptions, type RecallOutcome } from './recall.js'
 import { federatedRecall } from './federate.js'
 import { tuningValues } from './tuning.js'
 import { getSession, peekSession, type SessionState } from './session.js'
@@ -136,21 +136,51 @@ export function resolveCwd(agent: AgentLike, state: SessionState | null | undefi
 }
 
 /**
- * 只收“真正的对话回合”，排除插件上下文与工具输出。
+ * 只收“真正的对话回合”（人说的 / 模型说的），其余一律是生产者上下文。
  *
- * 必须排除的两类（都是 user 角色，但都不是“用户说了什么”）：
- *   · `kind==='plugin'` —— 本插件自己的注入块（`createInjectionMessage`）、engram-relay 的上下文、
- *     DSH 每轮重注的 “Current runtime context” 快照。注入块会被 `step()` 写进会话日志
- *     （dsh-agent-loop/lib/index.js:1028），所以下一轮 `deriveMessages()` 里必然带着它；
- *     不排除的话查询场会自我强化——用上一轮的召回结果去召回下一轮。
- *   · `kind==='tool'` —— 工具输出，体量大且非用户意图。
- * 其余（'user' / 'model' / 未知 kind）一律保留：宁可多收，不可再次静默清空查询场。
+ * ★ 2026-10-14 定谳（D214）：这里原先是**黑名单**（只排 `plugin` / `tool`），
+ *   而 0.1.7 的 v4 会话格式把 source.kind 换成**生产者自有名**——实测生产会话
+ *   （session-df68235a）的 user/message kind 分布：
+ *     `user`(真人) / `memo-river`(本插件的注入块与写提醒) / `compact-checkpoint`(压缩摘要 ×9)
+ *     / `runtime-context` / `skill-catalog` / `acp-nudge` / `billion-context-dsh`(prune 墓碑)
+ *     / `agent-instructions` / `user-approval` / `agent-message`(兄弟代理 relay)
+ *   ——**一个 'plugin' 都没有**，黑名单一条都没拦住，上述全部进了查询场。
+ *   同会话复算（lookback=6 + slice(-4000)）：
+ *     · 用户说「还要加强验收阶段…」那轮：查询场 4000 字里 **3966 字（99.1%）是本插件
+ *       上一轮自己的两块注入**，用户原话 34 字占 0.9%；
+ *     · 用户说「如何参考之前的做法？…」那轮：压缩摘要占 85.6%，用户原话 21 字占 0.5%。
+ *   ——正是下方那段注释警告的「用上一轮的召回结果去召回下一轮」，而守卫条件在 v4
+ *   格式下早已失效（D147 离线复放规则写的「compact 摘要是 plugin 消息被过滤」同样过期）。
+ *
+ * 白名单而非黑名单的理由：新增上下文生产者会**自动被排除**（失败方向安全）；代价是
+ * 新增「真人意图」来源时会被误排——故 `queryFieldExclusionStats()` 每次注入把被排除的
+ * kind 计数落桶日志，漂移可观测，不会再静默。
+ *
+ * `agent-message` 必须留（dsh-subagent `createAgentMessage`，kind='agent-message'）：
+ * 兄弟代理 relay 在子会话里就是「真人意图」，排掉等于子会话查询场失明。
  */
-function isDialogMessage(m: unknown): boolean {
+export const DIALOG_SOURCE_KINDS: ReadonlySet<string> = new Set(['user', 'model', 'agent-message'])
+
+export function isDialogMessage(m: unknown): boolean {
   const msg = m as { role?: string; source?: { kind?: string } }
   if (msg.role !== 'user' && msg.role !== 'assistant') return false
   const kind = msg.source?.kind
-  return kind !== 'plugin' && kind !== 'tool'
+  // 无 source（老会话 / 种子消息 / 测试夹具）= 对话；有 source 则必须在白名单内。
+  return kind === undefined || DIALOG_SOURCE_KINDS.has(kind)
+}
+
+/** 被查询场排除的 user/assistant 消息按 source.kind 计数（只读审计）。null = 无可排除。 */
+export function queryFieldExclusionStats(raw: readonly unknown[]): string | null {
+  const counts = new Map<string, number>()
+  for (const m of raw) {
+    const msg = m as { role?: string; source?: { kind?: string } }
+    if (msg.role !== 'user' && msg.role !== 'assistant') continue
+    if (isDialogMessage(m)) continue
+    const k = msg.source?.kind ?? '(anonymous)'
+    counts.set(k, (counts.get(k) ?? 0) + 1)
+  }
+  if (counts.size === 0) return null
+  return [...counts.entries()].map(([k, n]) => `${k}×${n}`).join(',')
 }
 
 /**
@@ -163,8 +193,104 @@ function isDialogMessage(m: unknown): boolean {
  * （命令、其它插件、未来的新来源），查询场会再次静默变空——正是刚在真实会话里踩过的坑。
  */
 function isClaimedMessage(m: unknown): boolean {
-  const role = (m as { role?: string }).role
+  const role = (m as { role?: string })?.role
   return role === 'user' || role === 'assistant'
+}
+
+/**
+ * 「仍在上下文里」的注入条目键集（条目级去重的输入，2026-10-15）。
+ *
+ * 判据是**真消息在场**、不是轮数近似：把消息数组里每条文本的 sha256 反查 session 审计的
+ * `blockHash`——命中说明那一块**还在这轮的请求里**，它的 `selectionKeys` 就不该再占席位。
+ * 块被压缩折进摘要后就不在数组里 → 自动允许重注（不静默丢记忆；这正是
+ * `dedupeRefreshTurns` 当初想用轮数近似的东西，现在由真可见性精确覆盖）。
+ *
+ * ⚠️ 调用方必须传**未过白名单**的消息（`rawHistory` + claimed）：`isDialogMessage`
+ * （:164）会把 `kind==='memo-river'` 的注入块整个排掉，拿 `history` 当输入本函数
+ * 永远返回空集、静默失效——这是本刀最容易踩的坑。
+ *
+ * 先按 `chars` 长度预筛再算 hash：非块消息（真人/模型/工具输出）绝大多数长度对不上，
+ * 省掉逐条 sha256。零审计（会话刚开始）时直接早退。
+ */
+export function liveInjectedKeys(rawMsgs: readonly unknown[], state: SessionState): Set<string> {
+  const keys = new Set<string>()
+  const byHash = new Map<string, readonly string[]>()
+  const lens = new Set<number>()
+  for (const a of state.audits) {
+    if (a.selectionKeys.length === 0) continue
+    byHash.set(a.blockHash, a.selectionKeys)
+    lens.add(a.chars)
+  }
+  if (byHash.size === 0) return keys
+  for (const m of rawMsgs) {
+    const text = messageText(m)
+    if (!text || !lens.has(text.length)) continue
+    const hit = byHash.get(sha256(text))
+    if (!hit) continue
+    for (const k of hit) keys.add(k)
+  }
+  return keys
+}
+
+/**
+ * 条目级去重的纯函数核心：把 `liveKeys` 命中的入选条目剔出来（**只剔不补**）。
+ *
+ * 不补的理由见 `buildTailInjection` 里那段注释：回填席位 = 用更弱的新条目换掉一次跳过，
+ * 总注入量不降反升，且会改写集合级去重与步维刷新的既有语义。
+ *
+ * 被剔的条目进 `duplicated`（而非静默丢弃）——渲染时它们会出现在「未注入明细」行里，
+ * 附 `already-in-context` 归因，满足「不静默」不变量。
+ */
+export function filterLiveDuplicates(
+  selected: readonly RecallCandidate[],
+  liveKeys: ReadonlySet<string>,
+  homeBucket: string,
+): { kept: RecallCandidate[]; duplicated: Array<{ id: number; title: string; reason: string }> } {
+  const kept: RecallCandidate[] = []
+  const duplicated: Array<{ id: number; title: string; reason: string }> = []
+  for (const c of selected) {
+    if (liveKeys.has(candidateKey(c, homeBucket))) {
+      duplicated.push({ id: c.id, title: c.title, reason: 'already-in-context' })
+      continue
+    }
+    kept.push(c)
+  }
+  return { kept, duplicated }
+}
+
+/**
+ * G3 语料有效性（2026-10-15）的纯函数核心：把**已被取代**的条目从这次注入里剔出来。
+ *
+ * 与 `filterLiveDuplicates` 的区别在**理由**，不在动作：那里剔的是「已经在眼前」（信息没丢），
+ * 这里剔的是「结论已不是当前事实」（信息是错的）。后者更危险——过期结论被当事实注入，
+ * 模型会基于一个已经不成立的世界做诊断（本桶现成的例子：D208/D214 讲「3s 嵌入硬顶 →
+ * 45.3% 静默跳过」，而超时预算早已是 8s、端点也已换过）。
+ *
+ * 与去重一致：**只剔不补**，空出的席位不用后位候选回填（改席位分配语义会连坐
+ * 自适应 K 与步维刷新的既有定标，上一刀的教训）。被剔项进 `dropped`，渲染时落在
+ * 「未注入明细」行里带归因，不静默。
+ *
+ * 主动 `memo_recall` **不走这里**——它照常返回并在渲染端标注，语义见 RecallCandidate 注释。
+ */
+export function filterSuperseded(selected: readonly RecallCandidate[]): {
+  kept: RecallCandidate[]
+  duplicated: Array<{ id: number; title: string; reason: string }>
+} {
+  const kept: RecallCandidate[] = []
+  const duplicated: Array<{ id: number; title: string; reason: string }> = []
+  for (const c of selected) {
+    if (c.supersededBy === undefined) {
+      kept.push(c)
+      continue
+    }
+    // 归因带**继任篇的 D 编号**（不是 fileId——两套编号混用会让模型去错篇）。
+    duplicated.push({
+      id: c.id,
+      title: c.title,
+      reason: c.supersededBy === null ? 'superseded-void' : `superseded-by-D${c.supersededByD ?? '?'}`,
+    })
+  }
+  return { kept, duplicated }
 }
 
 /**
@@ -180,13 +306,57 @@ function latestCompactionId(msgs: unknown[]): string | null {
   return null
 }
 
+/* ── 降级可见化（2026-10-14，D214）────────────────────────────────────────────
+ * 基础设施失败（嵌入超时 / 跳闸 / 端点 400 / 查询场构造失败）会让整轮注入**静默消失**：
+ * 模型只看到「这轮没有记忆」，既不知道失败了，也不会退而求其次主动 memo_recall。
+ * 生产实锤（session-df68235a 15:28:21 / 15:29:48）：用户必须人工提醒「去记忆桶里查」
+ * 才补上召回——沉默的代价就是这条人工提醒。
+ *
+ * 只对**基础设施失败**发；正常的选择性不注入（门控不过 / 同集合已注入 / 空库）不发。
+ * 节流：回合首发必发（那正是「这轮没记忆」的时刻，静默它等于把老毛病原样留住）；
+ * 自主态节律（每 N 步一次）按 RECALL_NOTICE_MIN_SPACING_MS 节流，防长任务里刷屏。 */
+export const RECALL_NOTICE_MIN_SPACING_MS = 5 * 60_000
+
+/** 该 fallbackReason 是否属「通道故障」（而非「按设计不注入」）。 */
+export function isRecallInfrastructureFailure(reason: string | null | undefined): boolean {
+  if (!reason) return false
+  // 实测取值：'embed-timeout: …' / 'embed-failed: …'（含 embed-circuit-open、embed-not-configured）
+  // / 'native-unavailable' / 'empty-query-field'（查询场构造异常 = 插件自身故障，同样不该沉默）。
+  return reason.startsWith('embed-') || reason === 'native-unavailable' || reason === 'empty-query-field'
+}
+
+/** 记账：基础设施失败累加连续失败数（成功路径把它清零，见 buildTailInjection 末段）。 */
+export function noteRecallFailure(state: SessionState, reason: string | null | undefined): void {
+  if (isRecallInfrastructureFailure(reason)) state.recallFailureStreak += 1
+}
+
+/** 该不该发「召回未生效」通知；发则推进节流时钟并返回文案，否则 null。 */
+export function recallFailureNotice(
+  state: SessionState,
+  bucket: string,
+  isTurnStart: boolean,
+  now = Date.now(),
+): string | null {
+  const reason = state.lastFallbackReason
+  if (!isRecallInfrastructureFailure(reason)) return null
+  if (
+    !isTurnStart &&
+    state.lastRecallNoticeAt > 0 &&
+    now - state.lastRecallNoticeAt < RECALL_NOTICE_MIN_SPACING_MS
+  ) {
+    return null
+  }
+  state.lastRecallNoticeAt = now
+  state.lastRecallNoticeReason = reason
+  return renderRecallNotice(reason!, bucket, Math.max(1, state.recallFailureStreak))
+}
+
 /**
  * 产出一段尾注入文本；返回 `null` 表示**不注入**（门控不过 / 无候选 / 失败降级）。
  * 本函数永不抛——调用方（pre-step）另有 try/catch 兜底。
  *
  * `claimed` 必须传 `agent/pre-step` 载荷里的 `payload.messages`——见下方时序铁律。
- */
-export async function buildTailInjection(
+ */export async function buildTailInjection(
   deps: InjectorDeps,
   agent: AgentLike,
   turn: number,
@@ -215,6 +385,9 @@ export async function buildTailInjection(
   try {
     rawHistory = agent.session.deriveMessages() ?? []
     history = rawHistory.filter(isDialogMessage)
+    // 漂移可观测（D214）：白名单一旦漏掉新的「真人意图」来源，查询场会变瘦却不报警。
+    const exclusions = queryFieldExclusionStats(rawHistory)
+    if (exclusions) logger.info(`query-field-excluded bucket=${workspace.paths.bucket} ${exclusions} session=${sessionId}`)
   } catch (e) {
     logger.warn(`derive-messages-failed: ${String((e as Error)?.message ?? e)}`)
     return null
@@ -292,6 +465,7 @@ export async function buildTailInjection(
   if (!queryField) {
     state.skippedCount += 1
     state.lastFallbackReason = 'empty-query-field'
+    noteRecallFailure(state, 'empty-query-field')
     // 带够诊断：这类“静默不注入”必须一次就能定位（§1 不变量 6）。
     logger.info(
       `${renderSkipNotice({ fallbackReason: 'empty-query-field' } as never, workspace.paths.bucket)} ` +
@@ -303,6 +477,8 @@ export async function buildTailInjection(
   /* 桶继承（inherit-0928）：主桶照常全管线，父桶同一份 options 各自过自己门控后轮转补位。
    * 解析失败/无配置 → parents 为空，行为与单桶逐字一致。 */
   const inheritParents = openInheritedBuckets(workspace, deps.config)
+  /* 条目级去重（2026-10-15）：所需的「仍在上下文里的条目键」在**渲染前**才算（见下方
+   * 集合级 → 条目级的顺序注释）；这里不预先算，避免强刷时白算一轮。 */
   const fed = await federatedRecall(
     workspace,
     inheritParents,
@@ -332,15 +508,6 @@ export async function buildTailInjection(
     logger.warn(`record-health-failed: ${String((e as Error)?.message ?? e)}`)
   }
 
-  const text = renderInjection(outcome, workspace.paths.bucket)
-  if (!text) {
-    // 门控不过 / 无候选 → 清空不注入，带 fallbackReason（§6.3），只记日志不进模型请求。
-    state.lastFallbackReason = outcome.fallbackReason
-    state.skippedCount += 1
-    logger.info(`${renderSkipNotice(outcome, workspace.paths.bucket)} session=${sessionId}`)
-    return null
-  }
-
   // 入选集合去重：同一组日记连续注入没有新信息，只是把同样的 700+ 字再堆一份。
   // 实测：`ids=D1,D2,D4` 在 40 分钟里连注 6 次（12:45→13:24），文本各不相同 ——
   // 只差 Ω 的小数位。**所以去重的键必须是入选集合，不是块文本**（按文本去重一次都
@@ -348,9 +515,9 @@ export async function buildTailInjection(
   // 但跳过有个前提：旧块还在上下文里。注入块会随会话日志一直留着，可**压缩会把它
   // 折进摘要** —— 那时再跳过就等于静默丢记忆（§1 不变量 6）。故加 dedupeRefreshTurns：
   // 即使集合没变，隔了这么多回合也强制重注一次。
-  // 桶继承：键必须带桶名命名空间——各桶 id 独立自增，D1@本桶与 D1@父桶是两篇日记。
+  // 桶继承：键必须带桶名命名空间——各桶 id 独立自增，D1@本桶与D1@父桶是两篇日记。
   const selectionKey = outcome.selected
-    .map((c) => (c.srcBucket ? `${c.srcBucket}:${c.id}` : String(c.id)))
+    .map((c) => candidateKey(c, workspace.paths.bucket))
     .sort()
     .join(',')
   const refreshDue =
@@ -358,6 +525,11 @@ export async function buildTailInjection(
     (deps.config.inject.dedupeRefreshTurns > 0 &&
       (turn - state.lastInjectTurn >= deps.config.inject.dedupeRefreshTurns ||
         (!isTurnStart && state.autoAttemptsSinceInject >= deps.config.inject.dedupeRefreshTurns)))
+  /* ★ 顺序即语义（2026-10-15）：集合级判据**先于**条目级、也先于渲染。
+   * 理由：两者会同时命中静态会话（集合不变 = 成员必然也在场），集合级是更省、理由更准
+   * 的那条；让它先说话，「identical-selection」这条既有可观测语义才不会被条目级吞掉。
+   * 强刷（refreshDue：压缩后 / 隔了 N 回合）**越过**下面两条——强刷是显式意图，
+   * 也是对「在场判据可能漏判」的兜底，不该被条目级过滤抵消。 */
   if (
     deps.config.inject.dedupeSelection &&
     selectionKey &&
@@ -368,9 +540,67 @@ export async function buildTailInjection(
     state.lastFallbackReason = 'identical-selection'
     logger.info(
       `inject-skip bucket=${workspace.paths.bucket} reason=identical-selection ` +
-        `ids=${outcome.selected.map((c) => (c.srcBucket ? `D${c.id}@${c.srcBucket}` : `D${c.id}`)).join(',')} chars=${text.length} ` +
+        `ids=${outcome.selected.map((c) => (c.srcBucket ? `D${c.id}@${c.srcBucket}` : `D${c.id}`)).join(',')} ` +
+        `chars=${renderInjection(outcome, workspace.paths.bucket)?.length ?? 0} ` +
         `sinceLastInject=${turn - state.lastInjectTurn} turns injectMode=${isTurnStart ? 'interactive' : 'autonomous'} session=${sessionId}`,
     )
+    return null
+  }
+
+  /* 条目级去重（2026-10-15）：把**还在上下文里**的条目从这次注入里剔掉。
+   *
+   * 为什么还需要它：集合级判据只在入选集合**完全不变**时生效；集合一变
+   * （{A,B,C} → {A,B,D}）它就失效，A、B 被整块重注一遍——HANDOFF 记的
+   * 「同 3 条记忆一场会话被注 9 次」正是这个形状（每条重复都是零收益、全价成本）。
+   *
+   * ★ 只剔不补（**不**用后位候选回填空出的席位）：回填会把「跳过」变成「每轮注入更弱的
+   * 新条目」，总注入量不降反升，正与本刀「停止为已在眼前的东西付费」的初衷相反；
+   * 而且会改写集合级去重与步维刷新两条既有语义（2026-10-15 首版实测：主套件 #12/#17 双红）。
+   * 真正要救的是**部分重叠**那一半：{A,B,C}→{A,B,D} 时只注入 D。
+   *
+   * 可见性判据是**真消息在场**（blockHash 反查），不是轮数近似——块被压缩折走后
+   * 自动允许重注，不静默丢记忆。 */
+  const liveKeys = deps.config.inject.dedupeLiveEntries && !refreshDue
+    ? liveInjectedKeys([...rawHistory, ...(claimed ?? [])], state)
+    : null
+  const kept: { kept: RecallCandidate[]; duplicated: Array<{ id: number; title: string; reason: string }> } =
+    liveKeys && liveKeys.size > 0
+      ? filterLiveDuplicates(outcome.selected, liveKeys, workspace.paths.bucket)
+      : { kept: [...outcome.selected], duplicated: [] }
+
+  /* G3 语料有效性（2026-10-15）：**已被取代**的条目也不注入——它们不是「已在眼前」（信息没丢），
+   * 而是「结论已不是当前事实」（信息是错的，更危险）。放在去重**之后**：
+   * 两刀都在同一处收口，`dropped` 归因合并进同一条「未注入明细」行。
+   * 强刷（refreshDue）**不**越过这一刀——与去重不同：强刷的理由是「在场判据可能漏判」，
+   * 而「结论已过期」不会因为隔了 8 回合就重新成立。 */
+  const live: { kept: RecallCandidate[]; duplicated: Array<{ id: number; title: string; reason: string }> } =
+    kept.kept.some((c) => c.supersededBy !== undefined)
+      ? filterSuperseded(kept.kept)
+      : { kept: kept.kept, duplicated: [] }
+  const removed = [...kept.duplicated, ...live.duplicated]
+
+  const effective: RecallOutcome =
+    removed.length === 0
+      ? outcome
+      : {
+          ...outcome,
+          selected: live.kept,
+          dropped: [...outcome.dropped, ...removed],
+        }
+
+  const text = renderInjection(effective, workspace.paths.bucket)
+  if (!text) {
+    // 门控不过 / 无候选 / 基础设施失败 / **选中的全都在场或全部过期** → 不注入，带 fallbackReason（§6.3）。
+    // 其中**基础设施失败**另发一条模型可见的短通知（见 recallFailureNotice）；
+    // 'all-selected-already-in-context' 不在那个谓词里（去重成功不是降级）。
+    const reason =
+      outcome.fallbackReason === null && outcome.selected.length > 0 && live.kept.length === 0
+        ? 'all-selected-already-in-context'
+        : outcome.fallbackReason
+    state.lastFallbackReason = reason
+    noteRecallFailure(state, reason)
+    state.skippedCount += 1
+    logger.info(`${renderSkipNotice({ ...effective, fallbackReason: reason }, workspace.paths.bucket)} session=${sessionId}`)
     return null
   }
 
@@ -379,6 +609,7 @@ export async function buildTailInjection(
   state.lastInjectTurn = turn
   state.autoAttemptsSinceInject = 0
   state.lastFallbackReason = null
+  state.recallFailureStreak = 0
   state.lastCandidates = outcome.candidates
   state.injectedCount += 1
   state.audits.push({
@@ -389,12 +620,21 @@ export async function buildTailInjection(
     tailIndex: null,
     totalMessages: null,
     assistantAfter: null,
+    // 条目级去重的反查表：下一轮 liveInjectedKeys() 靠 blockHash 找到这些键。
+    selectionKeys: outcome.selected.map((c) => candidateKey(c, workspace.paths.bucket)),
     at: Date.now(),
   })
+  // 长会话有界：审计只服务「本会话最近注入块的可见性反查」，200 条远超实际同时在场的块数。
+  if (state.audits.length > 200) state.audits.shift()
   logger.info(
     `inject bucket=${workspace.paths.bucket} ids=${outcome.selected.map((c) => (c.srcBucket ? `D${c.id}@${c.srcBucket}` : `D${c.id}`)).join(',')} ` +
       `omega=${outcome.omega === null ? 'n/a' : outcome.omega.toFixed(3)} regime=${outcome.regime ?? '-'} ` +
-      `mode=${outcome.mode} chars=${text.length} candidates=${outcome.candidateCount} dropped=${outcome.dropped.length} ` +
+      `mode=${outcome.mode} chars=${text.length} candidates=${outcome.candidateCount} dropped=${effective.dropped.length} ` +
+      // 条目级去重的可见量（2026-10-15）：被剔的条目只出现在渲染块的「未注入明细」行里，
+      // 桶日志看不见就没法量化本刀收益（统计 inject 行时会漏掉「注了几条、剔了几条」）。
+      `deduped=${kept.duplicated.length}${kept.duplicated.length > 0 ? ` dedupedIds=${kept.duplicated.map((d) => `D${d.id}`).join(',')}` : ''} ` +
+      // G3：被「已被取代」剔掉的条数（含废止）。与 deduped 分开计数，便于分别定标。
+      `superseded=${live.duplicated.length}${live.duplicated.length > 0 ? ` supersededIds=${live.duplicated.map((d) => `D${d.id}`).join(',')}` : ''} ` +
       `inherited=${outcome.selected.filter((c) => c.srcBucket).length} ` +
       `injectMode=${isTurnStart ? 'interactive' : 'autonomous'}${compactionFired ? ' trigger=compaction' : ''} ` +
       `session=${sessionId} gate={passed:${outcome.gate.passed},maxKnn:${outcome.gate.maxKnn.toFixed(4)},` +
@@ -433,6 +673,14 @@ export function createWriteNudgeMessage(text: string): unknown {
   return createUserMessage({
     content: [{ type: 'text', text }],
     source: injectionSource('notice', { summary: 'memo-river 写入节律提醒' }),
+  })
+}
+
+/** 组装「召回未生效」通知消息（同 `form: 'notice'`：插件通知，非召回素材——不冒充用户的话）。 */
+export function createRecallNoticeMessage(text: string): unknown {
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: injectionSource('notice', { summary: 'memo-river 召回未生效通知' }),
   })
 }
 
@@ -793,6 +1041,36 @@ export function installInjection(
           : null
         const extra: unknown[] = []
         if (text) extra.push(createInjectionMessage(text))
+        else {
+          /* ★ 必须重新 peek：handler 顶部那个 `wstate` 是**本步之前**取的，会话首个 pre-step 时
+           * 它还是 undefined（SessionState 是 buildTailInjection 内的 getSession 现建的）——
+           * 直接用它会漏掉「新会话第一轮召回失败」，而这正是最该通知模型的一轮（Q-4 逮住）。 */
+          const noticeState = peekSession(payload.agent.session?.id ?? '')
+          if (noticeState) {
+            /* 降级可见化（D214）：buildTailInjection 返回 null 且原因是通道故障时，给模型一条短通知。
+             * 只认「本步真的走过读路径」的情形——buildTailInjection 的节流早退（同一 turn.step 重入 /
+             * 未到节律）不改 lastFallbackReason，靠 lastAutoTurn/Step 对齐 + 本步通知去重键双重把门。 */
+            const stepped = noticeState.lastAutoTurn === payload.turn && noticeState.lastAutoStep === payload.step
+            const noticeKey = `${payload.turn}.${payload.step}`
+            if (stepped && noticeState.lastRecallNoticeKey !== noticeKey) {
+              const noticeBucket = workspacePaths(resolveCwd(payload.agent, noticeState)).bucket
+              const notice = recallFailureNotice(noticeState, noticeBucket, noticeState.lastInjectMode === 'interactive')
+              if (notice) {
+                noticeState.lastRecallNoticeKey = noticeKey
+                extra.push(createRecallNoticeMessage(notice))
+                const nudgeLine =
+                  `recall-notice session=${noticeState.sessionId} turn=${payload.turn} step=${payload.step} ` +
+                  `reason=${noticeState.lastRecallNoticeReason} streak=${noticeState.recallFailureStreak} ` +
+                  `at=${noticeState.lastInjectMode === 'interactive' ? 'turn-start' : 'cadence'}`
+                try {
+                  deps.getWorkspace(resolveCwd(payload.agent, noticeState)).logger.info(nudgeLine)
+                } catch {
+                  deps.log('info', nudgeLine)
+                }
+              }
+            }
+          }
+        }
         if (nudge) {
           extra.push(createWriteNudgeMessage(nudge))
           // 票01：遥测落桶日志（memo-river.log）——deps.log 是宿主 logger，生产实测两处都看不到

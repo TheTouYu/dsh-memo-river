@@ -7,11 +7,21 @@
  */
 import { DatabaseSync } from 'node:sqlite'
 import { SCHEMA_STATEMENTS } from './schema.js'
+import { LOCAL_SCHEMA_STATEMENTS } from './schema-local.js'
 
 export interface TagRow {
   id: number
   name: string
   vector: Float32Array | null
+}
+
+/** 一行取代关系（`memo_supersessions`）。`newFileId=null` = 已废止（无继任篇）。 */
+export interface SupersessionRow {
+  oldFileId: number
+  newFileId: number | null
+  reason: string | null
+  markedAt: number
+  markedBy: string
 }
 
 export interface ChunkRow {
@@ -63,6 +73,15 @@ export class KnowledgeStore {
     this.db.exec('PRAGMA mmap_size = 0')
     // 幂等建表：参考 DDL 全部为 CREATE ...（IF NOT EXISTS 由本处兜底判定）
     for (const stmt of SCHEMA_STATEMENTS) {
+      try {
+        this.db.exec(stmt)
+      } catch (e) {
+        if (!/already exists/i.test(String(e))) throw e
+      }
+    }
+    /* 插件自有 DDL（G3 记忆取代关系）——与逐字镜像上游的 SCHEMA_STATEMENTS **分开**，
+     * 理由见 src/schema-local.ts 文件头（gen-schema.mjs 重跑会整份覆盖 schema.ts）。 */
+    for (const stmt of LOCAL_SCHEMA_STATEMENTS) {
       try {
         this.db.exec(stmt)
       } catch (e) {
@@ -234,6 +253,90 @@ export class KnowledgeStore {
         },
       ]),
     )
+  }
+
+  /* ── 记忆取代关系（G3 语料有效性，2026-10-15）：插件自有表 memo_supersessions ──
+   *
+   * 语义边界（别和既有机制混）：
+   *   · `memo_update` = 原地重写，旧内容消失 → 不存在过期条目；
+   *   · `memo_merge` = 并入后归档退役（行级删除）→ 不存在过期条目；
+   *   · **本表**处理第三种：新篇推翻了旧篇的**结论**，两篇都留着——旧篇的过程/教训仍有价值，
+   *     但结论已不是当前事实。被动注入不该再把它当事实喂给模型（否则模型会基于一个已经
+   *     不成立的世界做诊断），主动 memo_recall 则应当看得见全貌。
+   *
+   * `new_file_id IS NULL` = 已废止（无继任篇）。
+   * 读取一律 JOIN files：源篇被归档删除后本表行会**悬挂**，JOIN 让它自动不可见
+   *（不加外键的理由见 src/schema-local.ts）。 */
+
+  /** 全量取代关系（old fileId → 行）。表极小（个位数到几十行），调用方按需缓存。 */
+  supersessions(): Map<number, SupersessionRow> {
+    const rows = this.db
+      .prepare(
+        `SELECT s.old_file_id AS o, s.new_file_id AS n, s.reason AS reason,
+                s.marked_at AS at, s.marked_by AS by
+         FROM memo_supersessions s JOIN files f ON f.id = s.old_file_id`,
+      )
+      .all() as unknown as Array<{ o: number; n: number | null; reason: string | null; at: number; by: string }>
+    return new Map(
+      rows.map((r) => [
+        Number(r.o),
+        {
+          oldFileId: Number(r.o),
+          newFileId: r.n == null ? null : Number(r.n),
+          reason: r.reason == null ? null : String(r.reason),
+          markedAt: Number(r.at),
+          markedBy: String(r.by),
+        },
+      ]),
+    )
+  }
+
+  /** 标记「`oldFileId` 的结论已被 `newFileId` 取代」（`newFileId=null` = 废止）。幂等 UPSERT。 */
+  markSuperseded(input: {
+    oldFileId: number
+    newFileId: number | null
+    reason?: string | null
+    markedBy: string
+    markedAt?: number
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO memo_supersessions (old_file_id, new_file_id, reason, marked_at, marked_by)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(old_file_id) DO UPDATE SET
+           new_file_id = excluded.new_file_id, reason = excluded.reason,
+           marked_at = excluded.marked_at, marked_by = excluded.marked_by`,
+      )
+      .run(
+        input.oldFileId,
+        input.newFileId,
+        input.reason ?? null,
+        input.markedAt ?? Date.now(),
+        input.markedBy,
+      )
+  }
+
+  /** 解除标记；返回实际删除的行数（0 = 本来就没标记）。 */
+  clearSupersession(oldFileId: number): number {
+    const r = this.db.prepare('DELETE FROM memo_supersessions WHERE old_file_id = ?').run(oldFileId) as unknown as {
+      changes?: number
+    }
+    return Number(r?.changes ?? 0)
+  }
+
+  /**
+   * 清掉**源篇已不存在**的悬挂行；返回清理条数（归档退役路径顺手调用）。
+   *
+   * ⚠️ 只清 `old_file_id` 悬挂的那一类。**继任篇消失时绝不能清**：继任篇被 `memo_merge`
+   * 归档退役后，旧篇的结论**仍然**是被取代的——清了它，那条过期结论就会重新作为当前事实
+   * 被注入，方向正好反了（首版就是这么写的，被 acceptance-supersede S-1 抓出来）。
+   * 继任篇消失的代价只是展示降级（`superseded-by-D?`），由 `filterSuperseded`/渲染端承担。
+   */
+  pruneSupersessions(): number {
+    const r = this.db
+      .prepare('DELETE FROM memo_supersessions WHERE old_file_id NOT IN (SELECT id FROM files)')
+      .run() as unknown as { changes?: number }
+    return Number(r?.changes ?? 0)
   }
 
   kvGet(key: string): string | null {

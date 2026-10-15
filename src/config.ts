@@ -15,6 +15,8 @@ export interface EmbedConfig {
   apiKey: string
   model: string
   dimension: number
+  /** OpenRouter provider 优先序（逗号分隔 slug，如 'Parasail'）；空 = 不干预路由。 */
+  providerOrder: string
 }
 
 export interface InjectConfig {
@@ -64,11 +66,11 @@ export interface InjectConfig {
   /** 构造查询场时回看的最近消息条数。 */
   queryLookback: number
   /**
-   * 票 01：注入路径嵌入短超时（ms，0 = 用 EmbedClient 宽松默认 60s）。
+   * 票 01：注入路径嵌入短超时（ms，0 = 用 EmbedClient 宽松默认 60s；缺省 8000）。
    * 只罩被动注入的合批 embed 调用（查询向量 + 门控锚，一次请求）；超时/失败 →
-   * inject-skip（reason 可区分 embed-timeout）——每轮交互开头的注入等待有硬顶，
-   * 端点多慢都不卡会话。写侧（memo_write/approve）与主动 memo_recall 不经此配置，
-   * 仍走宽松默认。
+   * inject-skip（reason 可区分 embed-timeout）+ 一条模型可见的「召回未生效」短通知
+   * （D214 降级可见化：失败不再沉默）。写侧（memo_write/approve）与主动 memo_recall
+   * 不经此配置，仍走宽松默认 60s。
    */
   embedTimeoutMs: number
   /**
@@ -94,6 +96,13 @@ export interface InjectConfig {
   dedupeSelection: boolean
   /** 即使集合没变，隔了这么多 turn 也强制重注一次（0 = 不限制）。 */
   dedupeRefreshTurns: number
+  /**
+   * 条目级去重：仍在上下文里的条目不再占席位（键 = `recall.candidateKey`）。
+   *
+   * 与 `dedupeSelection`（集合级，集合完全不变才跳过整块）互补——集合一变它即失效，
+   * 交集部分会被白付一遍。关掉此开关 → 逐位退回旧行为（回退手段）。
+   */
+  dedupeLiveEntries: boolean
   /** 自主态注入节律：回合不停时每 N 步重评一次召回（0 = 关闭）。 */
   autonomousInjectEverySteps: number
   /** 近因保底：最近 N 天内的最新日记被 k-limit/预算挤出入选集时，给它保留一席（0 = 关闭）。 */
@@ -214,8 +223,19 @@ export const Config: z<Config> = z.object({
     .object({
       apiUrl: z.string().default(''),
       apiKey: z.string().default(''),
-      model: z.string().default('gemini-embedding-2-preview'),
-      dimension: z.number().min(1).default(3072),
+      // 缺省留空：让 resolveEmbed 回落到 config.env 的 WhitelistEmbeddingModel（原先非空默认值
+      // 会让 config.env 成为死配置——2026-10-15 实测：改 config.env 后 resolveEmbed 仍返回默认值）。
+      model: z.string().default(''),
+      // 缺省 0 = 未指定：回落 config.env 的 VECTORDB_DIMENSION，再兜底 3072（同 resolveEmbed）。
+      dimension: z.number().min(0).default(0),
+      // OpenRouter 专属：逗号分隔的 provider slug 优先序（如 'Parasail'）→ 请求体带
+      // provider:{order:[...]}。动机（2026-10-15 实测，见 docs/ 与河中当日篇）：不指定时
+      // OpenRouter 按价格负载均衡，同一文本连打 6 次被路由到 DeepInfra/Parasail 两家，
+      // 逐元素最大差 3.8e-4~7.3e-4（cos ≥0.99997——方向不变但**逐位不可复现**），会让
+      // 「并发 == 串行」这类名次恒等断言随机变红；指定 order 后负载均衡被关掉，同一
+      // provider 连打 3 次逐元素差 0.00e+0。留空 = 不发送 provider 字段：非 OpenRouter
+      // 端点与旧行为完全不变。
+      providerOrder: z.string().default(''),
     })
     .default({} as EmbedConfig),
 
@@ -244,11 +264,15 @@ export const Config: z<Config> = z.object({
       gateThreshold: z.number().default(0.55),
       queryLookback: z.number().min(1).default(6),
       /**
-       * 票 01：注入路径嵌入短超时（ms，0 = 用客户端默认 60s）。默认 3000 的定标：
-       * 端点单条 RTT 实测 1.19-1.45s（connect 0.4 + TLS 0.8），合批后单请求 ×1，
-       * 3s 容得下 p95 慢请求又不至于吞掉整轮交互预算（基线 p95 8.1-9.8s 之痛源）。
+       * 票 01：注入路径嵌入短超时（ms，0 = 用客户端默认 60s）。**2026-10-14 定标：3000 → 8000**。
+       *
+       * 原定标（3000）基于当时实测单条 RTT 1.19-1.45s；但端点随后劣化，10-13/10-14 稳定在
+       * RTT ≈3s+（docs/embed-latency-2026-10-14.md：单文本 p50 983→1593→2045→2144ms，超 3s
+       * 概率 13.5%、劣化窗口 23%），**预算线与端点点位重合** → 全库 skip 率 45.3%（超时类 30.5%），
+       * 且成功注入的 elapsedMs p50=3154ms 本身就超预算。8s 覆盖实测 p90（3.5-4.3s）与 p95（≈4.5s）；
+       * 代价是闸持有更久（只在端点真慢时付）。根治仍是双端点/本地嵌入兜底，尚未落地。
        */
-      embedTimeoutMs: z.number().min(0).default(3000),
+      embedTimeoutMs: z.number().min(0).default(8000),
       /**
        * 门控拿哪个向量比阈值。
        *
@@ -288,6 +312,17 @@ export const Config: z<Config> = z.object({
        * 那时再跳过就等于静默丢记忆。
        */
       dedupeRefreshTurns: z.number().min(0).default(8),
+      /**
+       * 条目级去重（2026-10-15）：仍在上下文里的条目不再占席位（键 = recall.candidateKey）。
+       *
+       * 为什么需要：`dedupeSelection` 的键是**整个入选集合**——集合一变
+       * （{A,B,C}→{A,B,D}）它就失效，A、B 被整块重注一遍。HANDOFF 实测的
+       * 「同 3 条记忆一场会话被注 9 次」正是这个形状（每条重复都有成本、零收益）。
+       * 可见性判据用**真消息在场**（blockHash 反查 injector.liveInjectedKeys），
+       * 不用轮数近似——块被压缩折走后自动允许重注，不静默丢记忆。
+       * 缺省开；关掉 = 逐位退回旧行为（回退手段）。
+       */
+      dedupeLiveEntries: z.boolean().default(true),
       /**
        * 自主态注入节律：回合不停（oneshot 长任务）、无新用户消息时，每 N 步重评一次召回（0=关闭）。
        *

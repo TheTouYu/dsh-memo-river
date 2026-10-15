@@ -18,6 +18,14 @@ export interface InjectionAudit {
   totalMessages: number | null
   /** 该块之后是否还有 assistant 消息（必须为 false）。 */
   assistantAfter: boolean | null
+  /**
+   * 该块的入选条目键（`recall.candidateKey` 命名空间）。
+   *
+   * 用途：`injector.liveInjectedKeys()` 用 `blockHash` 反查「这块还在不在上下文里」，
+   * 命中即把这些键喂给下一轮的 `RecallOptions.excludeKeys`，做**条目级**去重
+   * （集合级去重见 injector 的 selectionKey——它只在入选集合完全不变时才生效）。
+   */
+  selectionKeys: string[]
   at: number
 }
 
@@ -116,6 +124,16 @@ export interface SessionState {
    * 没被 injector 见过的会话（新起/禁用注入）保持 'interactive' 缺省——保守不误伤。
    */
   lastInjectMode: 'interactive' | 'autonomous'
+  /**
+   * 降级可见化（2026-10-14）：召回**基础设施失败**时给模型发的短通知。
+   * 回合首发必发（那正是「这轮没有记忆」的时刻）；自主态节律按 RECALL_NOTICE_MIN_SPACING_MS 节流。
+   */
+  lastRecallNoticeAt: number
+  lastRecallNoticeReason: string | null
+  /** 已就哪个 `turn.step` 发过通知（防同一步重入时重发）。 */
+  lastRecallNoticeKey: string | null
+  /** 自最近一次成功注入以来，连续的基础设施失败次数（通知文案用它给模型量级）。 */
+  recallFailureStreak: number
   /** 最近观测到的工具输出长度环形样本（≤20 条；增量锚截尾均值的量尺，票05）。 */
   toolLens: number[]
   /** 最近一条 ≥150 字助手正文的首行摘要（票05：digest 触发时现取，不走 turn-stopping 存货）。 */
@@ -179,6 +197,10 @@ export function getSession(sessionId: string, cwd: string | null): SessionState 
     lastCompressAt: 0,
     compressStreak: 0,
     lastInjectMode: 'interactive',
+    lastRecallNoticeAt: 0,
+    lastRecallNoticeReason: null,
+    lastRecallNoticeKey: null,
+    recallFailureStreak: 0,
     toolLens: [],
     lastAssistantDigest: '',
     activeMs: 0,
