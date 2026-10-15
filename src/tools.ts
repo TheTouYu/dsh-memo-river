@@ -772,7 +772,10 @@ async function writeDiaryCoreLocked(
    * 同主题旧篇在场（复用 ④.5 的 twin，零额外嵌入）→ 建议正文首行自声明 + memo_supersede 补账。
    * 机制依据 D309/D311：新篇正文明写推翻者误引骤降（78% vs 6%），折叠（L3）已验证 0% 误引——
    * 自声明是 L1 账目与 L3 折叠的共同前置。suggest 档不阻断；日志行供 G3 结算率统计
-   * （建议出现次数 vs 实际补账次数——H7 上线后的回溯判据）。 */
+   * （建议出现次数 vs 实际补账次数——H7 上线后的回溯判据）。
+   * v2（2026-10-16 用户判断）：H7 价值=写入时点的定向召回/注意力触发——把可能冲突的一对带进
+   * 写入者视野即可，裁决与修复交给主模型（召回=再巩固窗口），精度次要。建议文案改三路裁决
+   * 引导（推翻补账/延续并入/撞词忽略），触发逻辑与日志行不变。 */
   if (
     (input.supersedeDeclared ?? 0) === 0 &&
     twin !== null &&
@@ -783,8 +786,10 @@ async function writeDiaryCoreLocked(
       `h7-supersede-suggest bucket=${bucket} chunk=D${written.chunkId} cos=${twin.score.toFixed(2)} twin=D${twin.chunkId} superseded=none`,
     )
     healthLines.push(
-      `· 【H7·推翻信号】正文含「作废/证伪/推翻」类信号但未声明 supersedes，且同主题旧篇在场：D${twin.chunkId}（cos=${twin.score.toFixed(2)}）`,
-      `  若本篇确属推翻：①正文首行明写「推翻 D${twin.chunkId}…」（实测自声明防误引 78% vs 6%，D309/D311）；②补账 memo_supersede(old=${twin.chunkId}, replacement=D${written.chunkId})——已取代旧篇不再作为当前事实被动注入`,
+      `· 【H7·推翻信号】正文含「作废/证伪/推翻」类信号但未声明 supersedes，且同主题旧篇在场：D${twin.chunkId}（cos=${twin.score.toFixed(2)}）——本条只负责把这对可能冲突的日记带到你眼前，是否成立由你裁决`,
+      `  ① 确属推翻 → 正文首行自声明「推翻 D${twin.chunkId}…」（实测防误引 78% vs 6%，D309/D311）＋补账 memo_supersede(old=${twin.chunkId}, replacement=D${written.chunkId})，旧篇即不再作为当前事实被动注入`,
+      `  ② 同题延续/推进（非推翻）→ memo_update 并入 D${twin.chunkId}，或本篇首行注明与它的关系`,
+      `  ③ 仅撞词（引用/复盘他人的推翻用语）→ 忽略本条`,
     )
   }
 
