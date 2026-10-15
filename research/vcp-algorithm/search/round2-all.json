@@ -1,0 +1,906 @@
+{
+ "浪潮RAG": [
+  {
+   "bvid": "BV1xCcyzREBF",
+   "title": "【浪潮RAG-V7】人类史第一个可用于个人CPU的神经元记忆联想算法。",
+   "author": "红莲の狮子",
+   "duration": "33:41",
+   "stats": [
+    "8725",
+    "8"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV16MD9B5EC8",
+   "title": "[VCP]浪潮RAG V8—地表最先进的记忆寻址算法。",
+   "author": "红莲の狮子",
+   "duration": "17:30",
+   "stats": [
+    "4230",
+    "1"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1TdfSBNEpH",
+   "title": "【狮子杂谈特别篇】浪潮已至，明月何归？——论VCP RAG算法。",
+   "author": "红莲の狮子",
+   "duration": "38:26",
+   "stats": [
+    "2890",
+    "5"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1Y6pj68Exh",
+   "title": "【B站最细】Agentic RAG 才是未来！吊打传统 RAG！30分钟详解chatbox 的 Agentic 主动决策机制，手把手带你掌握下一代RAG核心原理",
+   "author": "大模型开发入门",
+   "duration": "03:13:57",
+   "stats": [
+    "807",
+    "48"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1JLN2z4EZQ",
+   "title": "RAG 工作机制详解——一个高质量知识库背后的技术全流程",
+   "author": "马克的技术工作坊",
+   "duration": "17:02",
+   "stats": [
+    "43.2万",
+    "619"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1J2LB6JEeH",
+   "title": "[VCP]浪潮V8.2—当流体力学、神经网络和广义相对论作用于RAG系统。",
+   "author": "红莲の狮子",
+   "duration": "11:53",
+   "stats": [
+    "2214",
+    "2"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV18wTM6bEoQ",
+   "title": "RAG优化：17种RAG方案，谁才是RAG最佳选择？全程干货！带你搞懂这17种RAG方案，少走99%的弯路！大模型|LLM|RAGRAG优化：17种RAG方案，",
+   "author": "AI大模型教学",
+   "duration": "24:02",
+   "stats": [
+    "2.8万",
+    "80"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1YdMp6kEEf",
+   "title": "RAG真的已经死了吗？为什么ClaudeCode不用RAG？",
+   "author": "不转到大模型不改名",
+   "duration": "20:36",
+   "stats": [
+    "1.3万",
+    "8"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1KLrQBbEUd",
+   "title": "【VCP】浪潮RAG V3，当语义动力学成为记忆引擎蓝本。",
+   "author": "红莲の狮子",
+   "duration": "22:39",
+   "stats": [
+    "5118",
+    "2"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1Gde76tE35",
+   "title": "【B站首推】Agentic RAG 才是未来！吊打传统 RAG！30分钟详解chatbox 的 Agentic 主动决策机制，手把手带你掌握下一代RAG核心原理",
+   "author": "AI大模型应用实战",
+   "duration": "04:39:51",
+   "stats": [
+    "6106",
+    "51"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1AmSSBMErT",
+   "title": "放弃RAG吧 ！LLM知识库新范式 | Karpathy的新思路",
+   "author": "为什么叫QQ",
+   "duration": "07:16",
+   "stats": [
+    "5.1万",
+    "40"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1otokBpENn",
+   "title": "【大模型RAG】2026年B站最全最细的RAG知识库搭建系统教程，手把手教你搭建私有知识库，从入门到实战全流程教学！全程干货！少走99%的弯路！",
+   "author": "AI应用开发-",
+   "duration": "11:38:54",
+   "stats": [
+    "29.9万",
+    "377"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1C69iBgEMk",
+   "title": "十分钟了解RAG基本原理",
+   "author": "Ai林爻",
+   "duration": "10:17",
+   "stats": [
+    "17.9万",
+    "144"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1S6pZ66EsX",
+   "title": "老伙子们昨晚聚餐，在饭桌上给大家谈谈，推荐算法，怎么让你感觉在窃听你的喜好，又是怎么让你刷的停不下来的。#程序员  #算法 #职场   #AI创作浪潮计划",
+   "author": "老头们的快乐生活",
+   "duration": "07:22",
+   "stats": [
+    "19.2万",
+    "523"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1MKab6yEcb",
+   "title": "Jev适合做RAG吗？我用官方文档实测，排第一的从7道变17道",
+   "author": "WarlockTome",
+   "duration": "06:48",
+   "stats": [
+    "2579",
+    "0"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1S4K56kE8J",
+   "title": "【浪潮v9】向统一语义场的山顶攀登而去。",
+   "author": "红莲の狮子",
+   "duration": "22:39",
+   "stats": [
+    "2681",
+    "1"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1C9d1BuENd",
+   "title": "【2026版】Agentic RAG-目前最强的RAG实现方式，手把手带你从零搭建一个Agentic RAG，原理+代码讲解，超详细！让你少走99%弯路！！",
+   "author": "AI大模型老张",
+   "duration": "11:40:00",
+   "stats": [
+    "3.8万",
+    "404"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV19RJhzyEWN",
+   "title": "这就是RAG 一看就懂的个人知识库架构",
+   "author": "隔壁的程序员老王",
+   "duration": "09:01",
+   "stats": [
+    "24.3万",
+    "316"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1NwV86hEYB",
+   "title": "我用7层架构重写RAG后准确率从40%飙到92%｜你的RAG为什么是垃圾（纯享版）",
+   "author": "费曼学AI",
+   "duration": "14:30",
+   "stats": [
+    "7175",
+    "26"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1hj5DzyE5d",
+   "title": "【RAG-全集】最适合新手的大模型RAG入门课程（大佬勿扰啦）",
+   "author": "费曼学徒冬瓜",
+   "duration": "01:10:03",
+   "stats": [
+    "9.3万",
+    "202"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1AjH66gETc",
+   "title": "两个最会写 Skill 工作流的人的对话：每月 2500 个 PR，睡觉时 AI 还在干活！pstack 作者怎么做到的？",
+   "author": "山人自有GoodIdea",
+   "duration": "01:05:36",
+   "stats": [
+    "2.1万",
+    "0"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1qoaa6KEBn",
+   "title": "【B站首推】Agentic RAG才是未来！吊打传统 RAG！带你从原理到关键优势解析，全程干货！少走99%的弯路！",
+   "author": "大模型AI应用",
+   "duration": "17:42",
+   "stats": [
+    "1527",
+    "3"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV17m7U6jEuh",
+   "title": "RAG外部检索是多余的，英伟达最新成果颠覆认知",
+   "author": "AIGC深一度",
+   "duration": "03:49",
+   "stats": [
+    "3.9万",
+    "13"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1yEWw63EMV",
+   "title": "逆向一切的REA，到底是个啥？是真的厉害还是又一场流量狂欢？",
+   "author": "轩辕的编程宇宙",
+   "duration": "12:40",
+   "stats": [
+    "5.8万",
+    "124"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1GHpb6cEkx",
+   "title": "AI浪潮下，已经很难接软件开发的活了",
+   "author": "dadafastrun",
+   "duration": "11:42",
+   "stats": [
+    "3.6万",
+    "10"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1MopX6sEp7",
+   "title": "向量数据库已死？RAG已死？AI圈最火的两个赛道被当场判死刑",
+   "author": "IvorySQL",
+   "duration": "22:40",
+   "stats": [
+    "2634",
+    "1"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1Thp46jEXk",
+   "title": "【2026最新】吴恩达公认最好的【大模型微调】教程！大模型入门到进阶，一套全解决！_LangChain_RAG_agent_生成式AI-附课件代码",
+   "author": "吴恩达的AI课",
+   "duration": "04:26:39",
+   "stats": [
+    "1231",
+    "12"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV17J3B6PEGK",
+   "title": "7 分钟了解 10 种 RAG 策略",
+   "author": "Hucci写代码",
+   "duration": "07:31",
+   "stats": [
+    "5.1万",
+    "42"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1VcWw69EBB",
+   "title": "RAG 到底是怎么工作的？一文搞懂 AI 知识库的完整流程",
+   "author": "AI慢半拍",
+   "duration": "14:29",
+   "stats": [
+    "32",
+    "0"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1v2DsBRETd",
+   "title": "【B站首推】Agentic RAG 才是未来！吊打传统 RAG！带你从原理到关键优势解析，全程干货！少走99%的弯路！",
+   "author": "AIAgent搭建",
+   "duration": "16:43",
+   "stats": [
+    "9457",
+    "89"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1CFH16xEo8",
+   "title": "RAG三代演进梳理｜从基础检索到Agentic模块化RAG",
+   "author": "正在努力的小chen",
+   "duration": "09:39",
+   "stats": [
+    "327",
+    "0"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV16fai6nELM",
+   "title": "【吊打付费】吴恩达亲授《 Agentic RAG》！从传统RAG到Agentic RAG，手把手带你搭建下一代智能问答系统！新手半天即可学会！",
+   "author": "吴恩达AIAgent",
+   "duration": "02:39:42",
+   "stats": [
+    "1949",
+    "13"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1N3pv6AEHF",
+   "title": "企业级 RAG 项目完整讲解 :彻底吃透RAG检索增强生成全链路，从检索前到 RRF 融合再到 RAG 评估",
+   "author": "八方网域-知予",
+   "duration": "11:12:14",
+   "stats": [
+    "1128",
+    "37"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV192KS61EBx",
+   "title": "【2026完整版】Agentic RAG当下最强RAG实现方案，零基础手把手从零搭建，全套原理+实战代码细致拆解，学完避开99%踩坑，转行AI必备硬核技术教程！",
+   "author": "码士集团-踢踢",
+   "duration": "10:18:54",
+   "stats": [
+    "5140",
+    "28"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1ojfDBSEPv",
+   "title": "【闪客】一口气拆穿Skill/MCP/RAG/Agent/OpenClaw底层逻辑",
+   "author": "飞天闪客",
+   "duration": "14:46",
+   "stats": [
+    "93.3万",
+    "2641"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  },
+  {
+   "bvid": "BV1YiEg6PEyu",
+   "title": "【大模型RAG】17种最强超详细RAG方案大比拼，谁才是RAG最佳选择？全程干货！20分钟带你搞懂这17种RAG方案，少走99%的弯路！大模型/LLM/RAG",
+   "author": "编程奇遇",
+   "duration": "22:26",
+   "stats": [
+    "1.8万",
+    "178"
+   ],
+   "keyword": "浪潮RAG",
+   "page": 1
+  }
+ ],
+ "浪潮 v9": [
+  {
+   "bvid": "BV1S4K56kE8J",
+   "title": "【浪潮v9】向统一语义场的山顶攀登而去。",
+   "author": "红莲の狮子",
+   "duration": "22:39",
+   "stats": [
+    "2681",
+    "1"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1h6kRYpEFQ",
+   "title": "在科技与智慧交融的时代浪潮中，围棋世界冠军柯洁重返清华，带来了一场震撼人心的AI主题演讲。正如柯洁在演讲中所倡导拥抱AI提升,自我荣耀平板V9为AI学习全新标杆",
+   "author": "金锁43",
+   "duration": "00:19",
+   "stats": [
+    "1257",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1sCSPBVEmL",
+   "title": "浪潮v100 8卡256G大显存带nvlink服务器安装详解&amp;避坑指南【包括系统卡死，nvidia cuda驱动问题解决】",
+   "author": "数萌AI服务器",
+   "duration": "12:44",
+   "stats": [
+    "1.2万",
+    "3"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1YEPvepEvf",
+   "title": "2000元玩转Deepseek 671b？千元级Deepseek浪潮服务器方案",
+   "author": "哆哩籽Dolizi",
+   "duration": "15:40",
+   "stats": [
+    "29.5万",
+    "383"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1u9pr6oED6",
+   "title": "看懂浪潮三季报|Q3 利润腰斩，真不是需求崩了，从训练到推理，浪潮利润下滑背后，是整个 AI 行业的大转向#浪潮信息 #Ai服务器",
+   "author": "投研第一线",
+   "duration": "10:11",
+   "stats": [
+    "154",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1Erp16HECK",
+   "title": "全新RTS手游 钢铁浪潮上线了",
+   "author": "Gnb7",
+   "duration": "01:49",
+   "stats": [
+    "49",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1cE421j79x",
+   "title": "支持纯国产电脑你会买吗？浪潮台式机评测！是智商退吗？ #DIY电脑",
+   "author": "华少懂电脑",
+   "duration": "06:39",
+   "stats": [
+    "1.3万",
+    "98"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1ia411y77X",
+   "title": "7000块钱的浪潮国产电脑能做些什么",
+   "author": "Rampant_man",
+   "duration": "03:34",
+   "stats": [
+    "6331",
+    "5"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1jzCRB4E1V",
+   "title": "Radax Orion O6 纯 ARM V9 处理器大模型推理 12 奇怪表现🤔",
+   "author": "LitterHouge",
+   "duration": "05:45",
+   "stats": [
+    "2543",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1Se411A7Vy",
+   "title": "浪潮是懂客户的——NF5270M6开箱",
+   "author": "无情开评",
+   "duration": "12:40",
+   "stats": [
+    "15.1万",
+    "412"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1e24y1N7qY",
+   "title": "威龙V9三版本综合评测：好魔方，但是不一定合适",
+   "author": "Cuber-小鲈鱼",
+   "duration": "18:33",
+   "stats": [
+    "1.5万",
+    "8"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1E94y1u7C4",
+   "title": "技术1-浪潮信息产品线&amp;服务器介绍-（2023.05）-01",
+   "author": "反手一个人星星",
+   "duration": "02:15:36",
+   "stats": [
+    "1275",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1sj411y7PK",
+   "title": "浪潮 NF5280M5 部署和维护视频教程",
+   "author": "不带广字头的庭",
+   "duration": "25:38",
+   "stats": [
+    "1.1万",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1YV4y137gB",
+   "title": "“保姆级教程”浪潮英信服务器安装操作系统",
+   "author": "成熟是什么-",
+   "duration": "03:16",
+   "stats": [
+    "2.3万",
+    "3"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1EG4y197i9",
+   "title": "拆一台单位配发的浪潮电脑",
+   "author": "张大斧",
+   "duration": "04:32",
+   "stats": [
+    "3018",
+    "10"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1YooHYYEeo",
+   "title": "垃圾佬狂喜！300块的CPU+600块的计算卡？组装能跑70B模型的AI服务器是种什么体验？(浪潮SA5212M5 + 3x MI50)",
+   "author": "司波图",
+   "duration": "12:06",
+   "stats": [
+    "20万",
+    "325"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1A2He6xEMk",
+   "title": "搞半天还要自己拼-千星奇域图像技术",
+   "author": "蓬莱东路8号",
+   "duration": "04:29",
+   "stats": [
+    "1443",
+    "3"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1Pxpn6xEwa",
+   "title": "最高难度人机 2V2 实战演示 | 钢铁浪潮攻略",
+   "author": "RiverTwilight",
+   "duration": "41:35",
+   "stats": [
+    "2057",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1EqozBSEUz",
+   "title": "浪潮服务器LSI 9240阵列卡RAID创建保姆级教程",
+   "author": "弱电研究僧",
+   "duration": "02:15",
+   "stats": [
+    "782",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1S6pZ66EsX",
+   "title": "老伙子们昨晚聚餐，在饭桌上给大家谈谈，推荐算法，怎么让你感觉在窃听你的喜好，又是怎么让你刷的停不下来的。#程序员  #算法 #职场   #AI创作浪潮计划",
+   "author": "老头们的快乐生活",
+   "duration": "07:22",
+   "stats": [
+    "19.2万",
+    "523"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1PYgzz8EhJ",
+   "title": "总成本不到2000的服务器就能体验部署AI——浪潮英信SA5212H5组装和体验",
+   "author": "iDNSPortal",
+   "duration": "19:06",
+   "stats": [
+    "4694",
+    "1"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV18SMN6XEJW",
+   "title": "怎么让Claude code帮你跑VASP",
+   "author": "ksyTacolar",
+   "duration": "29:06",
+   "stats": [
+    "3893",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1ia5M6WEVa",
+   "title": "9Router：AI编程零成本指南与封号风险",
+   "author": "老汤的碳基突围",
+   "duration": "05:19",
+   "stats": [
+    "3259",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1n5pY6HENM",
+   "title": "实测：两张二手V100跑出190 tok/s，同场景追平四万多的RTX 5090｜176B大模型本地部署全记录",
+   "author": "AI练习生x顺子",
+   "duration": "04:20",
+   "stats": [
+    "8501",
+    "12"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1JQhj6hEo8",
+   "title": "被浪潮吞没(超欲)， 全剧集一口爽看~",
+   "author": "bili_1578111511",
+   "duration": "01:08:14",
+   "stats": [
+    "7.7万",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1hwab6jEXv",
+   "title": "1800元的64GB车载板，能当半台DGX Spark吗？Thor-U实测",
+   "author": "VoidTech",
+   "duration": "09:20",
+   "stats": [
+    "3.5万",
+    "18"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1B34y1w7FH",
+   "title": "年轻人第一台服务器？能加显卡的浪潮SA5212M4服务器上手体验，插上显卡妥妥图形工作站",
+   "author": "GTX690战术核显卡导弹",
+   "duration": "07:01",
+   "stats": [
+    "10.6万",
+    "110"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1wqpi6PE19",
+   "title": "Opus5.5为啥审美这么好？我研究了下发现…",
+   "author": "小火火fifi",
+   "duration": "11:03",
+   "stats": [
+    "5.8万",
+    "71"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1cc411j7VA",
+   "title": "每天了解一家上市公司575期：浪潮信息",
+   "author": "深空投资",
+   "duration": "03:44",
+   "stats": [
+    "2万",
+    "1"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1akh16FESo",
+   "title": "烧了2亿token做出的游戏",
+   "author": "KL-_-Queen",
+   "duration": "02:16",
+   "stats": [
+    "3.9万",
+    "22"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1SzHB61EHa",
+   "title": "【极客湾】云飞:所有的手机零售机我们都可以root 得益于AI之神力",
+   "author": "大文豪Mafty",
+   "duration": "02:43",
+   "stats": [
+    "18.9万",
+    "182"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1dt421T7iu",
+   "title": "浪潮8卡机 NF5468M6沉浸式装机，两颗8352VCPU、8块RTX4090，4U双路8卡服务器。",
+   "author": "上海戴鑫",
+   "duration": "02:13",
+   "stats": [
+    "7224",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1ZJ9yBdEdx",
+   "title": "9Router 让你的Codingplan聚合使用！",
+   "author": "diwu",
+   "duration": "01:54",
+   "stats": [
+    "1264",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1JHreBhEtu",
+   "title": "消失的 ARMv9：为什么你的新手机还在跑 arm64-v8a 的软件？",
+   "author": "zyfworks",
+   "duration": "06:26",
+   "stats": [
+    "6万",
+    "46"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1pnpz6rEJJ",
+   "title": "DeepSeekV4.1Flash，哪家的性价比最高？",
+   "author": "能工智人永不为奴",
+   "duration": "08:15",
+   "stats": [
+    "7047",
+    "16"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1mg4y1w73L",
+   "title": "搞坏一台十几万的&quot;电脑&quot;？我故意不小心的！",
+   "author": "科技宅小明",
+   "duration": "08:41",
+   "stats": [
+    "106万",
+    "1612"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1DwfPBCEtH",
+   "title": "【极客湾】手机游戏性能大横评：厂商作弊太疯狂！【4k开源补档】（回来啦）",
+   "author": "JUcane",
+   "duration": "36:04",
+   "stats": [
+    "1.1万",
+    "9"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1e9p16VEwe",
+   "title": "新闻片《浪潮催新芽》",
+   "author": "阿-蛋黄",
+   "duration": "14:40",
+   "stats": [
+    "6",
+    "0"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  },
+  {
+   "bvid": "BV1Zc411j7Hk",
+   "title": "不管配置了！这次就是要搭建浪潮超融合！",
+   "author": "无情开评",
+   "duration": "14:34",
+   "stats": [
+    "6.4万",
+    "244"
+   ],
+   "keyword": "浪潮 v9",
+   "page": 1
+  }
+ ]
+}
