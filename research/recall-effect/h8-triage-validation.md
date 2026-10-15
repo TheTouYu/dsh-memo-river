@@ -61,11 +61,21 @@ C(27): 0.1:16 0.2:8  0.3:1  0.4:2               ← G03=0.426、G16=0.408 最高
 折叠挡等 H7 闸门供给正例 ≥15 后重标。——数据：/home/h/cd-exp/h8-triage-analysis.md
 ```
 
-## 7. 口径限制与 n 的支撑边界
+## 7. 残余口径风险：state 敏感性（已实测，2026-10-16 补）
+
+金标对无对应生产会话 state，主验证用固定中性背景（BG 60 字，含「判断取代关系」引导句）。补测：**12/35 对可从 tests.json 生产现场取到真实 state**（对内任一篇所在轮、state≥300 字、取最长轮尾 400 字），同对同序对比 `p_SUPERSEDED` 漂移（n=24 序点；`run_h8_realstate.py` → `h8-realstate.jsonl`）：
+
+- **|Δp| p50=0.051 / max=0.240**（G18 newFirst 0.369→0.128）——与两序翻转扰动同量级（p50 0.054）：**state 是与顺序同级的扰动源**。
+- **有符号均值 −0.054，20/24 序点负向**：真实 state 系统性压低 p_SUP。⚠️ 混杂声明：中性 BG 含「取代」字样有诱导性，压低部分来自去诱导——**中性背景是测量面污染源**，生产 shadow 档必须用真实 state 复核。
+- L3 挡位变化约 3/24；G03 两序仍误判 S（维持）；G11 newFirst top 从 C 变 UNCERTAIN。
+- **唯一有真实 state 的 S 对 G02 漂移极小**（−0.005/−0.026，判定态不变）——S 个案稳，但 n=1 不能外推。
+- **取不到真实 state 的 23 对**（无 ≥300 字 state 的轮，含 S 对 G01/G05/G06/G07/G34/G35）：明说取不到，未测。
+
+### n 的支撑边界
 
 - **能支撑**：①方向性判别力存在（p=0.003 级）；②绝对切点 0.7/0.4 不可用（35 对全体一致行为，不依赖更大 n）；③UNCERTAIN 分流最强 S 对的机制（3 对一致形态）。
-- **不能支撑**：AUROC 精确值（CI 宽 0.32）；新切点定案；两序差异显著性（ΔAUROC 0.06 无检验）；G04 类 NEEDS-CONFIRMATION 的行为（n=1）。
-- **金标无对应生产会话 state**：本验证用固定中性背景。生产 L2 触发时 state 是真实任务上下文——state 变化对判定的影响未测（草案①原定「state=生产口径」，四拍未覆盖，金标构建时也未附 state）。这是**残余口径风险**，H8 管线上线 shadow 档时应顺带记录真实 state 下的判定漂移。
+- **不能支撑**：AUROC 精确值（CI 宽 0.32）；新切点定案；两序差异显著性（ΔAUROC 0.06 无检验）；G04 类 NEEDS-CONFIRMATION 的行为（n=1）；真实 state 下 S 类行为（仅 G02 个案）。
+- 金标无对应生产会话 state 的主验证用固定中性背景——**state 敏感性已实测见 §7 上半**（与顺序同量级扰动 + 中性背景诱导混杂），shadow 档上线时应记录真实 state 判定。
 
 ## 8. 金标误标自查（判据=「旧断言在新证据下是否仍成立」）
 
@@ -77,8 +87,9 @@ C(27): 0.1:16 0.2:8  0.3:1  0.4:2               ← G03=0.426、G16=0.408 最高
 |---|---|
 | `/home/h/cd-exp/run_h8_triage.py` | 三态跑批（35 对 × 2 序，断点续跑） |
 | `/home/h/cd-exp/run_h8_noul.py` | noul 二路对照跑批 |
-| `/home/h/cd-exp/analyze_h8.py` | 全量分析（AUROC/bootstrap/Wilson/直方图/翻转/UNCERTAIN） |
-| `/home/h/cd-exp/h8-triage.jsonl` / `h8-noul.jsonl` | 原始响应 70+70 行 |
+| `/home/h/cd-exp/analyze_h8.py` | 全量分析（AUROC/bootstrap/置换检验/Wilson/直方图/翻转/UNCERTAIN；main() 全程跑通 EXIT=0） |
+| `/home/h/cd-exp/run_h8_realstate.py` | 真实 state 漂移实验（12 对 × 2 序 + 漂移对比） |
+| `/home/h/cd-exp/h8-triage.jsonl` / `h8-noul.jsonl` / `h8-realstate.jsonl` | 原始响应 70+70+24 行 |
 | `/home/h/cd-exp/h8-triage-analysis.md` | 分析落盘 |
 
 延迟（三态 70 次）：p50=160 / p95=198 / max=338 ms。
