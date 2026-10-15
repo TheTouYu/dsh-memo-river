@@ -90,3 +90,46 @@ venv/bin/python scripts/local-embed/server.py --port 8099 --device cuda:0 --mode
 - 未做：把 venv 迁到 `~/.local/share/dsh-embed/`、装 unit、跑 acceptance 对本地端点（都留待切换时一起做）。
 
 **原始日志**：`.scratch/whale-fix/embed-lat-*.log`、`.scratch/embed-local/`（venv + 模型缓存）。
+
+---
+
+## 八、工程服务化 + 失败回退远端（2026-10-15 晚，用户令）
+
+### 8.1 服务化（已完成并验证）
+
+- venv 从 `.scratch/embed-local/venv` 迁到 **`~/.local/share/dsh-embed/venv`**（构建产物区会被清）。
+- 用户级单元 `~/.config/systemd/user/dsh-embed.service`（模板在 `scripts/local-embed/dsh-embed.service`）：
+  `Restart=always` / `RestartSec=3` / `TimeoutStartSec=180`；`enable --now` 已生效。
+- **自愈实测**：`kill -9` → systemd 9s 内重启（PID 153353→153936），`/health` 200；**热重启加载仅 1.9s**（冷启动 11.6s，权重已在页缓存）。
+- 服务侧性能复核：单条 p50 **25ms**、批 32 **150ms**、缓存命中 0ms。
+- 注意：systemd 报加载期 CPU 侧内存峰值 **3.2G**（fp32 checkpoint → fp16 转换），故**不设 MemoryMax**。
+
+### 8.2 失败回退远端（已实现并测通，**默认不启用**）
+
+- `src/embed.ts` 改造成**端点泳道**：`lanes[0]=primary`、`lanes[1]=fallback`；每泳道独立跳闸（票 04 语义升格为按端点）。
+  主端点失败（超时/连接拒绝/5xx）→ 自动改打保底端点，向量入**同一缓存**（两端点 cos≈0.99997）。
+- 新配置项（`src/config.ts` embed 段，全部缺省空 = 行为与旧版逐字相同）：
+  `fallbackApiUrl` / `fallbackApiKey`（空=沿用主 key）/ `fallbackModel`（空=沿用主模型）/ `fallbackProviderOrder`。
+- **可见性（用户令：失败要在浏览器页面给不挡事、可复制的报错）**，两处出口共用 `src/embed-health.ts` 台账：
+  1. **对话内通知**：`src/injector.ts` 在每次 pre-step 播报一条 `form:'notice'` 消息（不冒充用户、不挡事），
+     内容 = `formatEmbedEvent()` 生成的完整排障文本（失败端点/错误原文/回退目标/影响面/处置命令）；
+     同一 (kind,lane) 有 **5 分钟冷却**，劣化期不刷屏。
+  2. **调参面板卡片**：`/memo-river/tuning/panel` 新增「嵌入链路（本地优先 + 远端保底）」卡——
+     三类计数（回退/全链失败/恢复）、最近错误、最近事件的**完整全文**（`<pre>` + 一键复制按钮）。
+- 行为专项：`node scripts/probe-embed-fallback.mjs` → **18/18 PASS**，判据覆盖：
+  主端点健康不降级 / 主端点死→回退且向量照常 / 台账文本完整可复制 / 全链失败抛错+记账 /
+  超时路径（挂起服务逼真超时 827/819/820ms）连败 3 次跳闸后**第 4 次 19ms 直接打保底** /
+  回退向量入缓存后两端点全死仍可命中。
+
+### 8.3 切换动作（**尚未执行**，等用户拍板）
+
+`bundle/cordis.patch.yml:91`：
+
+```yaml
+embed: { apiUrl: 'http://127.0.0.1:8099', apiKey: 'local', model: 'baai/bge-m3', dimension: 1024,
+         fallbackApiUrl: 'https://openrouter.ai/api', fallbackApiKey: !!js process.env.TAG_EMBED_KEY || '',
+         fallbackModel: 'baai/bge-m3', fallbackProviderOrder: 'Parasail' }
+```
+
+改完需重启 dsh-web（须先征得用户同意）。验收：真发一次 `memo_write` + 0.5s RSS 采样 + 桶日志 `inject elapsedMs`（预期 4000ms→300ms 级）+ `embed-timeout/failed` 归零；
+再**故意停掉本地服务**（`systemctl --user stop dsh-embed`）发一次写入 → 应在对话里看到回退通知、面板卡片出现 failover 事件、写入照常成功。

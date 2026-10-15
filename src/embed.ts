@@ -11,6 +11,7 @@
  * 命中缓存不重复消耗额度（DESIGN.md §9「嵌入缓存：emb-cache.json」）。
  */
 import { EmbCache } from './emb-cache.js'
+import { embedHealth } from './embed-health.js'
 import { estimateTokens } from './runtime.js'
 
 export interface EmbedClientOptions {
@@ -21,7 +22,45 @@ export interface EmbedClientOptions {
   cachePath: string
   /** 单次请求超时（ms）。 */
   timeoutMs?: number
+  /**
+   * OpenRouter provider 优先序（逗号分隔 slug，如 'Parasail'）；空/未给 = 不发送 provider 字段。
+   * 动机：不指定时 OpenRouter 按价格负载均衡，同一文本可能落到不同 provider，而各家数值实现
+   * 不同（2026-10-15 实测逐元素最大差 3.8e-4~7.3e-4，cos ≥0.99997）→ 嵌入逐位不可复现。指定
+   * order 后负载均衡被关掉（文档：If you have sort or order set, load balancing will be disabled），
+   * 实测同一 provider 连打 3 次逐元素差 0.00e+0。
+   */
+  providerOrder?: string
+  /**
+   * **保底端点**（2026-10-15 用户令）：主端点失败（超时/连接拒绝/5xx）时改打它，成功后向量
+   * 入同一缓存。本地推理上生产后 primary=本地、fallback=远端——本地服务挂了也不至于写不进去。
+   * 缺省 undefined = 不启用回退（行为与旧版逐字相同）。
+   */
+  fallback?: EmbedEndpoint
   logger?: { warn(msg: string): void; info(msg: string): void }
+}
+
+/** provider 优先序解析（'Parasail,DeepInfra' → {order:[...]}）；空 = 请求体不带 provider 字段。 */
+function prefOf(providerOrder: string | undefined): { order: string[] } | undefined {
+  const order = (providerOrder ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+  return order.length > 0 ? { order } : undefined
+}
+
+/** 一个嵌入端点（主 / 保底）。 */
+export interface EmbedEndpoint {
+  apiUrl: string
+  apiKey: string
+  model: string
+  providerOrder?: string
+}
+
+/** 端点运行态（跳闸 + 最近错误）。 */
+interface Lane extends EmbedEndpoint {
+  label: string
+  providerPref: { order: string[] } | undefined
+  failures: number
+  openUntil: number
+  windowMs: number
+  lastError: string | null
 }
 
 /**
@@ -217,12 +256,10 @@ export function closeEmbedTransport(): void {
 export class EmbedClient {
   private readonly cache: EmbCache
   private readonly timeoutMs: number
-  /** 跳闸状态（票 04）。 */
-  private consecutiveFailures = 0
-  private breakerOpenUntil = 0
-  private breakerWindowMs = 0
+  /** 端点泳道：0=主端点，1=保底端点（2026-10-15）。 */
+  private readonly lanes: Lane[]
 
-  /** 上一次失败原因（体检 / fallbackReason 取证用）。 */
+  /** 上一次失败原因（体检 / fallbackReason 取证用）——主/保底最后一次失败的原文。 */
   lastError: string | null = null
 
   constructor(private readonly options: EmbedClientOptions) {
@@ -234,6 +271,44 @@ export class EmbedClient {
       logger: options.logger,
     })
     this.timeoutMs = options.timeoutMs ?? 60_000
+    this.lanes = [
+      this.makeLane('primary', {
+        apiUrl: options.apiUrl,
+        apiKey: options.apiKey,
+        model: options.model,
+        providerOrder: options.providerOrder,
+      }),
+    ]
+    if (options.fallback?.apiUrl) {
+      this.lanes.push(this.makeLane('fallback', options.fallback))
+    }
+  }
+
+  private makeLane(label: string, endpoint: EmbedEndpoint): Lane {
+    return {
+      label,
+      apiUrl: endpoint.apiUrl,
+      apiKey: endpoint.apiKey,
+      model: endpoint.model,
+      providerPref: prefOf(endpoint.providerOrder),
+      failures: 0,
+      openUntil: 0,
+      windowMs: 0,
+      lastError: null,
+    }
+  }
+
+  /** 泳道状态（探针/验收/面板观测用）。 */
+  get lanesState(): Array<{ label: string; endpoint: string; model: string; failures: number; openUntil: number; windowMs: number; lastError: string | null }> {
+    return this.lanes.map((l) => ({
+      label: l.label,
+      endpoint: l.apiUrl,
+      model: l.model,
+      failures: l.failures,
+      openUntil: l.openUntil,
+      windowMs: l.windowMs,
+      lastError: l.lastError,
+    }))
   }
 
   get cacheSize(): number {
@@ -245,13 +320,14 @@ export class EmbedClient {
     return this.cache.stats()
   }
 
-  /** 跳闸状态（探针/验收观测用）。 */
+  /** 跳闸状态（探针/验收观测用）——主端点泳道的口径，旧调用方逐字兼容。 */
   get breaker(): BreakerState {
+    const primary = this.lanes[0]!
     return {
       enabled: BREAKER_ENABLED,
-      consecutiveFailures: this.consecutiveFailures,
-      openUntil: this.breakerOpenUntil,
-      windowMs: this.breakerWindowMs,
+      consecutiveFailures: primary.failures,
+      openUntil: primary.openUntil,
+      windowMs: primary.windowMs,
     }
   }
 
@@ -288,39 +364,81 @@ export class EmbedClient {
     })
 
     if (missing.length > 0) {
-      // 票 04：跳闸窗口内立即失败，绝不持着工作区闸去等一个已知劣化的端点
-      const openLeft = this.breakerOpenUntil - Date.now()
-      if (BREAKER_ENABLED && openLeft > 0) {
-        this.lastError = `embed-circuit-open: 端点连续失败 ${this.consecutiveFailures} 次，退避窗口还剩 ${Math.ceil(openLeft / 1000)}s`
-        throw new Error(this.lastError)
-      }
       const batches: string[][] = []
       for (let i = 0; i < missing.length; i += BATCH_SIZE) batches.push(missing.slice(i, i + BATCH_SIZE))
+      const primary = this.lanes[0]!
+      let succeeded: Lane | null = null
+      let lastErr: unknown = new Error('embed-no-endpoint')
 
-      const results: Float32Array[][] = new Array(batches.length)
-      let cursor = 0
-      const workers = Array.from({ length: Math.min(CONCURRENCY, batches.length) }, async () => {
-        while (cursor < batches.length) {
-          const myIndex = cursor++
-          results[myIndex] = await this.requestWithRetry(batches[myIndex]!, callOpts)
+      // 端点链：主端点优先；失败（超时/连接拒绝/5xx）→ 保底端点。每泳道独立跳闸（票 04），
+      // 本地服务挂掉时跳过它直接走保底，不再每次都吃满超时才回退。
+      for (const lane of this.lanes) {
+        const openLeft = lane.openUntil - Date.now()
+        if (BREAKER_ENABLED && openLeft > 0) {
+          this.lastError = `embed-circuit-open[${lane.label}]: 连续失败 ${lane.failures} 次，退避窗口还剩 ${Math.ceil(openLeft / 1000)}s`
+          lastErr = new Error(this.lastError)
+          continue
         }
-      })
-      try {
-        await Promise.all(workers)
-      } catch (e) {
-        this.noteEmbedFailure()
-        throw e
-      }
-      this.noteEmbedSuccess()
-
-      results.forEach((vectors, b) => {
-        const batch = batches[b]!
-        vectors.forEach((vec, j) => {
-          const text = batch[j]!
-          for (const i of missingIndex.get(text) ?? []) out[i] = vec
-          this.cache.set(text, vec)
+        const results: Float32Array[][] = new Array(batches.length)
+        let cursor = 0
+        const workers = Array.from({ length: Math.min(CONCURRENCY, batches.length) }, async () => {
+          while (cursor < batches.length) {
+            const myIndex = cursor++
+            results[myIndex] = await this.requestWithRetry(lane, batches[myIndex]!, callOpts)
+          }
         })
-      })
+        try {
+          await Promise.all(workers)
+        } catch (e) {
+          lastErr = e
+          this.noteLaneFailure(lane, e)
+          continue
+        }
+        this.noteLaneSuccess(lane)
+        results.forEach((vectors, b) => {
+          const batch = batches[b]!
+          vectors.forEach((vec, j) => {
+            const text = batch[j]!
+            for (const i of missingIndex.get(text) ?? []) out[i] = vec
+            this.cache.set(text, vec)
+          })
+        })
+        succeeded = lane
+        break
+      }
+
+      if (succeeded === null) {
+        // 全部端点失败：写台账（可复制文本）后抛出，由调用方降级（注入跳过 / 写路径拒绝）
+        const tried = this.lanes.map((l) => `${l.label}=${l.apiUrl}`).join(' → ')
+        const reason = this.lastError ?? String((lastErr as Error)?.message ?? lastErr)
+        embedHealth.record({
+          kind: 'all-failed',
+          lane: this.lanes.map((l) => l.label).join('+'),
+          endpoint: this.lanes.map((l) => l.apiUrl).join(' , '),
+          reason: String(reason).slice(0, 120),
+          detail:
+            `嵌入链路全端点失败：${tried} 都打不通（最后一次错误：${reason}）。` +
+            `影响：本次写入会被拒绝、本轮召回会跳过（不是数据损坏——未落库/未注入）。` +
+            `缓存里已有的向量不受影响。`,
+          hint: '本地端点：systemctl --user status dsh-embed；curl -s http://127.0.0.1:8099/health；nvidia-smi 看显存。远端端点：检查网络与 key。',
+        })
+        throw lastErr
+      }
+      if (succeeded !== primary) {
+        // 主端点失败、保底顶上：这是必须让人看见的事件（对话通知 + 面板卡片共用台账）
+        const reason = primary.lastError ?? 'unknown'
+        embedHealth.record({
+          kind: 'failover',
+          lane: primary.label,
+          endpoint: primary.apiUrl,
+          reason: reason.slice(0, 120),
+          detail:
+            `主嵌入端点 ${primary.apiUrl}（${primary.model}）调用失败：${reason}；` +
+            `**已自动回退**到保底端点 ${succeeded.apiUrl}（${succeeded.model}），本次写入/召回按保底端点继续，` +
+            `向量已入同一缓存（两端点 cos≈0.99997，排序不受影响）。`,
+          hint: `本地端点排障：systemctl --user status dsh-embed；curl -s ${primary.apiUrl}/health；journalctl --user -u dsh-embed -n 50；nvidia-smi。`,
+        })
+      }
     }
 
     return out.map((vec, i) => {
@@ -330,12 +448,12 @@ export class EmbedClient {
   }
 
   /** 票 03：按 callOpts.retries 立即重试（无退避，保住墙钟硬顶）；重试耗尽抛最后一次错误。 */
-  private async requestWithRetry(batch: string[], callOpts?: EmbedCallOptions): Promise<Float32Array[]> {
+  private async requestWithRetry(lane: Lane, batch: string[], callOpts?: EmbedCallOptions): Promise<Float32Array[]> {
     const retries = callOpts?.retries ?? 0
     let lastErr: unknown
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        return await this.requestBatch(batch, callOpts?.timeoutMs)
+        return await this.requestBatch(lane, batch, callOpts?.timeoutMs)
       } catch (e) {
         lastErr = e
       }
@@ -343,16 +461,20 @@ export class EmbedClient {
     throw lastErr
   }
 
-  private async requestBatch(batch: string[], timeoutMs?: number): Promise<Float32Array[]> {
-    const url = `${this.options.apiUrl}/v1/embeddings`
+  private async requestBatch(lane: Lane, batch: string[], timeoutMs?: number): Promise<Float32Array[]> {
+    const url = `${lane.apiUrl}/v1/embeddings`
     const transport = await ensureTransport(this.options.logger)
     const init: Record<string, unknown> = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.options.apiKey}`,
+        Authorization: `Bearer ${lane.apiKey}`,
       },
-      body: JSON.stringify({ model: this.options.model, input: batch }),
+      body: JSON.stringify({
+        model: lane.model,
+        input: batch,
+        ...(lane.providerPref ? { provider: lane.providerPref } : {}),
+      }),
       signal: AbortSignal.timeout(timeoutMs ?? this.timeoutMs),
     }
     if (transport.agent) init.dispatcher = transport.agent
@@ -393,29 +515,40 @@ export class EmbedClient {
     })
   }
 
-  /* ────────────── 票 04：写闸指数退避 ────────────── */
+  /* ────────────── 票 04：按泳道的写闸指数退避 + 健康台账 ────────────── */
 
-  private noteEmbedFailure(): void {
+  private noteLaneFailure(lane: Lane, e: unknown): void {
+    const msg = String((e as Error)?.message ?? e)
+    lane.lastError = msg
+    this.lastError = msg
     if (!BREAKER_ENABLED) return
-    this.consecutiveFailures++
-    if (this.consecutiveFailures < BREAKER_THRESHOLD) return
-    this.breakerWindowMs = this.breakerWindowMs === 0 ? BREAKER_BASE_MS : Math.min(this.breakerWindowMs * 2, BREAKER_MAX_MS)
-    this.breakerOpenUntil = Date.now() + this.breakerWindowMs
+    lane.failures++
+    if (lane.failures < BREAKER_THRESHOLD) return
+    lane.windowMs = lane.windowMs === 0 ? BREAKER_BASE_MS : Math.min(lane.windowMs * 2, BREAKER_MAX_MS)
+    lane.openUntil = Date.now() + lane.windowMs
     this.options.logger?.warn(
-      `embed-circuit-open: 连续失败 ${this.consecutiveFailures} 次（${this.lastError ?? '未知'}）` +
-        `→ 退避 ${Math.round(this.breakerWindowMs / 1000)}s；窗口内调用立即失败，不再持闸等超时`,
+      `embed-circuit-open[${lane.label}]: 连续失败 ${lane.failures} 次（${msg.slice(0, 120)}）` +
+        `→ 退避 ${Math.round(lane.windowMs / 1000)}s；窗口内该端点立即跳过（不等于全链失败：还有保底端点）`,
     )
   }
 
-  private noteEmbedSuccess(): void {
-    if (this.breakerWindowMs > 0) {
-      this.options.logger?.info(
-        `embed-circuit-closed: 端点恢复（此前连续失败 ${this.consecutiveFailures} 次，窗口 ${Math.round(this.breakerWindowMs / 1000)}s）`,
-      )
+  private noteLaneSuccess(lane: Lane): void {
+    if (lane.windowMs > 0) {
+      const wasFailures = lane.failures
+      const wasWindow = Math.round(lane.windowMs / 1000)
+      this.options.logger?.info(`embed-circuit-closed[${lane.label}]: 端点恢复（此前连续失败 ${wasFailures} 次，窗口 ${wasWindow}s）`)
+      embedHealth.record({
+        kind: 'recovered',
+        lane: lane.label,
+        endpoint: lane.apiUrl,
+        reason: 'ok',
+        detail: `${lane.label} 端点 ${lane.apiUrl}（${lane.model}）已恢复：此前连续失败 ${wasFailures} 次、退避窗口 ${wasWindow}s，现已正常返回。`,
+        hint: '无需处置。若反复「降级→恢复」，查本地服务稳定性（journalctl --user -u dsh-embed）与显存占用。',
+      })
     }
-    this.consecutiveFailures = 0
-    this.breakerOpenUntil = 0
-    this.breakerWindowMs = 0
+    lane.failures = 0
+    lane.openUntil = 0
+    lane.windowMs = 0
   }
 
   /** 估算一次调用的输入体量（日志用）。 */

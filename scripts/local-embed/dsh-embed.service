@@ -1,8 +1,9 @@
 [Unit]
 # dsh-memo-river 本地 bge-m3 嵌入服务（OpenAI 兼容 /v1/embeddings）
-# 安装（用户级）：cp scripts/local-embed/dsh-embed.service ~/.config/systemd/user/ && systemctl --user daemon-reload
-#                systemctl --user enable --now dsh-embed.service
-# 依赖方向：dsh-web 需要本服务先就绪（首次请求若端点不可达 → 写路径拒绝、注入跳过）
+# 安装：cp scripts/local-embed/dsh-embed.service ~/.config/systemd/user/ \
+#       && systemctl --user daemon-reload && systemctl --user enable --now dsh-embed
+# 依赖方向：dsh-web 的写路径/注入需要本服务先就绪；本服务自身 Restart=always 兜进程级故障，
+# 端点级故障由插件侧「保底端点」兜（src/embed.ts 的 lanes + src/embed-health.ts 台账）。
 Description=Local bge-m3 embedding server for dsh-memo-river (OpenAI-compatible /v1/embeddings)
 After=network.target
 
@@ -10,23 +11,22 @@ After=network.target
 Type=simple
 WorkingDirectory=%h/dsh-plugins/dsh-memo-river
 # ⚠️ 三个环境坑（2026-10-15 实测，缺一个就起不来）：
-#  1) NO_PROXY/no_proxy 里若带 [::1]，httpx 会抛 InvalidURL（方括号形式是它的解析 bug）
-#  2) HF_HUB_OFFLINE=1 要求快照**完整**（不能只下 safetensors/bin 子集），否则拒绝加载
-#  3) 模型仓里没有 safetensors，权重是 pytorch_model.bin（过滤错就只剩 38MB 配置）
+#  1) NO_PROXY/no_proxy 里若带 [::1]，httpx 抛 InvalidURL（方括号触发它的解析 bug）——两个大小写都要设
+#  2) HF_HUB_OFFLINE=1 要求快照**完整**，只下权重子集会被判 incomplete 拒绝加载
+#  3) 模型仓没有 safetensors，权重是 pytorch_model.bin（过滤错只剩 38MB 配置）
 Environment=NO_PROXY=localhost,127.0.0.1,::1
 Environment=no_proxy=localhost,127.0.0.1,::1
 Environment=HF_HUB_OFFLINE=1
-# 首次冷启动/需要重新拉取时用 hf-mirror（直连约 5.7MB/s；走代理仅 ~1MB/s）
+# 需要重拉/首次下载时再开（直连 hf-mirror 约 5.7MB/s；走代理仅 ~1MB/s）
 # Environment=HF_ENDPOINT=https://hf-mirror.com
-# 模型快照（完整快照路径；也可写 BAAI/bge-m3 让它自己解析缓存）
+Environment=LOCAL_EMBED_VENV=%h/.local/share/dsh-embed/venv
 Environment=LOCAL_EMBED_SNAPSHOT=%h/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181
 ExecStart=/bin/sh -c 'exec "$LOCAL_EMBED_VENV/bin/python" scripts/local-embed/server.py --port 8099 --device cuda:0 --model "$LOCAL_EMBED_SNAPSHOT"'
-Environment=LOCAL_EMBED_VENV=%h/.local/share/dsh-embed/venv
 Restart=always
 RestartSec=3
-# 首启加载模型 ~12s + CUDA 预热，给足启动窗口
-TimeoutStartSec=120
-# GPU 常驻约 1.15GB（fp16）/ 6.14GB；不设 MemoryMax（模型在显存里，进程 RSS 很小）
+# 冷启动要加载模型 + CUDA 初始化（实测 ~12s），给足启动窗口
+TimeoutStartSec=180
+# 显存常驻约 1.15GB（fp16）；不设 MemoryMax——模型在显存，进程 RSS 很小（~1GB CPU 侧封顶太多）
 
 [Install]
 WantedBy=default.target

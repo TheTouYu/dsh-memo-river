@@ -18,6 +18,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Config as ConfigSchema } from './config.js'
 import type { Config } from './config.js'
+import { embedHealth } from './embed-health.js'
 import { bucketQueueStats, type BucketQueueEntry } from './drafts.js'
 
 /** 可调键清单（面板按此渲染；扩键只加这里）。 */
@@ -170,6 +171,8 @@ export interface TuningSnapshot {
   /** 票05：各桶草稿队列可见性（面板顶部常显，含 pending=0 的桶；只读 pending/ 实际文件）。
    *  票06 扩展位：守护预审三态标记将作为每桶条目的额外字段挂进同一数组。 */
   draftQueue: BucketQueueEntry[]
+  /** 嵌入链路健康台账（2026-10-15 用户令：失败要看得见且可复制）。只读快照。 */
+  embedHealth: ReturnType<typeof embedHealth.snapshot>
 }
 
 /** 面板读取：spec + 三层值 + 活跃会话清单 + 草稿队列读数。 */
@@ -187,6 +190,7 @@ export function tuningSnapshot(
     session: Object.fromEntries(session),
     sessions: listSessions(),
     draftQueue: bucketQueueStats(),
+    embedHealth: embedHealth.snapshot(),
   }
 }
 
@@ -382,6 +386,14 @@ table.q tr.tot td{font-weight:700;border-bottom:2px solid #333845}
 <table class="q" id="queue"></table>
 <div class="hint">计数 = pending/ 目录实际 .md 文件数；队列空显示 0。可对模型说「看草稿 / 批准 / 丢弃」处理积压。</div>
 <div class="hint">预审三态（票06）：绿 <b>批</b>=可一键批 / 黄 <b>人</b>=需人工 / 红 <b>丢</b>=建议丢弃——守护循环只读预审（伴随 .status.json，随守护轮刷新），绝不代批；灰 <b>?</b>=尚未审到。</div>
+<h2>嵌入链路（本地优先 + 远端保底）</h2>
+<div id="emb"></div>
+<pre id="embpre" style="background:#1e2129;border:1px solid #333845;border-radius:6px;padding:10px;white-space:pre-wrap;word-break:break-all;font-size:12px;max-height:260px;overflow:auto"></pre>
+<div class="bar">
+  <button id="embcopy" type="button">复制报错全文</button>
+  <span class="hint" id="embcopyok"></span>
+</div>
+<div class="hint">回退事件与全链失败都会在这里留全文（也有一条不挡事的对话内通知，发一次、5 分钟内不重复）。本地端点排障：<code>systemctl --user status dsh-embed</code> ・ <code>curl -s http://127.0.0.1:8099/health</code> ・ <code>journalctl --user -u dsh-embed -n 50</code></div>
 <div class="bar">
   <label>生效范围：
     <select id="scope"><option value="session">仅此会话</option><option value="preset">预设级（全工作区，落盘）</option></select>
@@ -405,6 +417,19 @@ function pcBadges(p){
   if(p.discard)out.push('<span class="pk discard" title="建议丢弃">丢'+p.discard+'</span>');
   if(p.unchecked)out.push('<span class="pk unchecked" title="尚未审到">?'+p.unchecked+'</span>');
   return out.join('')||'<span class="hint">—</span>';
+}
+function renderEmbed(E){
+  if(!E){return}
+  const C=E.counters||{};
+  const L=[['failover','主端点失败→已回退'],['all-failed','全链失败'],['recovered','端点恢复']];
+  $('emb').innerHTML='<div class="hint">'+L.map(x=>x[1]+'：<b>'+((C[x[0]])||0)+'</b>').join(' ｜ ')+
+    (E.lastError?' ｜ <span class="err">最近错误：'+E.lastError+'</span>':' ｜ 最近无错误')+'</div>';
+  const ev=(E.events||[])[0];
+  $('embpre').textContent=ev
+    ? ('['+new Date(ev.at).toLocaleString()+'] '+ev.kind+' @'+ev.lane+' ('+ev.endpoint+')
+'+ev.detail+'
+处置：'+ev.hint)
+    : '（暂无事件：主端点工作正常）';
 }
 function renderQueue(Q){
   const tot=Q.reduce((a,b)=>a+(b.pending||0),0);
@@ -430,6 +455,7 @@ async function load(){
   const d=await(await fetch('/memo-river/tuning',{cache:'no-store'})).json();
   SPEC=d.spec;DEF=d.defaults;PRE=d.preset;SESSIONS=d.sessions||[];
   renderQueue(d.draftQueue||[]);
+  renderEmbed(d.embedHealth);
   SESS={};
   $('session').innerHTML='<option value="">（预设级，不选会话）</option>'+
     SESSIONS.map(s=>'<option value="'+s.sessionId+'">'+s.sessionId.slice(0,14)+'… '+(s.cwd||'').split('/').pop()+'</option>').join('');
@@ -444,6 +470,12 @@ async function load(){
     SPEC.forEach(s=>{$('v_'+s.key).value=valOf(s.key);const t=srcOf(s.key);const el=$('s_'+s.key);el.textContent=t[0];el.className='src '+t[1];});
   };
 }
+$('embcopy').onclick=async()=>{
+  const t=$('embpre').textContent||'';
+  try{await navigator.clipboard.writeText(t);$('embcopyok').textContent='已复制';}
+  catch(e){const r=document.createRange();r.selectNodeContents($('embpre'));const sel=getSelection();sel.removeAllRanges();sel.addRange(r);$('embcopyok').textContent='已选中，请按 Ctrl+C';}
+  setTimeout(()=>{$('embcopyok').textContent=''},4000);
+};
 $('save').onclick=async()=>{
   const values={};SPEC.forEach(s=>{const v=Number($('v_'+s.key).value);if(Number.isFinite(v))values[s.key]=v;});
   const scope=$('scope').value,session=$('session').value||undefined;

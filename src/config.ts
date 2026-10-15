@@ -17,6 +17,14 @@ export interface EmbedConfig {
   dimension: number
   /** OpenRouter provider 优先序（逗号分隔 slug，如 'Parasail'）；空 = 不干预路由。 */
   providerOrder: string
+  /** 保底端点（2026-10-15）：主端点失败时改打它；空 = 不启用回退。 */
+  fallbackApiUrl: string
+  /** 保底端点 key；空 = 沿用主端点 key。 */
+  fallbackApiKey: string
+  /** 保底端点模型名；空 = 沿用主端点模型名。 */
+  fallbackModel: string
+  /** 保底端点 provider 优先序。 */
+  fallbackProviderOrder: string
 }
 
 export interface InjectConfig {
@@ -236,6 +244,16 @@ export const Config: z<Config> = z.object({
       // provider 连打 3 次逐元素差 0.00e+0。留空 = 不发送 provider 字段：非 OpenRouter
       // 端点与旧行为完全不变。
       providerOrder: z.string().default(''),
+      // ── 保底端点（2026-10-15 用户令）────────────────────────────────────────
+      // 主端点失败（超时/连接拒绝/5xx）时改打它，成功后向量入同一缓存（两端点 cos≈0.99997，
+      // 实测见 docs/local-embed-2026-10-15.md）。典型配置：主=本地 http://127.0.0.1:8099，
+      // 保底=https://openrouter.ai/api。留空 = 不启用回退（行为与旧版逐字相同）。
+      fallbackApiUrl: z.string().default(''),
+      // 缺省沿用主端点的 key（同provider族换端点时免配）；跨 provider 必须显式给。
+      fallbackApiKey: z.string().default(''),
+      // 缺省沿用主端点模型名。
+      fallbackModel: z.string().default(''),
+      fallbackProviderOrder: z.string().default(''),
     })
     .default({} as EmbedConfig),
 

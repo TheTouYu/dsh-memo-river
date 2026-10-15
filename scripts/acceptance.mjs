@@ -167,6 +167,12 @@ function makeConfig(overrides = {}) {
    * （2026-09-28 桶日志实锤：#16 step2 embed-timeout elapsedMs=3002、#11 同型）——
    * 那测的是 embed 服务抖动而非插件逻辑。抬到 10s，显式 override 仍优先。 */
   cfg.inject.embedTimeoutMs = overrides.inject?.embedTimeoutMs ?? 10_000
+  /* provider 钉死：套件的嵌入走 config.env（openrouter/baai/bge-m3），而 OpenRouter 默认按价格
+   * 负载均衡——同一文本会落到 DeepInfra/Parasail 两家，逐元素差 3.8e-4~7.3e-4（2026-10-15 实测，
+   * scripts/probe-embed-provider-routing.mjs 邻件）。方向几乎不变（cos ≥0.99997），但**逐位不可
+   * 复现**，会让「同一查询、并发 == 串行、逐名次比对」这类恒等断言（#10）随机变红——那测的是路由
+   * 抖动而非插件逻辑。这里与生产 bundle 同策：钉 Parasail。显式 override 仍优先。 */
+  cfg.embed.providerOrder = overrides.embed?.providerOrder ?? 'Parasail'
   return cfg
 }
 
@@ -426,12 +432,26 @@ hr('#9 不阻塞主流程（拔掉嵌入 API）')
 
   const appended = decision ? decision.messages.length - claimed.length : -1
   const skipLine = logs.find((l) => l.includes('inject-skip')) ?? ''
-  const pass = deadErr !== null && vecs === null && threw === null && appended === 1 && skipLine.includes('embed-failed')
-  check(9, '嵌入不可用 → 注入跳过 + 记日志，主流程正常返回', pass, [
+  /* D214 降级可见化：嵌入失败时除了 harness 的 runtime-context，插件还会追加**一条短通知**
+   * （「召回未生效」，form=notice）——这不是注入块（不含 BLOCK_CLOSE），行为上的不变量是
+   * 「不注入记忆 + 主流程不阻塞 + 失败对模型可见」。 */
+  const noticeMsg = decision ? decision.messages.slice(claimed.length).find((m) => (m?.source?.kind === 'memo-river')) : null
+  const noticeText = noticeMsg ? msgText(noticeMsg) : ''
+  const pass =
+    deadErr !== null &&
+    vecs === null &&
+    threw === null &&
+    appended === 2 &&
+    !noticeText.includes(BLOCK_CLOSE) &&
+    noticeText.includes('召回未生效') &&
+    skipLine.includes('embed-failed')
+  check(9, '嵌入不可用 → 注入跳过 + 记日志 + 一条模型可见的失败通知，主流程正常返回', pass, [
     `9a 真死端点抛错：${deadErr}`,
     `9a 耗时 ${deadMs}ms（未挂起）`,
     `9b seam 未抛异常：${threw === null}（异常=${threw}）`,
-    `9b decision 额外追加的消息数 = ${appended}（1 = 只追加了 harness 的 runtime-context，插件没追加注入块）`,
+    `9b decision 额外追加的消息数 = ${appended}（2 = harness 的 runtime-context + 插件的一条「召回未生效」通知；0 注入块）`,
+    `9b 通知首行：${(noticeText.split('\n')[0] ?? '(无)').slice(0, 120)}`,
+    `9b 不含 BLOCK_CLOSE（不冒充召回块）= ${!noticeText.includes(BLOCK_CLOSE)}`,
     `9b seam 耗时 ${seamMs}ms`,
     `9b 日志行：${skipLine || '(未捕获)'}`,
   ])

@@ -36,6 +36,7 @@ import { join } from 'node:path'
 import type { Config } from './config.js'
 import { recordOmega, recordUsage } from './health.js'
 import { BLOCK_CLOSE, continuationTail, DelegationExtras, renderInjection, renderRecallNotice, renderSkipNotice, renderWriteNudge } from './render.js'
+import { embedHealth, formatEmbedEvent } from './embed-health.js'
 import { coldTagSuggest, sameAxisHit, scanTagAxis } from './nudge-guide.js'
 import { buildQueryField, candidateKey, type RecallCandidate, type RecallOptions, type RecallOutcome } from './recall.js'
 import { federatedRecall } from './federate.js'
@@ -676,6 +677,17 @@ export function createWriteNudgeMessage(text: string): unknown {
   })
 }
 
+/**
+ * 组装「嵌入链路降级」通知消息（2026-10-15 用户令：失败必须在不挡事的前提下**看得见、可复制**）。
+ * 内容是完整排障文本（谁失败/错误原文/回退到哪/怎么查），用户复制走即可开工；有冷却防刷屏。
+ */
+export function createEmbedHealthMessage(text: string): unknown {
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: injectionSource('notice', { summary: 'memo-river 嵌入链路通知' }),
+  })
+}
+
 /** 组装「召回未生效」通知消息（同 `form: 'notice'`：插件通知，非召回素材——不冒充用户的话）。 */
 export function createRecallNoticeMessage(text: string): unknown {
   return createUserMessage({
@@ -1069,6 +1081,21 @@ export function installInjection(
                 }
               }
             }
+          }
+        }
+        /* 嵌入链路降级可见化（2026-10-15 用户令）：主端点失败→回退、全链失败、恢复，都要让
+         * 用户在浏览器页面看到且能复制。台账在 embed.ts 记，这里只播报（冷却与去重见 embed-health.ts）。 */
+        const embedEvent = embedHealth.pending()
+        if (embedEvent) {
+          embedHealth.markAnnounced(embedEvent)
+          extra.push(createEmbedHealthMessage(formatEmbedEvent(embedEvent)))
+          try {
+            deps.log(
+              'info',
+              `embed-health-notice kind=${embedEvent.kind} lane=${embedEvent.lane} reason=${String(embedEvent.reason).slice(0, 80)}`,
+            )
+          } catch {
+            /* 日志失败不阻断注入 */
           }
         }
         if (nudge) {

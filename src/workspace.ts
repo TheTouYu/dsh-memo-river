@@ -8,7 +8,7 @@ import { existsSync, readdirSync, statSync } from 'node:fs'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { basename, join } from 'node:path'
 import type { Config } from './config.js'
-import { closeEmbedTransport, EmbedClient, embedTransportIntent } from './embed.js'
+import { closeEmbedTransport, EmbedClient, embedTransportIntent, type EmbedEndpoint } from './embed.js'
 import { MemoEngine, loadKnowledgeBaseManager } from './native.js'
 import {
   Logger,
@@ -29,8 +29,12 @@ export interface ResolvedEmbed {
   apiKey: string
   model: string
   dimension: number
+  /** OpenRouter provider 优先序（逗号分隔 slug）；空串 = 不干预路由。 */
+  providerOrder: string
   /** 来源标注（取证用）：config / config.env / none。 */
   source: 'config' | 'config.env' | 'none'
+  /** 保底端点（2026-10-15）：主端点失败时改打它；undefined = 不启用回退。 */
+  fallback?: EmbedEndpoint
 }
 
 /** 持闸工作区集合（AsyncLocalStorage）：withDb 同上下文重入直通判定用。 */
@@ -71,6 +75,11 @@ export class WorkspaceRuntime {
       model: resolved.model,
       dimension: resolved.dimension,
       cachePath: paths.embCachePath,
+      providerOrder: resolved.providerOrder,
+      // 2026-10-15 用户令：主端点（本地推理）失败自动回退远端，且失败要看得见（见 embed-health.ts）
+      ...(resolved.fallback ? { fallback: resolved.fallback } : {}),
+      // 2026-10-15：emb-cache load() 的隔离/自愈告警此前因未接线而静默（BUG-1014 复盘发现的观测缺口）
+      logger: this.logger,
     })
     this.engine = new MemoEngine({
       vcpRoot: config.native.vcpRoot,
@@ -269,7 +278,26 @@ export function resolveEmbed(config: Config, paths: WorkspacePaths): ResolvedEmb
   const dimension = config.embed.dimension || (Number.isFinite(envDim) && envDim > 0 ? envDim : 3072)
   const source: ResolvedEmbed['source'] =
     apiUrl.from === 'none' || apiKey.from === 'none' ? 'none' : apiKey.from === 'config' ? 'config' : 'config.env'
-  return { apiUrl: apiUrl.value, apiKey: apiKey.value, model: model.value || 'gemini-embedding-2-preview', dimension, source }
+  // 保底端点：只在显式配了 fallbackApiUrl 且与主端点不同源时启用
+  const fbUrl = (config.embed.fallbackApiUrl ?? '').trim()
+  const fallback: EmbedEndpoint | undefined =
+    fbUrl && fbUrl !== apiUrl.value
+      ? {
+          apiUrl: fbUrl,
+          apiKey: (config.embed.fallbackApiKey ?? '').trim() || apiKey.value,
+          model: (config.embed.fallbackModel ?? '').trim() || model.value || 'gemini-embedding-2-preview',
+          providerOrder: config.embed.fallbackProviderOrder ?? '',
+        }
+      : undefined
+  return {
+    apiUrl: apiUrl.value,
+    apiKey: apiKey.value,
+    model: model.value || 'gemini-embedding-2-preview',
+    dimension,
+    providerOrder: config.embed.providerOrder ?? '',
+    source,
+    ...(fallback ? { fallback } : {}),
+  }
 }
 
 /* ────────────── 工作区注册表（按 cwd 哈希键；会话状态不在此） ────────────── */
