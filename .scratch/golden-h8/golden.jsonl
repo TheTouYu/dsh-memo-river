@@ -1,0 +1,35 @@
+{"id":"G01","layer":"pos","old":214,"new":230,"label":"SUPERSEDED","reason":"D230 明言「旧报告作废」：skip 率 45.3%→超顶 0%（8s 预算），数字全面反转；旧端点故障结论不再成立","src":"账本外H3-P1"}
+{"id":"G02","layer":"pos","old":248,"new":262,"label":"SUPERSEDED","reason":"主断言「本机不可行」被推翻：GPU 0.15s/前向（185 条×6 问法实测），AUC 0.679 只够软排序；CPU 数字仍真但非主断言","src":"账本248→262+H3-P2"}
+{"id":"G03","layer":"pos","old":173,"new":175,"label":"COMPATIBLE","reason":"金标翻案：H3 误当断言冲突，实为排障推进链——D173 证伪 mmap 假说的排除结论被 D175 的 fcntl 定性证实，无断言推翻","src":"H3-P3·金标审出误标"}
+{"id":"G04","layer":"mix","old":187,"new":194,"label":"NEEDS-CONFIRMATION","reason":"两真一半：uinput 被 D194 硬证据确证、ydotool 乱键复现一致；但 portal「精确免授权」被修正为「只对一半（字母乱键）」——部分推翻","src":"H3-P4·两真一半"}
+{"id":"G05","layer":"pos","old":274,"new":282,"label":"SUPERSEDED","reason":"D282 明言冻结条件①「高冗余池」被证伪（全库 0 对 cos>0.90），冻结→退役定谳","src":"H3-P5"}
+{"id":"G06","layer":"pos","old":265,"new":272,"label":"SUPERSEDED","reason":"数字断言级勘误：-49%/662ms → -55%/860ms 定案（8 轮受控复测+服务端日志核验）；方向一致但引用旧数字即误导","src":"H3-P6"}
+{"id":"G07","layer":"pos","old":309,"new":310,"label":"SUPERSEDED","reason":"账本正式账：H3「签零收益」的解释范围被用户两连质疑修正——证伪的只是最弱形态；D309 数据有效结论作废","src":"账本309→310"}
+{"id":"G08","layer":"mix","old":226,"new":230,"label":"COMPATIBLE","reason":"D230「旧报告作废」指 D208/D214 系，非 D226；D226 的切换生效裁决被 D230 实测证实（超顶归零）","src":"簇0.808"}
+{"id":"G09","layer":"mix","old":245,"new":246,"label":"COMPATIBLE","reason":"调研中期→完结：中期数字（LoCoMo 0.777/三平面）被完结确认+扩展（22 决策点），无断言反转","src":"簇0.844"}
+{"id":"G10","layer":"mix","old":269,"new":271,"label":"COMPATIBLE","reason":"中期自查推导「待文献确证」→硬数字收割确证+补强（MMR B 级/DPP 对照），推进非推翻","src":"簇0.852"}
+{"id":"G11","layer":"mix","old":242,"new":243,"label":"COMPATIBLE","reason":"两轮调查不同侧面：第一轮性能/可行性 vs 第二轮中文证据（官方零中文评测）——互补","src":"簇0.810"}
+{"id":"G12","layer":"mix","old":180,"new":182,"label":"COMPATIBLE","reason":"弹药→实测：D182 推翻的是 HANDOFF 文档前提（第三者），D180 的通道在位判断被证实","src":"簇0.815"}
+{"id":"G13","layer":"mix","old":294,"new":295,"label":"COMPATIBLE","reason":"两波复盘各自覆盖不同时间窗（10-14 波 vs 10-15 波），独立并列","src":"簇0.809"}
+{"id":"G14","layer":"mix","old":5,"new":6,"label":"COMPATIBLE","reason":"盲区诊断→两刀落地：诊断断言（读写两侧失明）被修复行动确认，问题→解决链","src":"簇0.810"}
+{"id":"G15","layer":"mix","old":26,"new":31,"label":"COMPATIBLE","reason":"票06/票04校准 vs 票08落地：A 锚拼接判断被延续落地（gU@0.55∨gA@0.62），无反转","src":"簇0.826"}
+{"id":"G16","layer":"mix","old":301,"new":302,"label":"COMPATIBLE","reason":"闸①②③ vs 闸④：不同闸门独立取证，互补拼接成完整诊断","src":"簇0.832"}
+{"id":"G17","layer":"neg","old":42,"new":44,"label":"COMPATIBLE","reason":"票01（注入侧）与票03（写侧）不同路径的勘察，设计均被后续落地确认","src":"簇0.881"}
+{"id":"G18","layer":"neg","old":44,"new":47,"label":"COMPATIBLE","reason":"设计判定→落地提交（c2f63e3）：设计判断被实现确认，含一处有意的语义变化声明","src":"簇0.881"}
+{"id":"G19","layer":"neg","old":27,"new":29,"label":"COMPATIBLE","reason":"票③（merge 执行）与票④（候选检测）不同功能票，链路互补","src":"簇0.867"}
+{"id":"G20","layer":"neg","old":29,"new":36,"label":"COMPATIBLE","reason":"票④落地→六票收官：终验确认全链，无断言反转","src":"簇0.867"}
+{"id":"G21","layer":"neg","old":176,"new":178,"label":"COMPATIBLE","reason":"设计定稿→落地进度：三层设计被逐文件落实","src":"簇0.898"}
+{"id":"G22","layer":"neg","old":178,"new":185,"label":"COMPATIBLE","reason":"进度→验收：连跑 3 次零崩溃确认三层有效；验收期修的两个 bug 是实现细节非设计断言推翻","src":"簇0.898"}
+{"id":"G23","layer":"neg","old":271,"new":273,"label":"COMPATIBLE","reason":"硬数字→收官定谳：D269 推导被数值确证（六位小数全等），新增证据","src":"簇0.852"}
+{"id":"G24","layer":"neg","old":186,"new":188,"label":"COMPATIBLE","reason":"票09a（topology 半边）→票09 收官（dtsc 半边）：两半拼全链，均 PASS","src":"簇0.843"}
+{"id":"G25","layer":"neg","old":50,"new":54,"label":"COMPATIBLE","reason":"开工设计→完成提交（3db8709）：设计被实现确认（两处实测修正属精化）","src":"簇0.806"}
+{"id":"G26","layer":"neg","old":62,"new":69,"label":"COMPATIBLE","reason":"勘察定盘→落地（5fba02c）：三连锁效应是落地的副作用新发现，非勘察判断推翻","src":"簇0.811"}
+{"id":"G27","layer":"neg","old":70,"new":72,"label":"COMPATIBLE","reason":"票04 勘察→代码落地：双权重设计照进代码，构建绿","src":"簇0.813"}
+{"id":"G28","layer":"neg","old":81,"new":204,"label":"COMPATIBLE","reason":"落地报告 vs 自动批准草稿（机械摘要重复同事件）——真实场景该 merge 的冗余记录，无断言冲突","src":"簇0.815"}
+{"id":"G29","layer":"neg","old":82,"new":205,"label":"COMPATIBLE","reason":"同 G28 型：完成草稿机械重复落地报告","src":"簇0.862"}
+{"id":"G30","layer":"neg","old":32,"new":34,"label":"COMPATIBLE","reason":"票⑥A 修复→收官：根修验证 12/12 逐位一致+B 半落地","src":"簇0.824"}
+{"id":"G31","layer":"neg","old":174,"new":179,"label":"COMPATIBLE","reason":"立项+票01/02 → 一日四票：campaign 推进链","src":"簇0.816"}
+{"id":"G32","layer":"neg","old":38,"new":39,"label":"COMPATIBLE","reason":"范围锁定/数据源地图→八项结论：方法论被使用并产出结论","src":"簇0.806"}
+{"id":"G33","layer":"neg","old":60,"new":75,"label":"COMPATIBLE","reason":"九票启动→终验：9/9 done 终验确认；红线失守是效率取证新发现非推翻","src":"簇0.803"}
+{"id":"G34","layer":"pos","old":172,"new":187,"label":"SUPERSEDED","reason":"D187 明言「推翻 D172/BENCHMARK.md 的根因结论」：通道矩阵反转（uinput 活/检测器假阴性/portal 直通）","src":"簇外补·正文明言推翻"}
+{"id":"G35","layer":"pos","old":208,"new":230,"label":"SUPERSEDED","reason":"D230「旧报告作废」实指：D208 的 skip 45-58%/半数静默跳过在新链路下超顶归零，故障结论整体失效","src":"簇外补·同题作废"}
