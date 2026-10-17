@@ -148,6 +148,14 @@ export interface SessionState {
   activeMsAnchor: number
   /** 上次 pre-step 观测到的会话日志长度（memo_write 增量扫描的游标）。 */
   lastObservedLogLength: number
+  /**
+   * §2 修法3（2026-10-17 PLAN「两真会话注入通道工程优化」）：本会话最近的**自己写入**足迹
+   * （memo_write/update/merge/approve 成功时由 tools.ts 上报）——写入回声冷却的判据。
+   *
+   * 只记本会话自己的写入（D334 反例：子代理在子会话写入、父会话注入该条目正是
+   * delegation 变体的设计目标，不做跨会话/按桶冷却）。有界（RECENT_WRITES_MAX）。
+   */
+  recentWrites: Array<{ fileId: number; chunkId: number; at: number }>
   /** 注入次数 / 跳过次数（体检与日志）。 */
   injectedCount: number
   skippedCount: number
@@ -207,6 +215,7 @@ export function getSession(sessionId: string, cwd: string | null): SessionState 
     activeMsAnchor: 0,
     nudgeAnchorChars: 0,
     lastObservedLogLength: 0,
+    recentWrites: [],
     injectedCount: 0,
     skippedCount: 0,
     inflight: null,
@@ -248,4 +257,21 @@ export function resetSessionAudit(sessionId: string): void {
   if (!state) return
   state.audits = []
   state.systemHashes = []
+}
+
+/* ────────────── §2 修法3（2026-10-17）：写入回声冷却的会话侧记账 ────────────── */
+
+/** recentWrites 有界上限（一次会话密集产出期的写入数远小于此；超出丢最旧）。 */
+export const RECENT_WRITES_MAX = 24
+
+/**
+ * 记一笔「本会话自己的成功写入」（fileId+chunkId 都记——候选匹配时两个口径都查：
+ * RecallCandidate.id 是 chunk id、fileId 是另一套编号，双口径双胞胎教训 D108）。
+ * 幂等边界：tools.ts 只在写入成功路径调用；写入被闸门拒绝不记（内容没进库，无回声可言）。
+ */
+export function noteRecentWrite(state: SessionState, fileId: number, chunkId: number, at = Date.now()): void {
+  state.recentWrites.push({ fileId, chunkId, at })
+  if (state.recentWrites.length > RECENT_WRITES_MAX) {
+    state.recentWrites.splice(0, state.recentWrites.length - RECENT_WRITES_MAX)
+  }
 }

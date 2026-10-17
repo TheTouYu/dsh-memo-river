@@ -34,7 +34,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Config } from './config.js'
-import { recordOmega, recordUsage } from './health.js'
+import { recordOmega, recordUsage, readUsageLedger, type UsageEntry } from './health.js'
 import { BLOCK_CLOSE, continuationTail, DelegationExtras, renderInjection, renderRecallNotice, renderSkipNotice, renderWriteNudge } from './render.js'
 import { embedHealth, formatEmbedEvent } from './embed-health.js'
 import { coldTagSuggest, sameAxisHit, scanTagAxis } from './nudge-guide.js'
@@ -296,6 +296,205 @@ export function filterSuperseded(selected: readonly RecallCandidate[]): {
   return { kept, duplicated }
 }
 
+/* ═══════════ §2/§4（2026-10-17 PLAN「两真会话注入通道工程优化」）选择链新滤刀 ═══════════
+ * 三刀都遵循「只剔不补 + dropped 归因可见」的既有约定（回填席位 = 用更弱条目换跳过，
+ * 总量不降反升——2026-10-15 首版实测 #12/#17 双红教训）。只作用于**本桶**候选
+ * （c.srcBucket undefined）：台账/recentWrites 的 id 都在本桶编号空间，父桶同名 id 是
+ * 另一篇日记，误伤概率虽小但零容忍。 */
+
+/**
+ * §2 修法3：写入回声冷却——本会话刚写入的条目在冷却窗内不占席位。
+ *
+ * 机理（11 例两会话实锤，PLAN §2）：memo_write 的 tool-call 参数携带全文 → 内容已在
+ * 上下文里；但条目级去重只反查**注入块** blockHash，拦不住「写入→下个请求边界以
+ * 召回形态注回」（D331 写入 7 秒注回）。写入行为本身推高时效/KNN 排名，密集产出期
+ * 每次写入都触发一次纯冗余注入。冷却判据 = SessionState.recentWrites（**本会话自己的
+ * 写入**；D334 反例：子代理写入对父会话是 delegation 目标，不冷却）。
+ */
+export function filterRecentWriteEcho(
+  selected: readonly RecallCandidate[],
+  state: SessionState,
+  cooldownMs: number,
+  now = Date.now(),
+): { kept: RecallCandidate[]; echoed: Array<{ id: number; title: string }> } {
+  const kept: RecallCandidate[] = []
+  const echoed: Array<{ id: number; title: string }> = []
+  if (cooldownMs <= 0 || state.recentWrites.length === 0) {
+    return { kept: [...selected], echoed }
+  }
+  for (const c of selected) {
+    if (c.srcBucket === undefined) {
+      const inCooldown = state.recentWrites.some(
+        // fileId>0 守卫：tools.ts 无 fileId 时记 -1 哨兵，不参与 fileId 匹配（chunkId 匹配仍精确）。
+        (w) => now - w.at < cooldownMs && ((w.fileId > 0 && w.fileId === c.fileId) || w.chunkId === c.id),
+      )
+      if (inCooldown) {
+        echoed.push({ id: c.id, title: c.title })
+        continue
+      }
+    }
+    kept.push(c)
+  }
+  return { kept, echoed }
+}
+
+/** §2 修法2：过注入判定窗（24h；本会话口径）。 */
+export const OVER_INJECT_WINDOW_MS = 24 * 3_600_000
+/** §2 修法2：主动使用豁免窗（7d 内被 memo_recall 主动召回过 = 证明有引用价值，不剔）。 */
+export const OVER_INJECT_ACTIVE_EXEMPT_MS = 7 * 24 * 3_600_000
+
+/**
+ * §2 修法2：条目级注入频次上限——**本会话** 24h 窗内已注入 ≥2 次且 7d 无主动召回 → 不占席位。
+ *
+ * 计窗口径 = SessionState.audits（本会话每次真注入的 selectionKeys+at）——首版用桶级台账
+ * recentP 计窗，验收实测**跨会话误伤**：同桶多会话互相累计（他会注入对「本会话重复」判据
+ * 是噪声——别的会话注入过不代表本会话上下文里有）；生产目标形态是 D3@常识库**单会话**跨
+ * 压缩 7 连注。台账（ledger）只承担「主动召回豁免」——active 是价值证明，跨会话成立。
+ *
+ * 「未产生引用」的工程代理：台账无真·引用追踪，近期主动召回过 = 模型曾为它深挖（价值已证）；
+ * 纯被动反复出现 = 每次都是零收益重播。
+ */
+export function filterOverInjected(
+  selected: readonly RecallCandidate[],
+  state: SessionState,
+  homeBucket: string,
+  ledger: Map<number, UsageEntry> | null,
+  now = Date.now(),
+  windowMs = OVER_INJECT_WINDOW_MS,
+  activeExemptMs = OVER_INJECT_ACTIVE_EXEMPT_MS,
+): { kept: RecallCandidate[]; overInjected: Array<{ id: number; title: string }> } {
+  const kept: RecallCandidate[] = []
+  const overInjected: Array<{ id: number; title: string }> = []
+  const windowKeys = new Map<string, number>()
+  for (const a of state.audits) {
+    if (now - a.at >= windowMs) continue
+    for (const k of a.selectionKeys) windowKeys.set(k, (windowKeys.get(k) ?? 0) + 1)
+  }
+  if (windowKeys.size === 0) return { kept: [...selected], overInjected }
+  for (const c of selected) {
+    if (c.srcBucket === undefined) {
+      const n = windowKeys.get(candidateKey(c, homeBucket)) ?? 0
+      const e = ledger?.get(c.fileId)
+      const activeExempt = !!e && e.active > 0 && e.lastActiveAt !== null && now - e.lastActiveAt < activeExemptMs
+      if (n >= 2 && !activeExempt) {
+        overInjected.push({ id: c.id, title: c.title })
+        continue
+      }
+    }
+    kept.push(c)
+  }
+  return { kept, overInjected }
+}
+
+export const WEAK_SIGNAL_KNN_GUARD = 0.7
+
+/**
+ * §4 修法③：无锚无拓扑且 knn 弱的条目不占席位（「搭主题便车」形态：D31/D33 在元操作期
+ * 被查询场词汇带进池，anchor=+0.000 topology=+0.000）。护栏：本批 top-1 与 knnScore ≥
+ * WEAK_SIGNAL_KNN_GUARD 的强命中豁免——纯 knn 的高价值命中（D323/D304 形态）不误杀。
+ */
+export function filterWeakSignal(
+  selected: readonly RecallCandidate[],
+): { kept: RecallCandidate[]; weak: Array<{ id: number; title: string }> } {
+  const kept: RecallCandidate[] = []
+  const weak: Array<{ id: number; title: string }> = []
+  for (let i = 0; i < selected.length; i++) {
+    const c = selected[i]!
+    if (i > 0 && !c.floorPulled && c.anchorBonus <= 0 && c.topologyBonus <= 0 && c.knnScore < WEAK_SIGNAL_KNN_GUARD) {
+      weak.push({ id: c.id, title: c.title })
+      continue
+    }
+    kept.push(c)
+  }
+  return { kept, weak }
+}
+
+/** §4 修法①：元操作工具集（这些调用本身构成「会话管理」而非任务语义）。 */
+export const META_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'compress',
+  'decompress',
+  'acp_status',
+  'search_context',
+])
+
+/**
+ * §4 修法①：元操作窗口判定——最近 lookback 条**带工具调用**的 assistant 消息里，
+ * 工具调用全部属于元操作类（compress/acp_status/search_context/读 session 文件的 bash）
+ * → true。出现任何一条任务语义工具即否决。证据：元操作期被动召回 0/4 命中（03:37 考古
+ * D32/D301、行 5312 D31、13:15 context-loss-recovery 期 D33、D3@常识库 anchor=+0.000 入池）。
+ */
+export function isMetaOperationWindow(rawMsgs: readonly unknown[], lookback = 3): boolean {
+  let seen = 0
+  for (let i = rawMsgs.length - 1; i >= 0 && seen < lookback; i--) {
+    const m = rawMsgs[i] as { role?: string; content?: unknown }
+    if (m.role !== 'assistant') continue
+    const content = m.content
+    if (!Array.isArray(content)) continue
+    const calls = content.filter(
+      (b) => !!b && typeof b === 'object' && (b as { type?: string }).type === 'tool-call',
+    )
+    if (calls.length === 0) continue
+    seen += 1
+    for (const c of calls) {
+      const name = String((c as { name?: string }).name ?? '')
+      if (META_TOOL_NAMES.has(name)) continue
+      if (name === 'bash') {
+        const args = String(JSON.stringify((c as { arguments?: unknown }).arguments ?? ''))
+        if (args.includes('.dsh/sessions')) continue // 会话考古（读 session 文件）也算元操作
+      }
+      return false
+    }
+  }
+  return seen > 0
+}
+
+/** §3 修法5：等待窗口信号（job_id 可空——bash sleep 轮询没有 job 名）。 */
+export interface WaitingSignal {
+  jobId: string | null
+}
+
+/** §3 修法5：sleep 判定为「等待」的秒数下限（sleep 0.5 是正常节奏，sleep 30+ 是等后台）。 */
+export const WAITING_SLEEP_SECONDS = 20
+
+/** §3 修法5：等待锚的最小步距（距上次写入/提醒 ≥3 步才在等待窗口催——刚写完不连拍）。 */
+export const WAITING_NUDGE_MIN_STEPS = 3
+
+/**
+ * §3 修法5：等待窗口检测——最近一条 assistant 消息的工具调用是 `job_output`（等待语义
+ * 内建）或 bash 且命令含 ≥WAITING_SLEEP_SECONDS 秒的 sleep（轮询等待）→ 等待中。
+ * 证据（PLAN §3 修法 5）：模型两次自发在等待窗口写日记（长会话 09:15 / 短会话 14:57），
+ * 而虚高增量催写在同一窗口被无视——等待才是写日记的真时机。
+ */
+export function detectWaitingWindow(log: readonly unknown[]): WaitingSignal | null {
+  for (let i = log.length - 1; i >= 0; i--) {
+    const m = log[i] as { role?: string; content?: unknown }
+    if (m.role !== 'assistant') continue
+    const content = m.content
+    if (!Array.isArray(content)) return null // 最近一条 assistant 无工具调用（纯汇报）→ 非等待
+    const calls = content.filter(
+      (b) => !!b && typeof b === 'object' && (b as { type?: string }).type === 'tool-call',
+    )
+    if (calls.length === 0) return null
+    for (const c of calls) {
+      const name = String((c as { name?: string }).name ?? '')
+      if (name === 'job_output') {
+        const jid = (c as { arguments?: { job_id?: unknown } }).arguments?.job_id
+        return { jobId: typeof jid === 'string' && jid ? jid : null }
+      }
+      if (name === 'bash') {
+        const args = (c as { arguments?: { command?: unknown } }).arguments
+        const cmd = typeof args?.command === 'string' ? args.command : String(JSON.stringify(args ?? ''))
+        if (/\bsleep\s+(\d+(?:\.\d+)?)/.test(cmd)) {
+          const secs = Number(RegExp.$1)
+          if (secs >= WAITING_SLEEP_SECONDS) return { jobId: null }
+        }
+      }
+    }
+    return null
+  }
+  return null
+}
+
 /**
  * 取消息流里最近一次 ACP 压缩的 compactionId（无则 null）。
  * 压缩消息 = user 角色、source.kind='plugin'、plugin='compact'、带 compactionId。
@@ -415,6 +614,23 @@ export function recallFailureNotice(
   const cadenceDue =
     every > 0 && !isTurnStart && (state.lastAutoTurn !== turn || step - state.lastAutoStep >= every)
   if (!isTurnStart && !cadenceDue && !compactionFired) return null
+  /* §4 修法①（2026-10-17）：元操作窗口抑制——最近几步全在 compress/acp_status/会话考古时，
+   * 查询场词汇就是元操作词汇，召回会被带偏（实测元操作期 0/4 命中：03:37 考古注入
+   * D32/D301、行 5312 D31、13:15 context-loss-recovery 期 D33，全部零相关）。
+   * 只压自主态节律与压缩重注（!isTurnStart）：回合首发带新用户输入 = 新任务语义，不压。
+   * 在 federatedRecall 之前短路——省的正是这轮白花的 embed 调用。 */
+  if (
+    deps.config.inject.metaWindowSuppress &&
+    !isTurnStart &&
+    isMetaOperationWindow([...rawHistory, ...(claimed ?? [])])
+  ) {
+    state.skippedCount += 1
+    state.lastFallbackReason = 'meta-window'
+    logger.info(
+      `inject-skip bucket=${workspace.paths.bucket} reason=meta-window turn=${turn} step=${step} session=${sessionId}`,
+    )
+    return null
+  }
   if (!isTurnStart) state.autoAttemptsSinceInject += 1
   state.lastAutoTurn = turn
   state.lastAutoStep = step
@@ -498,7 +714,13 @@ export function recallFailureNotice(
   // §7.3 ③④：把 Ω 与召回足迹记进 kv_store（体检素材），无论是否注入——继承链上每桶各自记账。
   // SIGBUS 防护：recall 的闸已随其返回释放，这里裸写 store 可能撞上守护轮的原生重建，
   // 故每桶各持自己的工作区串行闸（fed.parts 可能跨桶）。
+  // §2 修法2（2026-10-17）：顺路读回本桶使用台账（滑动窗注入频次判据）；读失败 → null，
+  // 过注入滤刀降级为 no-op（绝不因台账问题丢注入）。
+  let homeLedger: Map<number, UsageEntry> | null = null
   try {
+    await workspace.withDb(async () => {
+      homeLedger = readUsageLedger(workspace.store)
+    })
     for (const part of fed.parts) {
       await part.workspace.withDb(async () => {
         recordOmega(part.workspace.store, part.outcome.omega, part.outcome.regime ?? '')
@@ -528,11 +750,13 @@ export function recallFailureNotice(
     (deps.config.inject.dedupeRefreshTurns > 0 &&
       (turn - state.lastInjectTurn >= deps.config.inject.dedupeRefreshTurns ||
         (!isTurnStart && state.autoAttemptsSinceInject >= deps.config.inject.dedupeRefreshTurns)))
-  /* ★ 顺序即语义（2026-10-15）：集合级判据**先于**条目级、也先于渲染。
+  /* ★ 顺序即语义（2026-10-15；2026-10-17 §2 修法1 修订）：集合级判据**先于**条目级、也先于渲染。
    * 理由：两者会同时命中静态会话（集合不变 = 成员必然也在场），集合级是更省、理由更准
    * 的那条；让它先说话，「identical-selection」这条既有可观测语义才不会被条目级吞掉。
-   * 强刷（refreshDue：压缩后 / 隔了 N 回合）**越过**下面两条——强刷是显式意图，
-   * 也是对「在场判据可能漏判」的兜底，不该被条目级过滤抵消。 */
+   * 强刷（refreshDue：压缩后 / 隔了 N 回合）只越过**集合级**短路——强刷是显式意图，
+   * 但条目级在场判据（blockHash 反查真消息）对强刷同样成立：压缩真吃掉的块不在
+   * rawHistory → 自动允许重注；还在请求里的条目被剔（§2 修法1：强刷不再整批重放，
+   * 「压缩泵」25 次压缩=25 次强刷重注的循环由这一刀断开）。 */
   if (
     deps.config.inject.dedupeSelection &&
     selectionKey &&
@@ -562,8 +786,14 @@ export function recallFailureNotice(
    * 真正要救的是**部分重叠**那一半：{A,B,C}→{A,B,D} 时只注入 D。
    *
    * 可见性判据是**真消息在场**（blockHash 反查），不是轮数近似——块被压缩折走后
-   * 自动允许重注，不静默丢记忆。 */
-  const liveKeys = deps.config.inject.dedupeLiveEntries && !refreshDue
+   * 自动允许重注，不静默丢记忆。
+   *
+   * §2 修法1（2026-10-17）：**强刷（refreshDue）不再越过本刀**。旧语义在 refreshDue 时
+   * liveKeys=null → 整批无条件重放——高频压缩会话里形成「压缩→强刷重注→再被压缩吃掉→
+   * 再强刷」的泵（生产实证 25 次压缩=315 条次注入/去重 150 条，D3@常识库 7 连注）。
+   * blockHash 反查对强刷同样精确：真被压缩吃掉的条目不在 rawHistory → 自然放行重注；
+   * 还在请求里的条目被剔。 */
+  const liveKeys = deps.config.inject.dedupeLiveEntries
     ? liveInjectedKeys([...rawHistory, ...(claimed ?? [])], state)
     : null
   const kept: { kept: RecallCandidate[]; duplicated: Array<{ id: number; title: string; reason: string }> } =
@@ -580,14 +810,31 @@ export function recallFailureNotice(
     kept.kept.some((c) => c.supersededBy !== undefined)
       ? filterSuperseded(kept.kept)
       : { kept: kept.kept, duplicated: [] }
-  const removed = [...kept.duplicated, ...live.duplicated]
+
+  /* §2 修法3 + 修法2 + §4 修法③（2026-10-17）：回声冷却 → 过注入频次 → 弱信号护栏。
+   * 三刀同遵循「只剔不补 + dropped 归因可见」；全部**无条件**生效（强刷也不豁免——
+   * 回声的内容在本会话写入参数里在场、过注入的重复不因压缩重新有价、弱信号不因压缩变强）。 */
+  const echoOut = filterRecentWriteEcho(live.kept, state, deps.config.inject.writeEchoCooldownMs)
+  const overOut = deps.config.inject.overInjectSuppress
+    ? filterOverInjected(echoOut.kept, state, workspace.paths.bucket, homeLedger)
+    : { kept: echoOut.kept, overInjected: [] as Array<{ id: number; title: string }> }
+  const weakOut = deps.config.inject.weakSignalFloorSuppress
+    ? filterWeakSignal(overOut.kept)
+    : { kept: overOut.kept, weak: [] as Array<{ id: number; title: string }> }
+  const removed = [
+    ...kept.duplicated,
+    ...live.duplicated,
+    ...echoOut.echoed.map((d) => ({ ...d, reason: 'recently-written-echo' })),
+    ...overOut.overInjected.map((d) => ({ ...d, reason: 'over-injected-window' })),
+    ...weakOut.weak.map((d) => ({ ...d, reason: 'no-anchor-no-topology' })),
+  ]
 
   const effective: RecallOutcome =
     removed.length === 0
       ? outcome
       : {
           ...outcome,
-          selected: live.kept,
+          selected: weakOut.kept,
           dropped: [...outcome.dropped, ...removed],
         }
 
@@ -682,11 +929,16 @@ export function recallFailureNotice(
   if (!text) {
     // 门控不过 / 无候选 / 基础设施失败 / **选中的全都在场或全部过期** → 不注入，带 fallbackReason（§6.3）。
     // 其中**基础设施失败**另发一条模型可见的短通知（见 recallFailureNotice）；
-    // 'all-selected-already-in-context' 不在那个谓词里（去重成功不是降级）。
+    // 'all-selected-already-in-context' 不在那个谓词里（去重成功不是降级）；
+    // §2/§4 滤刀（回声/过注入/弱信号）清空时归因 'all-selected-filtered'（同样非降级）。
     const reason =
-      outcome.fallbackReason === null && outcome.selected.length > 0 && live.kept.length === 0
-        ? 'all-selected-already-in-context'
-        : outcome.fallbackReason
+      outcome.fallbackReason !== null
+        ? outcome.fallbackReason
+        : outcome.selected.length > 0 && weakOut.kept.length === 0
+          ? live.kept.length === 0
+            ? 'all-selected-already-in-context'
+            : 'all-selected-filtered'
+          : outcome.fallbackReason
     state.lastFallbackReason = reason
     noteRecallFailure(state, reason)
     state.skippedCount += 1
@@ -725,6 +977,10 @@ export function recallFailureNotice(
       `deduped=${kept.duplicated.length}${kept.duplicated.length > 0 ? ` dedupedIds=${kept.duplicated.map((d) => `D${d.id}`).join(',')}` : ''} ` +
       // G3：被「已被取代」剔掉的条数（含废止）。与 deduped 分开计数，便于分别定标。
       `superseded=${live.duplicated.length}${live.duplicated.length > 0 ? ` supersededIds=${live.duplicated.map((d) => `D${d.id}`).join(',')}` : ''} ` +
+      // §2/§4（2026-10-17）：回声冷却 / 过注入频次 / 弱信号护栏的可见量（口径与 deduped 同族）。
+      `echoed=${echoOut.echoed.length}${echoOut.echoed.length > 0 ? ` echoedIds=${echoOut.echoed.map((d) => `D${d.id}`).join(',')}` : ''} ` +
+      `overInjected=${overOut.overInjected.length}${overOut.overInjected.length > 0 ? ` overInjectedIds=${overOut.overInjected.map((d) => `D${d.id}`).join(',')}` : ''} ` +
+      `weak=${weakOut.weak.length}${weakOut.weak.length > 0 ? ` weakIds=${weakOut.weak.map((d) => `D${d.id}`).join(',')}` : ''} ` +
       `inherited=${outcome.selected.filter((c) => c.srcBucket).length} ` +
       `injectMode=${isTurnStart ? 'interactive' : 'autonomous'}${compactionFired ? ' trigger=compaction' : ''} ` +
       `session=${sessionId} gate={passed:${outcome.gate.passed},maxKnn:${outcome.gate.maxKnn.toFixed(4)},` +
@@ -920,6 +1176,8 @@ export function evaluateWriteNudge(
   tailProvider?: () => string | null,
   /** 票11：委托变体引导（冷门 Tag + 同轴合并）的懒取（仅 delegation 时调用一次）。 */
   extrasProvider?: (suggestedTags: string[]) => DelegationExtras | null,
+  /** §3 修法5（2026-10-17）：等待窗口信号（detectWaitingWindow 的现取读数；null=非等待）。 */
+  waiting: WaitingSignal | null = null,
 ): string | null {
   const t = tuningValues(config, state.sessionId)
   const everyMin = t.writeNudgeEveryMinutes
@@ -947,24 +1205,30 @@ export function evaluateWriteNudge(
   const anchorTurn = Math.max(state.lastDiaryWriteTurn, state.lastWriteNudgeTurn)
   const turnsSince = draft ? draft.turn - anchorTurn : 0
   const turnsDue = everyTurns > 0 && progress && !!draft && draft.substantive && turnsSince >= everyTurns
-  if (!stepDue && !growthDue && !timeDue && !turnsDue) return null
+  // §3 修法5（2026-10-17）：等待窗口锚——最近一步在等后台 job（job_output / 长 sleep 轮询）
+  // 且距上次写入/提醒已有 ≥3 步进展 → 提醒。与增量数字脱钩（虚高增量在等待期是噪声）；
+  // 证据：模型两次自发在等待窗口写日记（PLAN §3），同一窗口的虚高催写全被无视。
+  const waitDue = waiting !== null && stepsSince >= WAITING_NUDGE_MIN_STEPS && !!state.lastAssistantDigest
+  if (!stepDue && !growthDue && !timeDue && !turnsDue && !waitDue) return null
   state.lastWriteNudgeAt = now
   state.activeMsAnchor = state.activeMs
   state.lastWriteNudgeTurn = turn
   state.lastWriteNudgeStep = step
   if (contextChars !== null) state.nudgeAnchorChars = contextChars
-  const reason = stepDue
-    ? `已 ${stepsSince} 步未写（自主态）`
-    : growthDue
-      ? `上下文自上次提醒已增 ${Math.round(growth / 1000)}K 字（自主态）`
-      : turnsDue
-        ? `已 ${turnsSince} 轮汇报未写入`
-        : `已主动思考 ${Math.max(1, Math.round(activeSinceMs / 60_000))} 分钟未写`
+  const reason = waitDue
+    ? `等待中的后台任务${waiting!.jobId ? `「${waiting!.jobId}」` : ''}在跑——趁此窗口把刚才的产出入河（等待期无事可做，正是写日记的时机）`
+    : stepDue
+      ? `已 ${stepsSince} 步未写（自主态）`
+      : growthDue
+        ? `上下文自上次提醒已增 ${Math.round(growth / 1000)}K 字（自主态）`
+        : turnsDue
+          ? `已 ${turnsSince} 轮汇报未写入`
+          : `已主动思考 ${Math.max(1, Math.round(activeSinceMs / 60_000))} 分钟未写`
   state.lastWriteNudgeReason = reason
   // 票05：digest 现取——自主态锚用观测循环里更新的最近助手实质文本首行（turn-stopping
   // 的 draft 存货在长自主回合里是旧战况，2026-09-14 实测收到引用上回合摘要的提醒）；
   // 交互态锚仍优先 draft（回合摘要含用户语境）。取不到各自的鲜货就互相兜底。
-  const autonomous = stepDue || growthDue
+  const autonomous = stepDue || growthDue || waitDue
   const digest = autonomous
     ? state.lastAssistantDigest || draft?.digest || `自主任务进行中（step ${step}，上下文 +${Math.max(0, Math.round(growth / 1000))}K 字）`
     : draft?.digest || state.lastAssistantDigest || `自主任务进行中（step ${step}）`
@@ -1088,11 +1352,14 @@ export function installInjection(
         // 同一遍扫描顺带量模型产出字符总量（增量锚的量尺：deriveMessages 里 assistant 文本长度和）。
         const wstate = peekSession(payload.agent.session.id)
         let contextChars: number | null = null
+        // §3 修法5：等待窗口信号（最近一条 assistant 是否在 job_output / 长 sleep 轮询）。
+        let waiting: WaitingSignal | null = null
         if (wstate) {
           const log = (payload.agent.session?.deriveMessages?.() ?? []) as unknown[]
           // §3：量尺只计 assistant 产出（见 assistantGrowthChars 文档）。
           // 工具输出的封顶采样（toolLens/cappedToolChars）保留给既有探针引用，不再计入本量尺。
           contextChars = assistantGrowthChars(log)
+          waiting = detectWaitingWindow(log)
           const from = Math.min(wstate.lastObservedLogLength, log.length)
           for (let i = from; i < log.length; i++) {
             const txt = messageText(log[i])
@@ -1153,7 +1420,7 @@ export function installInjection(
               } catch {
                 return null // 路径解析失败 → 提醒不带队列行，不出数字
               }
-            }, delegation, () => lastDiaryTail(deps, payload.agent, wstate), (suggested) => delegationExtrasFor(payload.agent, wstate, suggested))
+            }, delegation, () => lastDiaryTail(deps, payload.agent, wstate), (suggested) => delegationExtrasFor(payload.agent, wstate, suggested), waiting)
           : null
         const extra: unknown[] = []
         if (text) extra.push(createInjectionMessage(text))

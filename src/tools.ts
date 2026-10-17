@@ -33,7 +33,7 @@ import { excerpt } from './render.js'
 import { patrolBucket } from './patrol.js'
 import { setTuning, tuningSnapshot, tuningDefaults, tuningValues } from './tuning.js'
 import { tieBreakerParamsFrom } from './tiebreaker.js'
-import { listSessions, peekSession } from './session.js'
+import { listSessions, noteRecentWrite, peekSession } from './session.js'
 import type { RecallOptions } from './recall.js'
 import type { Logger } from './runtime.js'
 import { memoRiverRoot } from './runtime.js'
@@ -334,6 +334,11 @@ async function composeReinjection(
     `【写前回注】${hubWarn}；当前连通分量 = ${pre.components}（判据 =1）`,
     tagSelfCheck,
     qualityAnchor,
+    /* §5 教训行为化（2026-10-17 PLAN）：D308/D310 双成功案例的共同形态 = 具体触发条件+明确动作；
+     * 引导（不强制 schema，叙事类日记不误伤）。 */
+    '【写前回注】涉教训类日记，末尾补一行「触发条件→动作」（何时检查 / 发现什么就停 / 做什么）——把教训写成可执行判据。',
+    /* N7c：实测唯一真写入重试的根因是 Tag 行写成 `Tags:`——一行成本防一次拒绝往返。 */
+    '【写前回注】Tag 行格式 `Tag: 名词, 名词`（Tag 单数无 s）——写成 `Tags:` 会被格式闸门拒绝。',
     ...(mergeHint ? [mergeHint] : []),
   ].join('\n')
 }
@@ -354,11 +359,36 @@ function dateOf(path: string): string | null {
   return m ? m[1]! : null
 }
 
+/** 未入选明细的上限（与 render.ts 被动块同口径 8 条）：原因用计数，D 号只留给真被剔掉的那几条。 */
+const RECALL_DROPPED_DETAIL_MAX = 8
+
+/** 按原因聚合「未注入」：`k-limit×149` 这类纯上限溢出只报计数，不再把 149 个 D 号铺满一行。 */
+function summarizeDropped(dropped: Array<{ id: number; title: string; reason: string }>): string {
+  const groups = new Map<string, number[]>()
+  for (const d of dropped) {
+    const ids = groups.get(d.reason)
+    if (ids) ids.push(d.id)
+    else groups.set(d.reason, [d.id])
+  }
+  const parts: string[] = []
+  for (const [reason, ids] of groups) {
+    if (reason === 'k-limit') {
+      parts.push(`k-limit×${ids.length}`)
+      continue
+    }
+    const shown = ids.slice(0, RECALL_DROPPED_DETAIL_MAX).map((id) => `D${id}`).join(' ')
+    const more = ids.length > RECALL_DROPPED_DETAIL_MAX ? ' …' : ''
+    parts.push(`${reason}×${ids.length}${shown ? `（${shown}${more}）` : ''}`)
+  }
+  return parts.join(' · ')
+}
+
 export function formatRecallResult(
   workspace: WorkspaceRuntime,
   outcome: Awaited<ReturnType<WorkspaceRuntime['recall']>>,
   query: string,
   fullBody = false,
+  debug = false,
 ): string {
   const lines: string[] = [`【记忆河流·memo_recall】「${query}」`]
   if (!outcome.injected && outcome.candidates.length === 0) {
@@ -370,7 +400,15 @@ export function formatRecallResult(
     `· Ω=${outcome.omega === null ? 'n/a' : outcome.omega.toFixed(3)} regime=${outcome.regime ?? '-'} mode=${outcome.mode} ` +
       `候选=${outcome.candidateCount} 注入=${outcome.selected.length}`,
   )
-  for (const c of outcome.candidates.slice(0, 12)) {
+  /* 2026-10-17 修（用户报「主动调用给了不少无用信息」）：原先渲染 `candidates.slice(0, 12)`，
+   * 与 k 无关——k=3 的调用会原样展出 12 条，其中 9 条紧接着又在「未注入」行里以 k-limit 出现；
+   * 若用户只想要 3 条，多出的 9 条（含 120 字正文片段）就是纯噪声。现在只渲染**入选**条目（=k
+   * 或预算允许的结果集），未入选的留在下面那一行的聚合计数里。 */
+  const shown = outcome.selected
+  if (shown.length === 0) {
+    lines.push(`· 无入选：fallbackReason=${outcome.fallbackReason ?? 'none'}`)
+  }
+  for (const c of shown) {
     lines.push(
       `· D${c.id}「${c.title}」 score=${c.score.toFixed(4)} knn=${c.knnScore.toFixed(4)} role=${c.role} ` +
         `anchor=${c.anchorBonus.toFixed(3)} topology=${c.topologyBonus.toFixed(3)} ` +
@@ -393,9 +431,15 @@ export function formatRecallResult(
     if (body) lines.push(`    ${body}`)
   }
   if (outcome.dropped.length > 0) {
-    lines.push(`· 未注入：${outcome.dropped.map((d) => `D${d.id}(${d.reason})`).join(' ')}`)
+    lines.push(`· 未注入 ${outcome.dropped.length} 条：${summarizeDropped(outcome.dropped)}`)
   }
-  lines.push(`· diagnostics=${JSON.stringify(outcome.diagnostics)} fallbackReason=${outcome.fallbackReason ?? 'none'}`)
+  /* 完整 diagnostics（readoutDiagnostics / queryMorphology / selectionWeights…）≈1.4KB，
+   * 是自检素材而不是补证素材；默认只留三个判读字段，深挖时传 debug:true 取全量。 */
+  lines.push(
+    debug
+      ? `· diagnostics=${JSON.stringify(outcome.diagnostics)} fallbackReason=${outcome.fallbackReason ?? 'none'}`
+      : `· 诊断：耗时=${outcome.elapsedMs}ms fallbackReason=${outcome.fallbackReason ?? 'none'} gate=${outcome.gate.gateVector}（完整 diagnostics 传 debug:true）`,
+  )
   return lines.join('\n')
 }
 
@@ -484,6 +528,9 @@ export interface WriteDiaryInput {
    * 票 03：允许传 Promise——write/update/merge 传 composeReinjection(...) 的**在飞** Promise，
    * 让回注嵌入与 writeDiaryCore 的合批嵌入并行；memo_approve 仍传 string。 */
   preamble: string | Promise<string>
+  /** §2 修法3（2026-10-17）：发起会话 id——写入成功时上报 SessionState.recentWrites
+   *  （写入回声冷却判据）。缺省 = 不上报（冷却对该写入不生效）。 */
+  sessionId?: string
   /** 改写模式（票 02）：按 D-id 定位目标，原路径重写、库内同路径 upsert（fileId 不变，
    *  使用台账足迹随之保留——同一篇记忆的刷新而非新记忆）。去重闸门自动豁免目标自身 chunk。 */
   updateOf?: { fileId: number; path: string }
@@ -498,6 +545,8 @@ export interface WriteDiaryResult {
   status: 'written' | 'rejected'
   report: string
   chunkId?: number
+  /** §2 修法3（2026-10-17）：写入成功时的 fileId（回声冷却的会话记账用；rejected 无）。 */
+  fileId?: number
   filePath?: string
   title?: string
   tags?: string[]
@@ -824,9 +873,17 @@ async function writeDiaryCoreLocked(
       logger.warn(`memo_write artifact-rebuild-failed: ${String((e as Error)?.message ?? e)}`)
     }
   })
+  // §2 修法3（2026-10-17）：写入成功 → 上报发起会话的写入足迹（写入回声冷却判据）。
+  // 拿不到会话（运维件/无 exec 上下文）就跳过——冷却对该写入不生效，正确性不受影响。
+  if (input.sessionId) {
+    const st = peekSession(input.sessionId)
+    if (st) noteRecentWrite(st, written.fileId, written.chunkId)
+  }
   return {
     status: 'written',
     chunkId: written.chunkId,
+    // §2 修法3（2026-10-17）：暴露 fileId 供调用方上报「本会话写入足迹」（回声冷却判据）。
+    fileId: written.fileId,
     filePath,
     title,
     tags,
@@ -864,9 +921,9 @@ export function installTools(
       name: 'memo_recall',
       description:
         '主动补证：在记忆河流（VCPToolBox TagMemo/RiverMemo）里定向检索历史日记。被动注入给线索，本工具给细节。' +
-        '返回候选列表，每条两行：`· D<id>「<title>」 score= knn= role= anchor= topology= omega= regime= tags=[reward-suppressed]`，' +
+        '返回**入选**候选（=k 条或预算内条数），每条两行：`· D<id>「<title>」 score= knn= role= anchor= topology= omega= regime= tags=[reward-suppressed]`，' +
         '下一行是其正文片段（默认 120 字；**显式** `truncate:false` 给全文，那是深挖的走法）。' +
-        '末尾附 `· 未注入：…` 明细行与 `diagnostics={…}`（含 fallbackReason、gateVector、readoutDiagnostics）。',
+        '末尾附 `· 未注入 N 条：k-limit×N · <其他原因>×N（D…）` 聚合行与一行诊断摘要；传 `debug:true` 取完整 diagnostics。',
       parameters: {
         query: { type: 'string', required: true, description: '检索意图（自然语言）。' },
         k: { type: 'number', description: '返回条数上限（缺省用注入配置的 k）。' },
@@ -877,6 +934,10 @@ export function installTools(
         },
         rerank: { type: 'boolean', description: '是否做原生重排（false = 只回 KNN 基线）。' },
         truncate: { type: 'boolean', description: '正文是否截断为首句。' },
+        debug: {
+          type: 'boolean',
+          description: '附加完整 diagnostics（readoutDiagnostics/queryMorphology/selectionWeights 等自检字段）。诊断/复盘时用，日常补证不需要。',
+        },
         timeRange: { type: 'string', description: '::Time 语义，如 2026-09-10~2026-09-11。' },
         folder: {
           type: 'string',
@@ -947,7 +1008,7 @@ export function installTools(
             /* 台账失败静默：观测不能伤害补证 */
           }
         })
-        const text = formatRecallResult(target, outcome, query, args.truncate === false)
+        const text = formatRecallResult(target, outcome, query, args.truncate === false, args.debug === true)
         return target === workspace
           ? text
           : `· 🔄 folder 路由 → 桶=${target.paths.bucket}@${target.paths.hash}（cwd=${target.paths.cwd}；检索/诊断/台账均为此桶口径）\n${text}`
@@ -1184,6 +1245,8 @@ export function installTools(
           preamble: reinjection,
           /* H7：已声明 supersedes 的写入不再触发推翻信号建议。 */
           supersedeDeclared: supersedeDs.length,
+          /* §2 修法3：上报本会话写入足迹（回声冷却）。 */
+          sessionId: viewer.sessionId ?? undefined,
           toolName: 'memo_write',
         })
         /* G3（2026-10-15）：落「取代声明」——放在写入**成功之后**。写失败就不该产生取代关系，
@@ -1304,6 +1367,8 @@ export function installTools(
           },
           newTagReason,
           preamble: reinjection,
+          /* §2 修法3：上报本会话写入足迹（回声冷却；改写刷新后的条目同样热）。 */
+          sessionId: viewer.sessionId ?? undefined,
           toolName: 'memo_update',
           updateOf: { fileId: target.id, path: target.path },
         })
@@ -1514,6 +1579,8 @@ export function installTools(
            * 是去枢纽的手术工具（与 perf-funnel 票08 存量手术衔接）；拦它等于拦治疗。 */
           newTagReason,
           preamble: reinjection,
+          /* §2 修法3：上报本会话写入足迹（回声冷却；keep 篇承载合并新全文，同样热）。 */
+          sessionId: viewerOf(exec).sessionId ?? undefined,
           toolName: 'memo_merge',
           updateOf: keepRow ? { fileId: keepRow.id, path: keepRow.path } : undefined,
           exemptFileIds: srcs.map((f) => f.id),
@@ -1732,6 +1799,8 @@ export function installTools(
             hubGate,
             newTagReason: '',
             preamble: `【草稿批准】${basename(record.path)}（桶=${record.bucket}，回合${record.turn}；Tag 只复用既有词汇）`,
+            /* §2 修法3：上报本会话写入足迹（回声冷却）。 */
+            sessionId: viewerOf(exec).sessionId ?? undefined,
             toolName: 'memo_approve',
           })
           if (result.status === 'written') {

@@ -118,6 +118,12 @@ export interface RecallCandidate {
   /** 桶继承（federate）：该条目来自哪个父桶；本桶条目缺省（渲染不标注）。 */
   srcBucket?: string
   /**
+   * §4 修法③ 配套（2026-10-17）：近因保底拉回的席位标记（⑥ recency floor 的 push 点设置）。
+   * 弱信号护栏（filterWeakSignal）豁免它——保底席位本就是「分数不够、新鲜度保护」的
+   * 设计对象，无锚无拓扑是常态而非搭便车（验收 #25 实测误杀后加）。
+   */
+  floorPulled?: boolean
+  /**
    * G3（2026-10-15）：该条目的**结论**已被哪一篇取代。`undefined` = 无标记；
    * `null` = 已废止（无继任篇）；数字 = 继任篇的 **fileId**（稳定标识，改写不变）。
    *
@@ -719,11 +725,11 @@ export async function recall(
           dropped.push({ id: evicted.id, title: evicted.title, reason: 'recency-floor-evicted' })
           const fullCost = estimateTokens(freshest.body) + estimateTokens(freshest.title) + 24
           if (used + fullCost <= options.tokenBudget) {
-            selected.push(freshest)
+            selected.push({ ...freshest, floorPulled: true })
             used += fullCost
           } else {
             const trimmed = firstSentence(freshest.body)
-            selected.push({ ...freshest, body: trimmed })
+            selected.push({ ...freshest, body: trimmed, floorPulled: true })
             used += estimateTokens(trimmed) + estimateTokens(freshest.title) + 24
             dropped.push({ id: freshest.id, title: freshest.title, reason: 'truncated-to-first-sentence' })
           }

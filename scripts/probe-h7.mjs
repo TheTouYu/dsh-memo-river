@@ -27,6 +27,8 @@ process.env.DSH_HOME = DSH_HOME // 必须在 import lib 之前
 
 const LIB = join(ROOT, '..', 'lib')
 const EMBED = process.env.H7_EMBED_URL ?? 'http://127.0.0.1:8099/v1/embeddings'
+const EMBED_KEY = process.env.H7_EMBED_KEY ?? 'local'
+const EMBED_MODEL = process.env.H7_EMBED_MODEL ?? 'bge-m3'
 const DIM = 1024
 
 const { Config } = await import(join(LIB, 'config.js'))
@@ -36,7 +38,7 @@ const { writeDiaryCore } = await import(join(LIB, 'tools.js'))
 const config = Config({
   bucket: 'h7probe',
   native: { vcpRoot: '/home/h/app/VCPToolBox' },
-  embed: { apiUrl: EMBED, apiKey: 'local', model: 'bge-m3', dimension: DIM },
+  embed: { apiUrl: EMBED, apiKey: EMBED_KEY, model: EMBED_MODEL, dimension: DIM },
 })
 
 const ws = await acquireWorkspace(WS, config, 'h7probe')

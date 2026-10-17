@@ -135,6 +135,20 @@ export interface InjectConfig {
    */
   writeNudgeGrowthChars: number
   /**
+   * §2 修法3（2026-10-17 PLAN「两真会话注入通道工程优化」）：写入回声冷却窗（ms，0=关）。
+   * 本会话刚写入的条目（memo_write/update/merge/approve 成功，tools.ts 上报 SessionState）
+   * 在窗内不占被动注入席位——写入的 tool-call 参数已携带全文，注回=纯冗余
+   * （11 例两会话实锤，最快 D331 写入 7 秒注回；超窗反例 D323 57min/D326 51min 不触发）。
+   * 缺省 15 分钟（盖住全部实锤案例）。
+   */
+  writeEchoCooldownMs: number
+  /** §2 修法2：过注入频次上限开关——24h 滑动窗内被动注入 ≥2 次且 7d 无主动召回的条目不占席位。 */
+  overInjectSuppress: boolean
+  /** §4 修法①：元操作窗口抑制——最近几步全为 compress/acp_status/会话考古时跳过本轮自主态召回。 */
+  metaWindowSuppress: boolean
+  /** §4 修法③：弱信号护栏（默认关——误伤中排条目，见 zod 注释；§4 证据由 metaWindowSuppress 覆盖）。 */
+  weakSignalFloorSuppress: boolean
+  /**
    * P0b 判别式决策重排（2026-10-16，docs/PLAN-2026-10-15 §P0b）：
    * - 'off'（缺省）= 逐字节旧行为——不发请求、不打日志、渲染输出不变（回退红线）；
    * - 'shadow' = 异步观测：注入照旧，打分结果落独立 `inject-decision mode=shadow` 行
@@ -396,6 +410,17 @@ export const Config: z<Config> = z.object({
       writeNudgeEverySteps: z.number().min(0).max(10_000).default(40),
       /** 写入节律提醒·自主态增量锚：上下文自锚点累计增长 ≥N 字符 → 提醒（0=关；5 万字符≈2–3 万 token）。 */
       writeNudgeGrowthChars: z.number().min(0).max(10_000_000).default(50_000),
+      /** §2 修法3（2026-10-17）：写入回声冷却窗（ms；0=关）。缺省 15 分钟。 */
+      writeEchoCooldownMs: z.number().min(0).max(3_600_000).default(900_000),
+      /** §2 修法2（2026-10-17）：过注入频次上限（24h 窗 ≥2 次被动且 7d 无主动 → 剔）。 */
+      overInjectSuppress: z.boolean().default(true),
+      /** §4 修法①（2026-10-17）：元操作窗口抑制（自主态节律/压缩重注在元操作期跳过）。 */
+      metaWindowSuppress: z.boolean().default(true),
+      /** §4 修法③（2026-10-17）：弱信号护栏（无锚无拓扑且弱 knn 的非 top-1 剔除）。
+       * 默认关——验收实证（acceptance-inject-dedup #65/#66）它误伤正常语料的中排条目
+       * （anchor=0&topology=0 在生产注入里常见）；§4 的证据集中在元操作窗口，已由
+       * metaWindowSuppress 的整窗跳过覆盖。旋钮留作实验通道。 */
+      weakSignalFloorSuppress: z.boolean().default(false),
       /**
        * P0b 判别式决策重排（2026-10-16）。缺省 'off' = 逐字节旧行为（回退红线，
        * 由 scripts/acceptance-decision-rerank.mjs 的改动前 fixture 负对照钉住）。

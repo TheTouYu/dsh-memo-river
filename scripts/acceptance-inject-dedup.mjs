@@ -11,7 +11,9 @@
  *     这条既有可观测语义才不会被条目级吞掉（首版把过滤放在召回里 → 主套件 #12 红）。
  *   · **只剔不补**：空出的席位**不**用后位候选回填。回填会把「跳过」变成「每轮注入更弱的
  *     新条目」，总注入量不降反升，且改写步维刷新语义（首版回填 → 主套件 #17 红）。
- *   · 强刷（压缩后 / 隔 N 回合）越过两条去重——强刷是显式意图，也是对「在场判据可能漏判」的兜底。
+ *   · 强刷（2026-10-17 §2 修法1 修订）：只越过**集合级**短路；条目级在场判据（blockHash
+ *     反查）对强刷同样生效——真被压缩吃掉的块不在 rawHistory → 放行重注；还在请求里的
+ *     被剔。旧「强刷=整批重放」语义是压缩泵（25 次压缩=315 条次重注）的发动机，已拆。
  *
  * 编号承接 acceptance-selection-weights.mjs（#55-60），本套件 #61-68。
  *
@@ -387,7 +389,10 @@ try {
   {
     const src = readFileSync(new URL('../src/injector.ts', import.meta.url), 'utf8')
     const recallSrc = readFileSync(new URL('../src/recall.ts', import.meta.url), 'utf8')
-    const gated = /inject\.dedupeLiveEntries\s*&&\s*!refreshDue/.test(src)
+    // §2 修法1（2026-10-17）：强刷不再越过条目级——开关门只剩 dedupeLiveEntries 本身
+    //（旧形态 `dedupeLiveEntries && !refreshDue` 已拆；「!refreshDue 残留」= 泵发动机回装）。
+    const gated = /inject\.dedupeLiveEntries\s*\?\s*liveInjectedKeys/.test(src)
+    const pumpBack = /dedupeLiveEntries\s*&&\s*!refreshDue/.test(src)
     const rawInput = /liveInjectedKeys\(\[\.\.\.rawHistory,/.test(src)
     const historyInput = /liveInjectedKeys\(\[\.\.\.history,/.test(src)
     const usesFilter = /filterLiveDuplicates\(outcome\.selected/.test(src)
@@ -399,13 +404,13 @@ try {
     const ordered = iFilter > 0 && iRender > iFilter
     // 只剔不补：召回层不得再出现 excludeKeys 那套「腾出席位给后位候选」的路径
     const noBackfill = !/excludeKeys/.test(recallSrc)
-    const wired = gated && rawInput && !historyInput && usesFilter && ordered && noBackfill
+    const wired = gated && !pumpBack && rawInput && !historyInput && usesFilter && ordered && noBackfill
     check(
       68,
-      '接线断言：开关门 + 输入 rawHistory + 过滤先于渲染 + **召回层无回填路径**',
+      '接线断言：开关门（无 !refreshDue 残留）+ 输入 rawHistory + 过滤先于渲染 + **召回层无回填路径**',
       wired,
       [
-        `开关门命中=${gated}｜rawHistory 命中=${rawInput}｜误用 history 命中=${historyInput}（末项必须 false）`,
+        `开关门命中=${gated}｜「!refreshDue 泵残留」=${pumpBack}（必须 false——§2 修法1）｜rawHistory 命中=${rawInput}｜误用 history 命中=${historyInput}`,
         `filterLiveDuplicates 用于 selected=${usesFilter}；调用点(${iFilter}) 早于 renderInjection(${iRender})=${ordered}`,
         `recall.ts 含 excludeKeys（回填路径）=${!noBackfill}（必须 false——「只剔不补」是本刀的设计决定，要改必须显式改本腿）`,
         `为什么必须 rawHistory：isDialogMessage（src/injector.ts:164）把 kind==='memo-river' 的注入块整个排掉，` +

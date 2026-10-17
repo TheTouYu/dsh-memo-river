@@ -991,7 +991,14 @@ hr('#15–#18 自主态节律注入：cadence / 压缩联动 / 步维刷新 / �
     apply(h16.ctx, makeConfig({ bucket: BUCKET_RIVER, inject: { autonomousInjectEverySteps: 4 } }))
     const agent16 = createAgent('sess-autonomous-16', WS_RIVER, [textMsg('user', AUT_Q), textMsg('assistant', AUT_A)])
     const d16a = await runPreStep(h16, agent16, 1, [], 1)
-    agent16.log.push(textMsg('assistant', '继续修。'), compactMsg('acc16-c1'))
+    /* §2 修法1（2026-10-17）：真实压缩会把旧注入块折进摘要（billion-context 的 shadowedRange
+     * 裁掉原消息）——mock 同步移除注入块、只留压缩回执。旧 mock 保留块还要求「压缩后必重注」，
+     * 那是强刷绕过去重的旧语义（压缩泵发动机）；新语义 = 强刷仍走条目级在场判据：真被吃掉的
+     * 块不在 rawHistory → 放行补注；还在场的被剔（probe-injection-filters #13 钉住）。 */
+    /* 原地变异（createAgent 的 deriveMessages 闭包捕获 log 数组引用——重赋值会切断同步）。 */
+    const keep16 = agent16.log.filter((m) => !msgText(m).includes(BLOCK_OPEN))
+    agent16.log.length = 0
+    agent16.log.push(...keep16, textMsg('assistant', '继续修。'), compactMsg('acc16-c1'))
     let d16b = await runPreStep(h16, agent16, 1, [], 2) // step2：节律未到（2-1=1<4），压缩必须触发
     // embed 间歇停顿重试（同 #11：压缩后查询切片是缓存未命中文本，偶发超预算）——
     // 新会话重试一次，压缩事件由 agent16.log 里的 compact 消息自然重触发。
@@ -1017,10 +1024,10 @@ hr('#15–#18 自主态节律注入：cadence / 压缩联动 / 步维刷新 / �
     const injected16 = st16.injectedCount + (retried16 && blocksOf(d16b) === 1 ? 1 : 0)
     check(
       16,
-      '压缩事件：新 compactionId 立即重注并绕过同集合去重；同 id 不重复触发',
+      '压缩事件：新 compactionId 立即补注被吃条目（强刷仍走在场判据）；同 id 不重复触发',
       blocksOf(d16a) === 1 && blocksOf(d16b) === 1 && blocksOf(d16c) === 0 && injected16 === 2 && st16.lastCompactionId === 'acc16-c1',
       [
-        `step1 首发：注入块=${blocksOf(d16a)}；step2（压缩后）：注入块=${blocksOf(d16b)}（要求 1=绕过去重重注${retried16 ? '；embed 停顿重试后命中' : ''}）`,
+        `step1 首发：注入块=${blocksOf(d16a)}；step2（压缩吃掉块后）：注入块=${blocksOf(d16b)}（要求 1=补注被吃条目${retried16 ? '；embed 停顿重试后命中' : ''}）`,
         `step3（同 id）：注入块=${blocksOf(d16c)}（要求 0=不重复触发）；state.injected=${injected16}（要求 2）`,
         `lastCompactionId=${st16.lastCompactionId}（要求 acc16-c1）`,
       ],
