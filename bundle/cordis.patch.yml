@@ -53,7 +53,9 @@
         - id: persona
           name: '@deepseek-ai/dsh-persona'
           config:
-            suffix: Your working directory is {{cwd}}.
+            # 2026-10-17 上游 0.2.1 注销内置 {{cwd}} 变量：保留该句会让 prompt 组装直接失败
+            # （unknown prompt variable in section deployment:persona-suffix）。suffix 置空即省略。
+            suffix: ''
             # 2026-10-14 用户裁决：删 persona 身份句——宿主 harness:identity 已给身份，
             # 同义第二句属冗余（river-acp 家族同批清理）。prefix 留空 = 只保留平台身份行。
             prefix: ''
