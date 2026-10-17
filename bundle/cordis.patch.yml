@@ -288,8 +288,6 @@
                 provider: spawn
                 toolName: subagent
                 modelSelectionSettings: true
-                backgroundMode: continuable
-
             # Fork omits model selection so provider/model stay equal to the parent and
             # the inherited history remains eligible for KV Cache reuse. This preset
             # keeps fork continuable; parent and child inherit the same messaging tool,
@@ -299,8 +297,6 @@
               config:
                 provider: fork
                 toolName: subagent_fork
-                backgroundMode: continuable
-
             # Production dsh does not install these optional providers. Install the
             # matching Bundle in this Profile and restart the Host, then copy this
             # preset and remove `disabled` from the matching tool row. Host availability
@@ -311,7 +307,6 @@
               config:
                 provider: codex
                 toolName: subagent_codex
-                backgroundMode: one-shot
                 maxDepth: provider-managed
 
             - id: tool-subagent-claude-code
@@ -320,7 +315,6 @@
               config:
                 provider: claude-code
                 toolName: subagent_claude_code
-                backgroundMode: one-shot
                 maxDepth: provider-managed
 
             - id: workflow-ptc
