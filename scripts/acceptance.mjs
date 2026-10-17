@@ -1559,9 +1559,11 @@ hr('#29 增量锚工具输出封顶（截尾均值）+ 最小重发间隔（票0
   )
   const agent29h = createAgent('sess-nudge-29h', WS_RIVER, [textMsg('user', '做点教室建模的事')])
   await runPreStep(h29h, agent29h, 1, [], 1) // step1：state 由召回路径惰性创建（本步 handler 看不到 wstate）
-  await runPreStep(h29h, agent29h, 1, [], 2) // step2：wstate 就位 → nudgeAnchorChars 打底（growth=0）
+  await runPreStep(h29h, agent29h, 1, [], 2) // step2：wstate 就位；0 assistant 产出 → 锚未定（§3 新语义：系统注入不算增长）
+  agent29h.log.push(textMsg('assistant', '开场白，定锚。')) // 首个非零 assistant 产出
+  await runPreStep(h29h, agent29h, 1, [], 3) // step3：定锚（增长自本轮产出起算 = 0，不触发）
   agent29h.log.push(textMsg('assistant', '第一段实质进展汇报：完成沙箱验证链路的布线与契约测试基线，接下来接线被动记账。'.repeat(3)))
-  await runPreStep(h29h, agent29h, 1, [], 3) // step3：增量 ≥50 → 触发 → handler 落桶日志
+  await runPreStep(h29h, agent29h, 1, [], 4) // step4：增量 ≥50 → 触发 → handler 落桶日志
   let nudgeLogLine = ''
   try {
     nudgeLogLine =

@@ -880,6 +880,21 @@ function isToolResultMsg(m: unknown): boolean {
 }
 
 /**
+ * §3（2026-10-17 PLAN「两真会话注入通道工程优化」）：增量锚量尺——只计 assistant 产出的文本字符。
+ * 旧口径=全量消息（含系统注入与工具输出）——生产实证开局 41s 把 54K 系统注入（AGENTS/
+ * skill-catalog/召回/通知）误报成「模型增长」，13h 会话 37 次催写大多同类误报。
+ * 导出供验收直接测（先例：cappedToolChars）。
+ */
+export function assistantGrowthChars(log: unknown[]): number {
+  let chars = 0
+  for (let i = 0; i < log.length; i++) {
+    if ((log[i] as { role?: string }).role !== 'assistant') continue
+    chars += messageText(log[i]).length
+  }
+  return chars
+}
+
+/**
  * 写入节律提醒（ACP nudge 移植）：工程触发 + 弹药 + 限流，让模型在正确的时机被提醒写日记。
  * 四锚触发（任一满足即提醒）：
  *   · 时间锚 writeNudgeEveryMinutes——距上次写入/提醒超 N 分钟（兜长任务）；
@@ -1012,6 +1027,10 @@ function diaryDirFor(agent: unknown, wstate: SessionState): string | null {
  * （#11/#25/#26/#31 五连红，双盲回退 injector 后复绿，定位于此）。失败/无日记 → null。 */
 function lastDiaryTail(deps: InjectorDeps, agent: unknown, wstate: SessionState): string | null {
   void deps
+  // §3（2026-10-17 PLAN）：本会话尚无写入（未观测到 memo_write）→ 不引用「上篇止于」。
+  // 生产实证：跨会话首催引用的是**上一会话**的结尾话题（03:24 误引上会话锚），陈旧且误导。
+  // 判据用 lastDiaryWriteTurn>0（初始 0；lastDiaryWriteAt 初始=Date.now() 是防开局误触的锚，不可判此）。
+  if (wstate.lastDiaryWriteTurn <= 0) return null
   try {
     const dir = diaryDirFor(agent, wstate)
     if (!dir) return null
@@ -1066,19 +1085,14 @@ export function installInjection(
         if (decision.kind !== 'enter') return decision
         if (payload.signal?.aborted) return decision
         // 写侧观测：扫到 memo_write 工具调用 → 重置写入时钟（工程识别「模型写了」，不靠承诺）。
-        // 同一遍扫描顺带量上下文字符总量（增量锚的量尺：deriveMessages 全量文本长度和）。
+        // 同一遍扫描顺带量模型产出字符总量（增量锚的量尺：deriveMessages 里 assistant 文本长度和）。
         const wstate = peekSession(payload.agent.session.id)
         let contextChars: number | null = null
         if (wstate) {
           const log = (payload.agent.session?.deriveMessages?.() ?? []) as unknown[]
-          // 票05：增量锚的量尺——工具输出按截尾均值封顶计入（大 dump ≠ 概念进展），
-          // 其余消息（助手正文/真实用户输入）全额计入。
-          let chars = 0
-          for (let i = 0; i < log.length; i++) {
-            const t = messageText(log[i]).length
-            chars += isToolResultMsg(log[i]) ? cappedToolChars(wstate.toolLens, t) : t
-          }
-          contextChars = chars
+          // §3：量尺只计 assistant 产出（见 assistantGrowthChars 文档）。
+          // 工具输出的封顶采样（toolLens/cappedToolChars）保留给既有探针引用，不再计入本量尺。
+          contextChars = assistantGrowthChars(log)
           const from = Math.min(wstate.lastObservedLogLength, log.length)
           for (let i = from; i < log.length; i++) {
             const txt = messageText(log[i])
@@ -1095,7 +1109,7 @@ export function installInjection(
               wstate.lastDiaryWriteAt = Date.now()
               wstate.lastDiaryWriteTurn = payload.turn
               wstate.lastDiaryWriteStep = payload.step
-              wstate.nudgeAnchorChars = chars
+              wstate.nudgeAnchorChars = contextChars ?? 0
               wstate.activeMsAnchor = wstate.activeMs
               break
             }
@@ -1121,7 +1135,7 @@ export function installInjection(
             wstate.lastDiaryWriteAt = Date.now()
             wstate.lastDiaryWriteTurn = payload.turn
             wstate.lastDiaryWriteStep = payload.step
-            wstate.nudgeAnchorChars = chars
+            wstate.nudgeAnchorChars = contextChars ?? 0
             wstate.activeMsAnchor = wstate.activeMs
           }
         }

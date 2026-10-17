@@ -7,7 +7,8 @@
  *   ② 调参面板卡片：`/memo-river/tuning/panel` 的「嵌入链路」卡，含**完整可复制**的排障文本
  *
  * detail 一律写成「谁失败了/错误原文/回退到哪/影响面/怎么查」的完整段落——用户复制走就能开工。
- * 台账只在内存（进程重启即清空），事件上限 50 条；播报有冷却，防止劣化时刷屏。
+ * 台账只在内存（进程重启即清空），事件上限 50 条；对话通道按**状态转换沿**播报（degraded/recovered
+ * 各报一次，中间静默），面板卡片与日志始终全量。
  */
 
 export type EmbedHealthKind = 'failover' | 'all-failed' | 'recovered'
@@ -27,8 +28,6 @@ export interface EmbedHealthEvent {
   hint: string
 }
 
-/** 同一 (kind,lane) 的播报冷却：劣化期反复触发时只报第一条。 */
-const ANNOUNCE_COOLDOWN_MS = 5 * 60_000
 const MAX_EVENTS = 50
 
 export interface EmbedHealthSnapshot {
@@ -41,8 +40,15 @@ export interface EmbedHealthSnapshot {
 class EmbedHealthLedger {
   private seq = 0
   private events: EmbedHealthEvent[] = []
-  private announced = new Map<string, number>() // `${kind}:${lane}` → 上次播报时刻（冷却窗口用）
-  /** 已播报过的事件 id——**同一事件只报一次**；冷却窗口只用来压同类的"新"事件。 */
+  /**
+   * 状态转换沿（2026-10-17 §1，PLAN「两真会话注入通道工程优化」）：`${lane}` → 最近一次
+   * **播报**所代表的链路状态。'degraded'=该 lane 故障已播报（failover）；'ok'=恢复已播报。
+   * 同一状态持续期间的新事件一律静默吸收——取代旧的「(kind,lane) 冷却窗」语义。
+   * 旧语义的击穿点：冷却一过、新事件带新 id 又进队列 → 持续降级时每个冷却窗报一条
+   * （生产实证 genshin-ts 13h 同内容通知 77 次、模型零理会）。
+   */
+  private announcedState = new Map<string, 'degraded' | 'ok'>()
+  /** 已播报/已吸收的事件 id——同一事件只出对话通道一次；面板卡片与日志仍全量可见。 */
   private announcedIds = new Set<number>()
   counters: Record<string, number> = {}
   lastError: string | null = null
@@ -60,31 +66,47 @@ class EmbedHealthLedger {
   }
 
   /**
-   * 待播报事件（最多一条）：同 (kind,lane) 已过冷却期。
+   * 待播报事件（最多一条）：**该 lane 最新状态相对上次播报发生了转换**才返回。
+   *
+   * 语义（2026-10-17 §1）：degraded 报一次、recovered 报一次，中间无论重试多少次
+   * 全部静默（面板卡片与桶日志仍全量可见）。判定对象是「最新一条非 all-failed 事件」
+   * 所代表的状态——而非任意未播报事件：否则 degraded→recovered→degraded 快速抖动时，
+   * 中间那条已被覆盖的 recovered 会被翻出来误报。
    *
    * **`all-failed` 刻意不进对话通道**——它已有既有可见路径：注入失败走 `inject-skip` 的
    * 「召回未生效」通知、写入失败走工具报错；同一件事报两遍只会挤占每一轮的注入预算
    * （2026-10-15 实测：多发一条会把验收 #9 的「额外消息数」从 2 顶到 3）。它仍进面板卡片与日志。
    */
   pending(now = Date.now()): EmbedHealthEvent | null {
+    void now // 状态转换沿不依赖时钟（旧冷却窗语义已废弃）
+    let latest: EmbedHealthEvent | null = null
     for (let i = this.events.length - 1; i >= 0; i--) {
       const ev = this.events[i]!
       if (ev.kind === 'all-failed') continue
-      // 2026-10-15 实测缺陷：只按 (kind,lane) 做冷却 → 冷却一过，**同一条旧事件**会被重新播报
-      // （用户在同一会话里看到 10:52:34 的回退通知在 11:0x 又出现一次）。同一 id 只报一次。
-      if (this.announcedIds.has(ev.id)) continue
-      const key = `${ev.kind}:${ev.lane}`
-      const last = this.announced.get(key)
-      if (last !== undefined && now - last < ANNOUNCE_COOLDOWN_MS) continue
-      if (ev.kind === 'recovered' && this.announced.get(key) === undefined) continue // 没报过降级就别报恢复
-      return ev
+      latest = ev
+      break
     }
-    return null
+    if (!latest) return null
+    const stateOf = latest.kind === 'recovered' ? 'ok' : 'degraded'
+    const announced = this.announcedState.get(latest.lane)
+    if (announced === stateOf) {
+      // 同一状态仍在持续：吸收进状态沿，不单独播报（幂等 add，不影响面板/日志全量可见）。
+      this.announcedIds.add(latest.id)
+      return null
+    }
+    if (stateOf === 'ok' && announced === undefined) {
+      // 没报过降级就别报恢复（2026-10-15 语义保留）；进程启动时端点本就正常的 recovered 静默。
+      this.announcedIds.add(latest.id)
+      return null
+    }
+    if (this.announcedIds.has(latest.id)) return null // 防御：markAnnounced 与 pending 不在同拍时
+    return latest
   }
 
   markAnnounced(ev: EmbedHealthEvent, now = Date.now()): void {
+    void now
     this.announcedIds.add(ev.id)
-    this.announced.set(`${ev.kind}:${ev.lane}`, now)
+    this.announcedState.set(ev.lane, ev.kind === 'recovered' ? 'ok' : 'degraded')
   }
 
   snapshot(): EmbedHealthSnapshot {
@@ -99,7 +121,7 @@ class EmbedHealthLedger {
   /** 测试/探针用：清空。 */
   reset(): void {
     this.events = []
-    this.announced.clear()
+    this.announcedState.clear()
     this.announcedIds.clear()
     this.counters = {}
     this.lastError = null
