@@ -925,7 +925,8 @@ export function recallFailureNotice(
     }
   }
 
-  const text = renderInjection(finalOutcome, workspace.paths.bucket)
+  // 方法层第一刀：methodContract 关闭时传 false ⇒ 渲染逐字节等于改动前。
+  const text = renderInjection(finalOutcome, workspace.paths.bucket, deps.config.inject.methodContract)
   if (!text) {
     // 门控不过 / 无候选 / 基础设施失败 / **选中的全都在场或全部过期** → 不注入，带 fallbackReason（§6.3）。
     // 其中**基础设施失败**另发一条模型可见的短通知（见 recallFailureNotice）；
@@ -1071,6 +1072,9 @@ export const DELEGATION_TOOL_NAMES: ReadonlySet<string> = new Set([
   'send_message',
   'agent_send',
   'ralph',
+  // 0.2.1 工具名：子代理续聊改 message_agent，Team 组建改 spawn_teammate
+  'message_agent',
+  'spawn_teammate',
 ])
 
 function hasDelegationCall(message: unknown): boolean {

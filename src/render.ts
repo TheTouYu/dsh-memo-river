@@ -78,8 +78,15 @@ function inheritNote(selected: RecallCandidate[], bucket: string): string {
  *
  * 返回 `null` 表示**不注入**（门控不过 / 无候选 / 原生失败）——
  * 调用方据此完全不追加消息（§6.3「清空，不注入」）。
+ *
+ * `methodContract`（方法层第一刀，2026-10-18，缺省 false = 逐字节旧输出）：
+ * 为 true 时在块尾追加一行「用法契约」。关闭时输出与改动前完全一致。
  */
-export function renderInjection(outcome: RecallOutcome, bucket: string): string | null {
+export function renderInjection(
+  outcome: RecallOutcome,
+  bucket: string,
+  methodContract = false,
+): string | null {
   if (!outcome.injected || outcome.selected.length === 0) return null
 
   const omega = outcome.omega === null ? 'Ω=n/a' : `Ω=${outcome.omega.toFixed(3)}`
@@ -107,6 +114,24 @@ export function renderInjection(outcome: RecallOutcome, bucket: string): string 
       `[本次未注入 ${outcome.candidateCount - outcome.selected.length} 条${fallback}；候选 ${outcome.candidateCount} 条，截断 ${truncated.length} 条]`,
     )
     if (detail) lines.push(`[未注入明细] ${detail}`)
+  }
+
+  // 方法层第一刀（2026-10-18）：用法契约。
+  //
+  // 为什么需要：注入块此前 100% 是**材料**（条目 + 元数据 + 未注入说明），0% 是**方法**。
+  // 依据 `docs/DESIGN-2026-10-18-注入块用法契约.md` §1：往上下文塞更多资料成功率
+  // −0.5~−2% 而成本 +20~23%；教方法能把行为放大到 50 倍量级（点名工具 0.05→2.5 次/实例）。
+  // 写入侧早已教「怎么记」（FIXED_CONTRACT_TEXT ⑨「触发条件→动作」），读出侧一直没教「怎么用」。
+  //
+  // 三条硬约束：
+  //   ① 位置在块尾、BLOCK_CLOSE 之前 —— 正文一条不少（D257 铁律：给原料不给注解）；
+  //   ② 正向表述（全局守则第 8 条）——写「要做什么」，不写「禁止什么」；
+  //   ③ `methodContract=false` 时**不产生这一行** ⇒ 输出逐字节等于改动前。
+  if (methodContract) {
+    lines.push(
+      '[用法] 这些是过去的结论，不是当前事实：结合 D 号新旧与是否已被取代判断哪些仍然适用，' +
+        '取能改变当前做法的那几条；与眼前证据冲突时以证据为准，并把修正写下来。',
+    )
   }
 
   lines.push(BLOCK_CLOSE)

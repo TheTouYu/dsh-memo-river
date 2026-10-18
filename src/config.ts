@@ -115,6 +115,17 @@ export interface InjectConfig {
   autonomousInjectEverySteps: number
   /** 近因保底：最近 N 天内的最新日记被 k-limit/预算挤出入选集时，给它保留一席（0 = 关闭）。 */
   recencyFloorDays: number
+  /**
+   * 方法层第一刀（2026-10-18）：注入块尾要不要追加一行「用法契约」。
+   *
+   * 缺省 **false** —— 关闭时 `renderInjection` 不产生该行，输出逐字节等于改动前，
+   * 因此这一刀上线那一刻是零行为变化，可随时开关做 A/B。
+   *
+   * 为什么缺省关：这一刀本身是**对「方法层杠杆最大」这个判断的廉价检验**
+   * （见 `docs/DESIGN-2026-10-18-注入块用法契约.md` §7）。先用它测出效果，再谈默认值；
+   * 反过来（先改默认行为再找证据）就是拿生产当实验场。
+   */
+  methodContract: boolean
   /** 写入节律提醒：距上次 memo_write 超过 N 分钟且有未入河的回合进展时，注入一条写日记提醒（0 = 关闭）。 */
   writeNudgeEveryMinutes: number
   /**
@@ -411,6 +422,14 @@ export const Config: z<Config> = z.object({
       autonomousInjectEverySteps: z.number().min(0).default(15),
       /** 近因保底：最近 N 天内的最新日记被 k-limit/预算挤出入选集时，给它保留一席（0 = 关闭）。 */
       recencyFloorDays: z.number().min(0).max(365).default(7),
+      /**
+       * 方法层第一刀（2026-10-18）：注入块尾追加一行「用法契约」（缺省 false）。
+       *
+       * 关闭 = 逐字节等于改动前（验收断言的就是这一条）；开启只多一行、不动内容与选集。
+       * 依据见 `docs/DESIGN-2026-10-18-注入块用法契约.md`：塞资料成功率 −0.5~−2%，
+       * 教方法能放大行为 50 倍量级。
+       */
+      methodContract: z.boolean().default(false),
       /** 写入节律提醒：距上次 memo_write 超过 N 分钟且有未入河的回合进展时，注入一条写日记提醒（0 = 关闭）。 */
       /** 写入节律提醒·时间锚：距上次 memo_write 超 N 分钟且有未入河的回合进展时提醒（0 = 关闭）。默认 7——提醒只有两行、成本极低，收益（进展不丢）远大于扰动（2026-09-13 用户拍板：15 → 7）。 */
       writeNudgeEveryMinutes: z.number().min(0).max(1440).default(7),
