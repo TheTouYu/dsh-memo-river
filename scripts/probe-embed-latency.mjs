@@ -62,7 +62,7 @@ const N_LONG = QUICK ? 3 : 6
 const N_SUSTAIN = QUICK ? 12 : 60
 const BATCH = 32
 // 预算从**真实配置**读（别硬编码——2026-10-15 教训：预算已从 3000 改成 8000）
-const INJECT_BUDGET_MS = config.inject?.embedTimeoutMs ?? 8000
+const INJECT_BUDGET_MS = config.inject?.embedTimeoutMs ?? 15000
 const WRITE_BUDGET_MS = WRITE_EMBED_TIMEOUT_MS * (1 + WRITE_EMBED_RETRIES)
 
 let nonce = 0
