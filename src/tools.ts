@@ -1091,6 +1091,108 @@ export function installTools(
     }),
   )
 
+  /* ── memo_read（按 D 号读全文；只读，2026-10-19） ── */
+  //
+  /* 为什么需要：注入块与 memo_recall 只给「D 号 + 标题 + 摘要」，而 13 个 memo_* 工具里
+   * 唯一接收 `id` 参数的是 `memo_update` —— 也就是**写路径**。模型拿到 D 号后，
+   * 唯一能按号寻址的动作是「改写它」；想读全文只能重写 query 再赌一次召回。
+   * 依据 research/bili-agi-2026-10-19/notes/UPGRADE-PLAN.md P1（Headroom 的 CCR 第三段 retrieve）。 */
+  ctx.tools.register(
+    defineTool({
+      name: 'memo_read',
+      description:
+        '按 D 编号读取一篇日记的**完整正文**（只读，不修改）。' +
+        '被动注入块与 memo_recall 只给摘要与 D 号；需要完整论证、精确数字或全部 Tag 时用本工具按号取全文。' +
+        '找不到时明确报错，不静默返回空。',
+      parameters: {
+        id: { type: 'number', description: '目标 D-id（memo_recall/memo_stats/注入块里的 D 编号）。与 title 二选一。' },
+        title: { type: 'string', description: '目标标题子串（匹配多篇时列出候选让你用 id 重试）。与 title 二选一。' },
+      },
+      output: TEXT_OUTPUT,
+      isConcurrencySafe: () => true,
+      async execute(args: Record<string, unknown>, exec: unknown) {
+        const { cwd } = viewerOf(exec)
+        const workspace = deps.getWorkspace(cwd)
+        return workspace.withDb(async () => {
+          const chunks = workspace.store.chunks()
+          const owners = workspace.store.chunkOwners()
+          /* 双口径解析（与 markSupersededByD 同）：展示口径是 chunk id，历史上也接受 fileId。 */
+          const resolveChunk = (n: number): { fileId: number; chunk: (typeof chunks)[number] } | null => {
+            const byChunk = chunks.find((c) => c.id === n)
+            if (byChunk) return { fileId: byChunk.file_id, chunk: byChunk }
+            const owner = owners.get(n)
+            if (!owner) return null
+            const first = chunks.filter((c) => c.file_id === owner.fileId).sort((a, b) => a.chunk_index - b.chunk_index)[0]
+            return first ? { fileId: owner.fileId, chunk: first } : null
+          }
+          const titleOf = (fileId: number): string => {
+            const cs = chunks.filter((c) => c.file_id === fileId).sort((a, b) => a.chunk_index - b.chunk_index)
+            const first = cs[0]?.content ?? ''
+            const m = first.match(/^#\s+(.+)$/m)
+            return m ? m[1]!.trim() : (cs[0] ? first.split('\n')[0]!.slice(0, 60) : `file#${fileId}`)
+          }
+
+          let hit: { fileId: number; chunk: (typeof chunks)[number] } | null = null
+          if (typeof args.id === 'number') {
+            hit = resolveChunk(args.id)
+            if (!hit) {
+              return `【记忆河流·memo_read】桶 ${workspace.paths.bucket} 里没有 D${args.id}。\n· 用 memo_recall 或 memo_stats 取有效 D 号。`
+            }
+          } else if (typeof args.title === 'string' && args.title.trim()) {
+            const needle = args.title.trim()
+            const fileIds = [...new Set(chunks.map((c) => c.file_id))]
+            const hits = fileIds.filter((fid) => titleOf(fid).includes(needle))
+            if (hits.length === 0) {
+              return `【记忆河流·memo_read】桶 ${workspace.paths.bucket} 里没有标题含「${needle}」的日记。`
+            }
+            if (hits.length > 1) {
+              const shown = hits.slice(0, 10).map((fid) => {
+                const c = chunks.filter((x) => x.file_id === fid).sort((a, b) => a.chunk_index - b.chunk_index)[0]
+                return `· D${c?.id ?? fid}「${titleOf(fid)}」`
+              })
+              return (
+                `【记忆河流·memo_read】「${needle}」匹配 ${hits.length} 篇，请用 id 指定：\n` +
+                shown.join('\n') +
+                (hits.length > 10 ? `\n· …还有 ${hits.length - 10} 篇` : '')
+              )
+            }
+            const fid = hits[0]!
+            const first = chunks.filter((c) => c.file_id === fid).sort((a, b) => a.chunk_index - b.chunk_index)[0]
+            hit = first ? { fileId: fid, chunk: first } : null
+            if (!hit) return `【记忆河流·memo_read】D 编号解析失败（fileId=${fid}）。`
+          } else {
+            return '【记忆河流·memo_read】需要 id 或 title 之一。'
+          }
+
+          const body = chunks
+            .filter((c) => c.file_id === hit!.fileId)
+            .sort((a, b) => a.chunk_index - b.chunk_index)
+            .map((c) => c.content)
+            .join('\n')
+          const tagNames = workspace.store.fileTags(hit.fileId).map((t) => t.name)
+          const sup = workspace.store.supersessions()
+          const supersededBy = sup.get(hit.fileId)
+          const supersedes = [...sup.values()].filter((s) => s.newFileId === hit!.fileId)
+
+          const head =
+            `【记忆河流·memo_read】D${hit.chunk.id}「${titleOf(hit.fileId)}」\n` +
+            `· 桶=${workspace.paths.bucket} 字数=${body.length}` +
+            (tagNames.length > 0 ? ` Tag=${tagNames.join(', ')}` : '')
+          const rel: string[] = []
+          if (supersededBy) {
+            rel.push(
+              `· ⚠️ 本篇已被 D${supersededBy.newFileId ?? '(废止)'} 取代` +
+                (supersededBy.reason ? `（${supersededBy.reason}）` : '') +
+                '——不再作为当前事实',
+            )
+          }
+          if (supersedes.length > 0) rel.push(`· 本篇取代了 ${supersedes.map((s) => `D${s.oldFileId}`).join('、')}`)
+          return [head, ...rel, '', body].join('\n')
+        })
+      },
+    }),
+  )
+
   /* ── memo_stats（§7.3 四项体检） ── */
   ctx.tools.register(
     defineTool({
