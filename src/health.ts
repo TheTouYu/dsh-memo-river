@@ -414,7 +414,12 @@ export function formatHealth(report: HealthReport): string {
       ? `· ⑤ 使用台账（kv 观测，不进打分）：常用 top=${report.usage.top
           .map((t) => `D${t.fileId}×${t.total}(被${t.passive}/主${t.active})`)
           .join(' ') || '-'}；从未使用 ${report.usage.neverUsed}/${report.usage.files}（${(report.usage.neverRatio * 100).toFixed(1)}%）；` +
-        `${report.usage.staleDays} 篇 >${report.usage.staleThreshold} 天未动${report.usage.legacyOnly > 0 ? `；${report.usage.legacyOnly} 篇仅遗留集足迹` : ''}`
+        `${report.usage.staleDays} 篇 >${report.usage.staleThreshold} 天未动${report.usage.legacyOnly > 0 ? `；${report.usage.legacyOnly} 篇仅遗留集足迹` : ''}` +
+        /* Critic 传感器读数（2026-10-19）。**必须印出来**——字段建了不渲染，等于传感器不存在
+         * （v1 曾把验收写成「memo_stats 里看到 hurtTotal」，而 formatHealth 根本不印它，
+         * 那条验收永远红。由 UPGRADE-PLAN-v2 的架构审查抓出）。 */
+        `；Critic：hurt 累计 ${report.usage.hurtTotal ?? 0} 次 / ${report.usage.hurtFiles ?? 0} 篇` +
+        (report.usage.hurtTotal ? '' : '（尚无观测：需召回后被用户纠偏）')
       : '· ⑤ 使用台账 = 无从判定（空库：先入语料再谈使用分布）',
   ]
   if (report.warnings.length > 0) {

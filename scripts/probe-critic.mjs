@@ -224,5 +224,40 @@ console.log('\n══════ C6 待判集：只在紧接着的下一轮生�
   check('pending 空集 → 空', hurtTargets({ fileIds: [], turn: 5 }, '不对吧', 6).length === 0, '')
 }
 
+
+console.log('\n══════ C7 读数可见：formatHealth 必须印出 hurt ══════')
+{
+  /* 这条是 UPGRADE-PLAN-v2 抓出的真缺陷：字段建了、buildUsageView 也算了，
+   * 但 formatHealth 不渲染 ⇒ memo_stats 永远显示不出来，任何「看到 hurtTotal」的
+   * 验收都不可达。探针必须锚「印出来」而不是「算出来」。 */
+  const healthMod = lib('health.js')
+  const ledgerRaw = JSON.stringify({
+    1: { passive: 5, active: 1, lastPassiveAt: Date.now(), lastActiveAt: Date.now(), hurt: 3, lastHurtAt: Date.now() },
+    2: { passive: 2, active: 0, lastPassiveAt: Date.now(), lastActiveAt: null },
+  })
+  const kv = new Map([[healthMod.KV_USAGE, ledgerRaw]])
+  const store = {
+    kvGet: (k) => (kv.has(k) ? kv.get(k) : null),
+    kvSet: (k, v) => void kv.set(k, v),
+    counts: () => ({ tags: 1, files: 2, chunks: 2, fileTags: 2 }),
+    tagFrequency: () => [],
+    tags: () => [{ id: 1, name: 'probe-tag' }],
+    files: () => [1, 2].map((id) => ({ id, path: `/x/${id}.md`, diary_name: 'probe', checksum: 'c', mtime: 0, size: 1, updated_at: 0 })),
+    fileTags: () => [],
+    allFileIds: () => [1, 2],
+    edges: () => [],
+  }
+  let text = ''
+  let threw = null
+  try {
+    text = healthMod.formatHealth(healthMod.healthReport(store, 'probe-bucket'))
+  } catch (e) {
+    threw = e
+  }
+  check('formatHealth 可调用', threw === null, threw ? String(threw).slice(0, 120) : '')
+  check('印出 hurt 累计次数', /hurt 累计 3 次/.test(text), '')
+  check('印出 hurt 篇数', /\/ 1 篇/.test(text), '')
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败${fail === 0 ? '  ✅ 全绿' : ''}`)
 process.exit(fail === 0 ? 0 : 1)
