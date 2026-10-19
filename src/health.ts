@@ -75,7 +75,11 @@ export interface UsageView {
   neverUsed: number
   neverRatio: number
   /** 按总次数降序的头部（≤5）。 */
-  top: Array<{ fileId: number; total: number; passive: number; active: number; lastAt: number | null; hurt?: number }>
+  /** `chunkId` = **展示口径**（与注入块 / memo_read 一致）；`fileId` = 台账内部键（稳定）。
+   * 两套编号在 99/253 篇上分叉（`chunk.id` 是 AUTOINCREMENT 且 `memo_update` 走 DELETE+重插），
+   * 只印 fileId 会让用户把 D 号喂回 memo_read 时解析错篇（2026-10-19 实测：0 条已歧义，
+   * 但形状本身有雷——一律按 chunkId 展示）。 */
+  top: Array<{ fileId: number; chunkId?: number; total: number; passive: number; active: number; lastAt: number | null; hurt?: number }>
   /** 有足迹但最近 staleDays 天内没有任何使用的篇数。 */
   staleDays: number
   staleThreshold: number
@@ -268,6 +272,16 @@ function parseKv<T>(raw: string | null, fallback: T): T {
 function buildUsageView(store: KnowledgeStore, allFileIds: readonly number[], now: number = Date.now()): UsageView | null {
   if (allFileIds.length === 0) return null
   const ledger = readUsageLedger(store)
+  /* fileId → chunkId（展示口径）。台账按 fileId 记账（稳定），但对外一律用 chunkId 展示，
+   * 与注入块 `render.ts:62` 和 `memo_read` 的解析口径对齐。 */
+  const chunkIdOf = new Map<number, number>()
+  try {
+    for (const c of store.chunks()) {
+      if (!chunkIdOf.has(c.file_id) || c.chunk_index === 0) chunkIdOf.set(c.file_id, c.id)
+    }
+  } catch {
+    /* 读 chunks 失败就退回 fileId 展示（不阻断体检） */
+  }
   const legacy = new Set(parseKv<number[]>(store.kvGet(KV_RECALLED), []))
 
   const rows: UsageView['top'][number][] = []
@@ -287,6 +301,7 @@ function buildUsageView(store: KnowledgeStore, allFileIds: readonly number[], no
     if (e) {
       rows.push({
         fileId: id,
+        chunkId: chunkIdOf.get(id),
         total: e.passive + e.active,
         passive: e.passive,
         active: e.active,
@@ -412,7 +427,7 @@ export function formatHealth(report: HealthReport): string {
     }）`,
     report.usage
       ? `· ⑤ 使用台账（kv 观测，不进打分）：常用 top=${report.usage.top
-          .map((t) => `D${t.fileId}×${t.total}(被${t.passive}/主${t.active})`)
+          .map((t) => `D${t.chunkId ?? t.fileId}×${t.total}(被${t.passive}/主${t.active})`)
           .join(' ') || '-'}；从未使用 ${report.usage.neverUsed}/${report.usage.files}（${(report.usage.neverRatio * 100).toFixed(1)}%）；` +
         `${report.usage.staleDays} 篇 >${report.usage.staleThreshold} 天未动${report.usage.legacyOnly > 0 ? `；${report.usage.legacyOnly} 篇仅遗留集足迹` : ''}` +
         /* Critic 传感器读数（2026-10-19）。**必须印出来**——字段建了不渲染，等于传感器不存在

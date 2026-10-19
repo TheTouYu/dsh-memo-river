@@ -300,5 +300,38 @@ console.log('\n══════ C9 多桶记账：继承条目必须回到父�
   check('audits.selectionKeys 源是 finalOutcome', /selectionKeys: finalOutcome\.selected/.test(src), '')
 }
 
+
+console.log('\n══════ C10 D 号口径：展示层一律 chunkId（与注入块一致） ══════')
+{
+  /* 本仓两套编号：`chunk.id`（注入块 render.ts:62 与 memo_read 印它）与
+   * `files.id`（台账内部键）。实测 99/253 = 39.1% 分叉。展示层若印 fileId，
+   * 用户把它喂回 memo_read 会解析到别的篇——今天交叉命中 0 条，但形状有雷。 */
+  const { DatabaseSync } = await import('node:sqlite')
+  const dbPath = '/home/h/.dsh/memo-river/b94d8836d6175817/knowledge_base.sqlite'
+  let diverged = 0, total = 0
+  try {
+    const db = new DatabaseSync(dbPath, { readOnly: true })
+    const rows = db.prepare('SELECT id, file_id FROM chunks').all()
+    total = rows.length
+    for (const r of rows) if (Number(r.id) !== Number(r.file_id)) diverged += 1
+    db.close()
+  } catch (e) {
+    check('可读生产库（否则本项跳过）', false, String(e).slice(0, 80))
+  }
+  check('两套编号确实分叉（证明本项有意义）', diverged > 0,
+    `${diverged}/${total} = ${total ? (100 * diverged / total).toFixed(1) : 0}%`)
+
+  const healthSrc = await import('node:fs').then((m) =>
+    m.readFileSync(new URL('../src/health.ts', import.meta.url), 'utf8'))
+  check('UsageView 暴露 chunkId', healthSrc.includes('chunkId?: number'), '')
+  check('formatHealth 优先印 chunkId',
+    healthSrc.includes('t.chunkId ?? t.fileId'), '')
+
+  const toolsSrc = await import('node:fs').then((m) =>
+    m.readFileSync(new URL('../src/tools.ts', import.meta.url), 'utf8'))
+  check('memo_read 先按 chunk id 再按 fileId 兜底',
+    /const byChunk = chunks\.find/.test(toolsSrc) && /byFileId/.test(toolsSrc), '')
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败${fail === 0 ? '  ✅ 全绿' : ''}`)
 process.exit(fail === 0 ? 0 : 1)

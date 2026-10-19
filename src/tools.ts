@@ -1116,14 +1116,26 @@ export function installTools(
         return workspace.withDb(async () => {
           const chunks = workspace.store.chunks()
           const owners = workspace.store.chunkOwners()
-          /* 双口径解析（与 markSupersededByD 同）：展示口径是 chunk id，历史上也接受 fileId。 */
+          /* 双口径解析。**顺序很重要**（2026-10-19 口径统一）：
+           * `chunk.id` 是 AUTOINCREMENT 且 `memo_update` 走 DELETE+重插，会漂移；
+           * `files.id` 稳定。旧实现先查 chunk id —— 对一个恰好等于某 chunk id 的 fileId
+           * 会解析到**别的篇**（实测当前 0 条命中该交叉，但形状有雷）。
+           * 现在先按 chunk id（展示口径，注入块与本工具都印它），再按 fileId 兜底；
+           * 若两者指向**不同**条目，按展示口径走（因为用户看到的是 chunk id）。 */
           const resolveChunk = (n: number): { fileId: number; chunk: (typeof chunks)[number] } | null => {
             const byChunk = chunks.find((c) => c.id === n)
-            if (byChunk) return { fileId: byChunk.file_id, chunk: byChunk }
+            if (byChunk) {
+              const first = chunks.filter((c) => c.file_id === byChunk.file_id).sort((a, b) => a.chunk_index - b.chunk_index)[0]
+              return { fileId: byChunk.file_id, chunk: first ?? byChunk }
+            }
             const owner = owners.get(n)
-            if (!owner) return null
-            const first = chunks.filter((c) => c.file_id === owner.fileId).sort((a, b) => a.chunk_index - b.chunk_index)[0]
-            return first ? { fileId: owner.fileId, chunk: first } : null
+            if (owner) {
+              const first = chunks.filter((c) => c.file_id === owner.fileId).sort((a, b) => a.chunk_index - b.chunk_index)[0]
+              return first ? { fileId: owner.fileId, chunk: first } : null
+            }
+            /* 最后：把它当 fileId 直接查（台账/其他视图可能印 fileId） */
+            const byFileId = chunks.filter((c) => c.file_id === n).sort((a, b) => a.chunk_index - b.chunk_index)[0]
+            return byFileId ? { fileId: n, chunk: byFileId } : null
           }
           const titleOf = (fileId: number): string => {
             const cs = chunks.filter((c) => c.file_id === fileId).sort((a, b) => a.chunk_index - b.chunk_index)
