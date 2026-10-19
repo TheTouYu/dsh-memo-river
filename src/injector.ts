@@ -980,15 +980,26 @@ export function recallFailureNotice(
    * ①让「未覆盖率/常用 top」失真 ②让 `selectionExposureCap` 罚错对象。
    * 记账失败不阻断注入（观测不能伤害主流程）。 */
   try {
-    const renderedIds = finalOutcome.selected.filter((c) => c.srcBucket === undefined).map((c) => c.fileId)
-    if (renderedIds.length > 0) {
-      await workspace.withDb(async () => {
-        recordUsage(workspace.store, renderedIds, 'passive')
+    /* **按桶分组**：`srcBucket === undefined` 归主桶，带 `@桶名` 的归父桶。
+     * 只记主桶会漏掉继承条目——实测本桶 654 轮 `inherited=` 合计 546 条次 / 4463 席位
+     * = 12.1% 的渲染内容失去召回足迹，父桶台账从此冻结（第一版就踩了这个坑）。 */
+    const byBucket = new Map<string, number[]>()
+    for (const c of finalOutcome.selected) {
+      const b = c.srcBucket ?? workspace.paths.bucket
+      const list = byBucket.get(b) ?? []
+      list.push(c.fileId)
+      byBucket.set(b, list)
+    }
+    for (const part of fed.parts) {
+      const ids = byBucket.get(part.workspace.paths.bucket)
+      if (!ids || ids.length === 0) continue
+      await part.workspace.withDb(async () => {
+        recordUsage(part.workspace.store, ids, 'passive')
       })
     }
     logger.info(
-      `rendered bucket=${workspace.paths.bucket} n=${renderedIds.length} ` +
-        `ofSeats=${outcome.selected.length} session=${sessionId}`,
+      `rendered bucket=${workspace.paths.bucket} n=${finalOutcome.selected.length} ` +
+        `buckets=${byBucket.size} ofSeats=${outcome.selected.length} session=${sessionId}`,
     )
   } catch (e) {
     logger.warn(`record-rendered-failed: ${String((e as Error)?.message ?? e)}`)
@@ -1001,7 +1012,11 @@ export function recallFailureNotice(
    * 用「用户是否纠偏」判定是否记 hurt。只收本桶（srcBucket undefined）——
    * 跨桶 id 在各自桶的编号空间里指向不同日记，误记会污染别的桶的台账。 */
   state.pendingHurt = {
-    fileIds: outcome.selected.filter((c) => c.srcBucket === undefined).map((c) => c.fileId),
+    /* 源必须是**渲染集**（`finalOutcome`），不是滤刀前的 `outcome`——
+     * 否则「被回声/去重/过注入滤掉的条目」也会被算进待判集，
+     * 用户纠偏时给从未出现在上下文里的条目记 hurt（假 hurt，见 UPGRADE-PLAN-v2 D5 失效模式）。
+     * 只收本桶：跨桶 id 在各自桶的编号空间里指向不同日记。 */
+    fileIds: finalOutcome.selected.filter((c) => c.srcBucket === undefined).map((c) => c.fileId),
     turn,
     at: Date.now(),
   }
@@ -1019,7 +1034,8 @@ export function recallFailureNotice(
     totalMessages: null,
     assistantAfter: null,
     // 条目级去重的反查表：下一轮 liveInjectedKeys() 靠 blockHash 找到这些键。
-    selectionKeys: outcome.selected.map((c) => candidateKey(c, workspace.paths.bucket)),
+    // 用渲染集：键的含义是「这一块里**真正有**哪些条目」，用入选池会把滤掉的也算进去。
+    selectionKeys: finalOutcome.selected.map((c) => candidateKey(c, workspace.paths.bucket)),
     at: Date.now(),
   })
   // 长会话有界：审计只服务「本会话最近注入块的可见性反查」，200 条远超实际同时在场的块数。

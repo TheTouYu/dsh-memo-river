@@ -1187,6 +1187,14 @@ export function installTools(
             )
           }
           if (supersedes.length > 0) rel.push(`· 本篇取代了 ${supersedes.map((s) => `D${s.oldFileId}`).join('、')}`)
+          /* 按号回读是**最强的刻意使用信号**（UPGRADE-PLAN-v2 D1-2）：读的是哪条就是哪条，
+           * 唯一能唯一归因到单条的动作。之前这张工具体内没有任何记账，信号白躺在那里。
+           * 记账失败不阻断读取（观测不能伤害主流程）。 */
+          try {
+            recordUsage(workspace.store, [hit.fileId], 'active')
+          } catch {
+            /* 静默：台账问题不得让读全文失败 */
+          }
           return [head, ...rel, '', body].join('\n')
         })
       },

@@ -69,7 +69,20 @@ const tool = (name) => h.registered.tools.find((t) => t.name === name)
 const readTool = tool('memo_read')
 check('memo_read 已注册', !!readTool, readTool ? '' : '未找到')
 if (!readTool) {
-  console.log(`\n结果：${pass} 通过 / ${fail} 失败`)
+  
+console.log('\n══════ R5 记账：按号回读记一次 active（最强使用信号） ══════')
+{
+  const { readUsageLedger } = await import('../lib/health.js')
+  const before = await ws.withDb(async () => readUsageLedger(ws.store).get(fileA)?.active ?? 0)
+  await readTool.execute({ id: idA }, execStub(WS))
+  const after = await ws.withDb(async () => readUsageLedger(ws.store).get(fileA)?.active ?? 0)
+  check('read 一次 → active +1', after === before + 1, `${before} → ${after}`)
+  await readTool.execute({ id: idA }, execStub(WS))
+  const after2 = await ws.withDb(async () => readUsageLedger(ws.store).get(fileA)?.active ?? 0)
+  check('再读一次 → 再 +1（累加）', after2 === after + 1, `${after} → ${after2}`)
+}
+
+console.log(`\n结果：${pass} 通过 / ${fail} 失败`)
   process.exit(1)
 }
 
@@ -155,6 +168,18 @@ console.log('\n══════ R4 只读：调用前后语料不变 ═══
   const after = await ws.withDb(async () => ({ files: ws.store.files().length, chunks: ws.store.chunks().length }))
   check('篇数不变', before.files === after.files, `${before.files} → ${after.files}`)
   check('chunk 数不变', before.chunks === after.chunks, `${before.chunks} → ${after.chunks}`)
+}
+
+console.log('\n══════ R5 记账：按号回读记一次 active（最强使用信号） ══════')
+{
+  const { readUsageLedger } = await import('../lib/health.js')
+  const beforeActive = await ws.withDb(async () => readUsageLedger(ws.store).get(fileA)?.active ?? 0)
+  await readTool.execute({ id: idA }, execStub(WS))
+  const afterActive = await ws.withDb(async () => readUsageLedger(ws.store).get(fileA)?.active ?? 0)
+  check('read 一次 → active +1', afterActive === beforeActive + 1, `${beforeActive} → ${afterActive}`)
+  await readTool.execute({ id: idA }, execStub(WS))
+  const after2 = await ws.withDb(async () => readUsageLedger(ws.store).get(fileA)?.active ?? 0)
+  check('再读一次 → 再 +1（累加）', after2 === afterActive + 1, `${afterActive} → ${after2}`)
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败${fail === 0 ? '  ✅ 全绿' : ''}`)

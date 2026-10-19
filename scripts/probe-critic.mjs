@@ -268,16 +268,36 @@ console.log('\n══════ C8 仪器面：全部被滤掉的一轮，台�
   const injectorSrc = await import('node:fs').then((m) =>
     m.readFileSync(new URL('../src/injector.ts', import.meta.url), 'utf8'))
 
-  const recIdx = injectorSrc.indexOf("recordUsage(workspace.store, renderedIds, 'passive')")
+  const recIdx = injectorSrc.indexOf("recordUsage(part.workspace.store, ids, 'passive')")
   const filterIdx = injectorSrc.indexOf('filterOverInjected(echoOut.kept')
   const renderIdx = injectorSrc.indexOf('renderInjection(finalOutcome')
   check('记账点存在', recIdx > 0, `offset=${recIdx}`)
   check('记账在滤刀之后', recIdx > filterIdx && filterIdx > 0, `record=${recIdx} filter=${filterIdx}`)
   check('记账在渲染之后', recIdx > renderIdx && renderIdx > 0, `record=${recIdx} render=${renderIdx}`)
   check('记的是 finalOutcome（渲染集）而非入选池',
-    injectorSrc.includes('finalOutcome.selected.filter'), '')
+    /for \(const c of finalOutcome\.selected\)/.test(injectorSrc), '')
   check('旧虚高记账已移除',
     !injectorSrc.includes("recordUsage(part.workspace.store, part.injectedFileIds, 'passive')"), '')
+}
+
+
+console.log('\n══════ C9 多桶记账：继承条目必须回到父桶（防 12.1% 足迹丢失） ══════')
+{
+  /* 第一版把记账集写成 `finalOutcome.selected.filter(c => c.srcBucket === undefined)`
+   * —— 只记本桶，父桶从此没有任何 passive 足迹。实测本桶 654 轮 inherited= 合计
+   * 546 条次 / 4463 席位 = 12.1% 的渲染内容失去召回足迹，且**无任何测试守这条**。
+   * 本项锚「按 srcBucket 分组记账」这一形状。 */
+  const src = await import('node:fs').then((m) =>
+    m.readFileSync(new URL('../src/injector.ts', import.meta.url), 'utf8'))
+
+  check('按 srcBucket 分组', src.includes('c.srcBucket ?? workspace.paths.bucket'), '')
+  check('遍历 fed.parts 各记各桶', /for \(const part of fed\.parts\)[\s\S]{0,400}recordUsage/.test(src), '')
+  check('不再只记本桶（旧的 filter undefined 形状已改）',
+    !src.includes("finalOutcome.selected.filter((c) => c.srcBucket === undefined).map((c) => c.fileId)\n    if (renderedIds"), '')
+
+  /* pendingHurt 与 audits 也必须用渲染集，否则假 hurt / 假去重键 */
+  check('pendingHurt 源是 finalOutcome', /state\.pendingHurt = \{[\s\S]{0,400}finalOutcome\.selected/.test(src), '')
+  check('audits.selectionKeys 源是 finalOutcome', /selectionKeys: finalOutcome\.selected/.test(src), '')
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败${fail === 0 ? '  ✅ 全绿' : ''}`)
