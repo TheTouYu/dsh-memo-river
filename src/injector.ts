@@ -748,9 +748,9 @@ export function recallFailureNotice(
     for (const part of fed.parts) {
       await part.workspace.withDb(async () => {
         recordOmega(part.workspace.store, part.outcome.omega, part.outcome.regime ?? '')
-        if (part.injectedFileIds.length > 0) {
-          recordUsage(part.workspace.store, part.injectedFileIds, 'passive')
-        }
+        /* 注意：`passive` 记账**不在这里**——它必须发生在全部滤刀之后、渲染成功之后，
+         * 否则台账记的是「入选」而不是「送进上下文的」（实测虚高 1.41×，
+         * 见 UPGRADE-PLAN-v2 G1 与本文件下方 render 之后的记账点）。 */
       })
     }
   } catch (e) {
@@ -969,6 +969,29 @@ export function recallFailureNotice(
     state.skippedCount += 1
     logger.info(`${renderSkipNotice({ ...finalOutcome, fallbackReason: reason }, workspace.paths.bucket)} session=${sessionId}`)
     return null
+  }
+
+  /* 使用台账 `passive` 的**正确记账点**（2026-10-19，UPGRADE-PLAN-v2 G1）：
+   * 必须在此处——全部滤刀（回声/过注入/弱信号/去重/取代）已过、`renderInjection`
+   * 已返回非 null。记的集合 = `finalOutcome.selected`，即**真正进了那段文本的条目**。
+   *
+   * 之前记在滤刀之前（按 `part.injectedFileIds` = 入选池），实测虚高 1.41×：
+   * 648 轮日志列出 4402 席位、各滤刀剔 1275、实际渲染约 3127。虚高的台账会
+   * ①让「未覆盖率/常用 top」失真 ②让 `selectionExposureCap` 罚错对象。
+   * 记账失败不阻断注入（观测不能伤害主流程）。 */
+  try {
+    const renderedIds = finalOutcome.selected.filter((c) => c.srcBucket === undefined).map((c) => c.fileId)
+    if (renderedIds.length > 0) {
+      await workspace.withDb(async () => {
+        recordUsage(workspace.store, renderedIds, 'passive')
+      })
+    }
+    logger.info(
+      `rendered bucket=${workspace.paths.bucket} n=${renderedIds.length} ` +
+        `ofSeats=${outcome.selected.length} session=${sessionId}`,
+    )
+  } catch (e) {
+    logger.warn(`record-rendered-failed: ${String((e as Error)?.message ?? e)}`)
   }
 
   state.lastInjectionText = text

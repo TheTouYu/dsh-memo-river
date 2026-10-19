@@ -259,5 +259,26 @@ console.log('\n══════ C7 读数可见：formatHealth 必须印出 hu
   check('印出 hurt 篇数', /\/ 1 篇/.test(text), '')
 }
 
+
+console.log('\n══════ C8 仪器面：全部被滤掉的一轮，台账不得增长（G1） ══════')
+{
+  /* UPGRADE-PLAN-v2 G1 的可执行证明：旧实现把「入选池」记为 passive，
+   * 即使全部被滤刀清空也照样记账。这条锚的是**代码位置**——
+   * 记账必须在滤刀之后、渲染成功之后（源码断言，因为无法在纯函数层复现整条 inject 链）。 */
+  const injectorSrc = await import('node:fs').then((m) =>
+    m.readFileSync(new URL('../src/injector.ts', import.meta.url), 'utf8'))
+
+  const recIdx = injectorSrc.indexOf("recordUsage(workspace.store, renderedIds, 'passive')")
+  const filterIdx = injectorSrc.indexOf('filterOverInjected(echoOut.kept')
+  const renderIdx = injectorSrc.indexOf('renderInjection(finalOutcome')
+  check('记账点存在', recIdx > 0, `offset=${recIdx}`)
+  check('记账在滤刀之后', recIdx > filterIdx && filterIdx > 0, `record=${recIdx} filter=${filterIdx}`)
+  check('记账在渲染之后', recIdx > renderIdx && renderIdx > 0, `record=${recIdx} render=${renderIdx}`)
+  check('记的是 finalOutcome（渲染集）而非入选池',
+    injectorSrc.includes('finalOutcome.selected.filter'), '')
+  check('旧虚高记账已移除',
+    !injectorSrc.includes("recordUsage(part.workspace.store, part.injectedFileIds, 'passive')"), '')
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败${fail === 0 ? '  ✅ 全绿' : ''}`)
 process.exit(fail === 0 ? 0 : 1)
