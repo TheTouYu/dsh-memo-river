@@ -45,12 +45,24 @@ export interface OmegaSample {
   at: number
 }
 
-/** 单篇日记的使用台账条目。p/a = 被动注入 / 主动补证次数；lastP/lastA = 最近一次毫秒时间戳。 */
+/** 单篇日记的使用台账条目。p/a = 被动注入 / 主动补证次数；lastP/lastA = 最近一次毫秒时间戳。
+ *
+ * `hurt` = **Critic 传感器**（2026-10-19，依据 Ratchet/Library Drift「作者侧已够、管理员侧是空的」判读）：
+ * 记录「这篇被召回之后，当轮出现了用户纠偏」的次数。它与 passive/active 的区别是本仓此前缺失的那一维
+ * ——passive/active 只说明**用没用过**，hurt 说明**用了之后有没有把事情做坏**。
+ *
+ * 为什么用「用户纠偏」而不是 LLM 裁判：Ratchet 的核心边界是裁判把失败判成通过会**置换淘汰统计量**
+ * 且规则内部无法校正。用户纠偏是 deterministic 事件，不落入该陷阱。
+ * 缺省 0（旧库条目无此字段，读时按 0 处理——非破坏性扩展）。 */
 export interface UsageEntry {
   passive: number
   active: number
   lastPassiveAt: number | null
   lastActiveAt: number | null
+  /** 召回后当轮出现用户纠偏的次数（缺省 0）。 */
+  hurt?: number
+  /** 最近一次 hurt 的毫秒时间戳。 */
+  lastHurtAt?: number | null
 }
 
 export type UsageKind = 'passive' | 'active'
@@ -63,12 +75,16 @@ export interface UsageView {
   neverUsed: number
   neverRatio: number
   /** 按总次数降序的头部（≤5）。 */
-  top: Array<{ fileId: number; total: number; passive: number; active: number; lastAt: number | null }>
+  top: Array<{ fileId: number; total: number; passive: number; active: number; lastAt: number | null; hurt?: number }>
   /** 有足迹但最近 staleDays 天内没有任何使用的篇数。 */
   staleDays: number
   staleThreshold: number
   /** 只存在于遗留布尔集、台账里没有的篇数（迁移可见性，>0 说明老足迹在种子集里）。 */
   legacyOnly: number
+  /** Critic 传感器：累计「召回后当轮出现用户纠偏」次数（缺省 0 表示尚无观测）。 */
+  hurtTotal?: number
+  /** 至少记过一次 hurt 的篇数。 */
+  hurtFiles?: number
 }
 
 export interface HealthReport {
@@ -156,12 +172,17 @@ export function readUsageLedger(store: KnowledgeStore): Map<number, UsageEntry> 
   for (const [k, v] of Object.entries(raw)) {
     const id = Number(k)
     if (!Number.isSafeInteger(id) || id <= 0 || !v || typeof v !== 'object') continue
-    out.set(id, {
+    const entry: UsageEntry = {
       passive: Number.isFinite(v.passive) ? v.passive : 0,
       active: Number.isFinite(v.active) ? v.active : 0,
       lastPassiveAt: typeof v.lastPassiveAt === 'number' ? v.lastPassiveAt : null,
       lastActiveAt: typeof v.lastActiveAt === 'number' ? v.lastActiveAt : null,
-    })
+    }
+    // hurt 必须一起读出来，否则 readUsageLedger→写回 的读改写链会把这一维丢掉
+    // （2026-10-19 探针 C1 抓到的真 bug：首版只复制 p/a/lastP/lastA，hurt 永远累加不上去）。
+    if (Number.isFinite(v.hurt)) entry.hurt = v.hurt
+    if (typeof v.lastHurtAt === 'number') entry.lastHurtAt = v.lastHurtAt
+    out.set(id, entry)
   }
   return out
 }
@@ -202,6 +223,36 @@ export function recalledFileIds(store: KnowledgeStore): Set<number> {
   return ids
 }
 
+/**
+ * **Critic 传感器**：记一次「召回之后当轮出现用户纠偏」（2026-10-19）。
+ *
+ * 与 `recordUsage` 同一条 KV 通道、同样不进打分、同样不触发资产重建（三条红线一致）。
+ * 只增计数，不删不降——**本函数不驱动任何自动退役**：Ratchet 的 A4 消融实测
+ * 「证据下限不足时按贡献退役会把 pass@1 压到 −0.019，低于无技能基线」，
+ * 故此处只采集，退役判据留待召回次数攒够（<10 次禁止自动退役）后再谈。
+ */
+export function recordHurt(
+  store: KnowledgeStore,
+  fileIds: readonly number[],
+  at: number = Date.now(),
+): void {
+  if (fileIds.length === 0) return
+  const ledger = readUsageLedger(store)
+  let touched = false
+  for (const id of new Set(fileIds)) {
+    if (!Number.isSafeInteger(id) || id <= 0) continue
+    const e = ledger.get(id) ?? { passive: 0, active: 0, lastPassiveAt: null, lastActiveAt: null }
+    e.hurt = (e.hurt ?? 0) + 1
+    e.lastHurtAt = at
+    ledger.set(id, e)
+    touched = true
+  }
+  if (!touched) return
+  const obj: Record<string, UsageEntry> = {}
+  for (const [id, e] of ledger) obj[String(id)] = e
+  store.kvSet(KV_USAGE, JSON.stringify(obj))
+}
+
 function parseKv<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback
   try {
@@ -240,11 +291,14 @@ function buildUsageView(store: KnowledgeStore, allFileIds: readonly number[], no
         passive: e.passive,
         active: e.active,
         lastAt,
+        hurt: e.hurt ?? 0,
       })
     }
   }
   rows.sort((a, b) => b.total - a.total || a.fileId - b.fileId)
   const neverUsed = allFileIds.length - everUsed
+  const hurtTotal = rows.reduce((a, r) => a + (r.hurt ?? 0), 0)
+  const hurtFiles = rows.filter((r) => (r.hurt ?? 0) > 0).length
   return {
     files: allFileIds.length,
     everUsed,
@@ -254,6 +308,8 @@ function buildUsageView(store: KnowledgeStore, allFileIds: readonly number[], no
     staleDays: stale,
     staleThreshold: USAGE_STALE_DAYS,
     legacyOnly,
+    hurtTotal,
+    hurtFiles,
   }
 }
 
