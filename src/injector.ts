@@ -34,7 +34,8 @@ import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Config } from './config.js'
-import { recordOmega, recordUsage, readUsageLedger, type UsageEntry } from './health.js'
+import { recordHurt, recordOmega, recordUsage, readUsageLedger, type UsageEntry } from './health.js'
+import { hurtTargets } from './hurt.js'
 import { BLOCK_CLOSE, continuationTail, DelegationExtras, renderInjection, renderRecallNotice, renderSkipNotice, renderWriteNudge } from './render.js'
 import { embedHealth, formatEmbedEvent } from './embed-health.js'
 import { coldTagSuggest, sameAxisHit, scanTagAxis } from './nudge-guide.js'
@@ -721,6 +722,29 @@ export function recallFailureNotice(
     await workspace.withDb(async () => {
       homeLedger = readUsageLedger(workspace.store)
     })
+    /* Critic 传感器（2026-10-19）：消费**上一轮**留下的待判集——若本轮用户提出纠偏，
+     * 对上一轮真正注入的条目记一次 hurt。判定必须是 deterministic 的（`src/hurt.ts`）：
+     * Ratchet 证明 LLM 裁判把失败判成通过会置换淘汰统计量且无法校正。 */
+    const pending = state.pendingHurt
+    if (pending) {
+      try {
+        const targets = hurtTargets(pending, currentUserText, turn)
+        if (targets.length > 0) {
+          await workspace.withDb(async () => {
+            recordHurt(workspace.store, targets)
+          })
+          logger.info(
+            `critic-hurt bucket=${workspace.paths.bucket} n=${targets.length} ` +
+              `turn=${turn} ofTurn=${pending.turn} session=${sessionId}`,
+          )
+        }
+      } catch (e) {
+        logger.warn(`critic-hurt-failed: ${String((e as Error)?.message ?? e)}`)
+      }
+      /* 每轮只判一次：判定后立即清空（无论是否命中）。 */
+      state.pendingHurt = null
+    }
+
     for (const part of fed.parts) {
       await part.workspace.withDb(async () => {
         recordOmega(part.workspace.store, part.outcome.omega, part.outcome.regime ?? '')
@@ -950,6 +974,14 @@ export function recallFailureNotice(
   state.lastInjectionText = text
   state.lastSelectionKey = selectionKey
   state.lastInjectTurn = turn
+  /* Critic 待判集（2026-10-19）：本轮真正注入的条目挂到会话状态，下一轮 pre-step
+   * 用「用户是否纠偏」判定是否记 hurt。只收本桶（srcBucket undefined）——
+   * 跨桶 id 在各自桶的编号空间里指向不同日记，误记会污染别的桶的台账。 */
+  state.pendingHurt = {
+    fileIds: outcome.selected.filter((c) => c.srcBucket === undefined).map((c) => c.fileId),
+    turn,
+    at: Date.now(),
+  }
   state.autoAttemptsSinceInject = 0
   state.lastFallbackReason = null
   state.recallFailureStreak = 0

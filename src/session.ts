@@ -112,6 +112,20 @@ export interface SessionState {
   /** 最近一次 write-nudge 的触发理由（遥测：落桶日志用，evaluateWriteNudge 写入）。 */
   lastWriteNudgeReason: string
   /**
+   * **Critic 待判集**（2026-10-19）：上一轮真正注入的 fileId + 该轮用户原话。
+   *
+   * 用途：下一轮 pre-step 时判定「上一轮之后用户是否提出了纠偏」——命中则对这批 fileId
+   * 调 `recordHurt`。**必须挂在会话状态上**，因为判定要在**下一轮**才能做（本轮注入时
+   * 用户还没说话）。
+   *
+   * 为什么不用 LLM 裁判（Ratchet 的核心边界）：裁判把失败判成通过会**置换淘汰统计量**，
+   * 规则内部无法校正；而「用户说了纠偏词」是 deterministic 事件。判定函数见
+   * `src/hurt.ts`（纯函数，可单测）。
+   *
+   * 置空时机：判定执行后立即清空（每轮只判一次，不重复记账）。
+   */
+  pendingHurt: { fileIds: number[]; turn: number; at: number } | null
+  /**
    * 委托在飞（票05 场景感知）：增量扫描到 subagent/workflow 等委托工具调用 → true；
    * 观测到 memo_write（进展已落盘）→ false。与 header.delegationDepth>0 取或后
    * 决定 write-nudge 用「先落盘：兄弟代理可立即召回」变体。
@@ -179,6 +193,7 @@ export function getSession(sessionId: string, cwd: string | null): SessionState 
   const state: SessionState = {
     sessionId,
     cwd,
+    pendingHurt: null,
     lastTurn: -1,
     lastStep: -1,
     lastInjectionText: null,

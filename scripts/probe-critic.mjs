@@ -178,5 +178,51 @@ console.log('\n══════ C4 读数可见：healthReport 暴露 hurtTota
   }
 }
 
+
+console.log('\n══════ C5 判定纯函数：纠偏识别 ══════')
+{
+  const { isCorrection, hurtTargets } = lib('hurt.js')
+  /* 正例：用户明确说上一步不对 */
+  const pos = [
+    ['不对吧，你搞错了重点', 2],
+    ['你搞错了，应该是先查库', 3],
+    ['不是这个意思，我要的是批量', 4],
+    ['重新做一遍', 2],
+    ['纠正一下，那个数字是 1.87 不是 1.78', 3],
+    ['你把因果关系搞反了', 2],
+  ]
+  for (const [t, turn] of pos) {
+    check(`正例命中：「${t.slice(0, 14)}…」`, isCorrection(t, turn) === true, '')
+  }
+  /* 负例：不能误判（误判会污染统计量） */
+  const neg = [
+    ['继续', 2],
+    ['好的，请接着做', 2],
+    ['这个结论不对吧？其实是对的，我们要相信它', 3], // 长句转折，仍短 -> 需人工；这里只验长度闸之外
+    ['帮我看看这个文件', 5],
+    ['任意纠偏词出现在首轮', 1],
+    ['', 3],
+  ]
+  check('负例：正常指令不误判', isCorrection('继续', 2) === false, '')
+  check('负例：无纠偏词的长需求不误判', isCorrection('请帮我分析一下这个仓库的整体架构，重点是记忆插件的召回链路，以及它和压缩机制的交互关系，另外看一下注入时延的分布情况', 3) === false, '')
+  check('负例：首轮不判（没有上一轮可纠）', isCorrection('不对，你搞错了', 1) === false, '')
+  check('负例：空串不判', isCorrection('', 3) === false, '')
+  check('负例：超长消息不判（>400 字）', isCorrection('不对，你搞错了。' + '填充'.repeat(300), 3) === false, '')
+}
+
+console.log('\n══════ C6 待判集：只在紧接着的下一轮生效 ══════')
+{
+  const { hurtTargets } = lib('hurt.js')
+  const pending = { fileIds: [1, 2, 3], turn: 5 }
+  check('下一轮纠偏 → 命中全部三条',
+    hurtTargets(pending, '不对吧，你搞错了', 6).length === 3, '')
+  check('下一轮无纠偏 → 空',
+    hurtTargets(pending, '继续做', 6).length === 0, '')
+  check('跨两轮纠偏 → 不记（因果链已弱）',
+    hurtTargets(pending, '不对吧，你搞错了', 7).length === 0, 'turn=7 vs pending.turn=5')
+  check('pending 为空 → 空', hurtTargets(null, '不对吧', 6).length === 0, '')
+  check('pending 空集 → 空', hurtTargets({ fileIds: [], turn: 5 }, '不对吧', 6).length === 0, '')
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败${fail === 0 ? '  ✅ 全绿' : ''}`)
 process.exit(fail === 0 ? 0 : 1)
