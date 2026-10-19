@@ -10,6 +10,7 @@ import { cosine, type EmbedClient } from './embed.js'
 import { readUsageLedger } from './health.js'
 import { estimateTokens, firstSentence } from './runtime.js'
 import type { MemoEngine } from './native.js'
+import { excerpt } from './render.js'
 import type { KnowledgeStore } from './store.js'
 import { applyUsageTieBreaker, type TieBreakerParams } from './tiebreaker.js'
 
@@ -363,11 +364,15 @@ export function selectCandidates(
     }
     if (best !== 0) diag.tagDemotions += 1 // 静态序队首被同 Tag 去重翻下席
     const row = remaining.splice(best, 1)[0]!.row
-    const cost = estimateTokens(row.body) + estimateTokens(row.title) + 24
+    // 记账口径必须等于渲染口径：`render.ts` 只输出 `excerpt(body)`（≤ EXCERPT_CHARS），
+    // 而这里曾按 `row.body` 全文记账 —— 实测本桶 96% 的日记正文超 800 字，
+    // 全文记账是实际渲染的 1.90 倍，导致 tokenBudget 实际只花出约一半（2026-10-19 实测）。
+    // 两条路径用同一个 `excerpt` 函数，口径才不会再漂。
+    const cost = estimateTokens(excerpt(row.body)) + estimateTokens(row.title) + 24
     if (used + cost > opts.tokenBudget) {
       // `::Truncate` 语义：保 role 与首句
       const trimmed = firstSentence(row.body)
-      const trimCost = estimateTokens(trimmed) + estimateTokens(row.title) + 24
+      const trimCost = estimateTokens(excerpt(trimmed)) + estimateTokens(row.title) + 24
       if (used + trimCost <= opts.tokenBudget) {
         selected.push({ ...row, body: trimmed })
         used += trimCost
@@ -721,16 +726,16 @@ export async function recall(
             if (selected[i]!.score < selected[evictIdx]!.score) evictIdx = i
           }
           const evicted = selected.splice(evictIdx, 1)[0]!
-          used -= estimateTokens(evicted.body) + estimateTokens(evicted.title) + 24
+          used -= estimateTokens(excerpt(evicted.body)) + estimateTokens(evicted.title) + 24
           dropped.push({ id: evicted.id, title: evicted.title, reason: 'recency-floor-evicted' })
-          const fullCost = estimateTokens(freshest.body) + estimateTokens(freshest.title) + 24
+          const fullCost = estimateTokens(excerpt(freshest.body)) + estimateTokens(freshest.title) + 24
           if (used + fullCost <= options.tokenBudget) {
             selected.push({ ...freshest, floorPulled: true })
             used += fullCost
           } else {
             const trimmed = firstSentence(freshest.body)
             selected.push({ ...freshest, body: trimmed, floorPulled: true })
-            used += estimateTokens(trimmed) + estimateTokens(freshest.title) + 24
+            used += estimateTokens(excerpt(trimmed)) + estimateTokens(freshest.title) + 24
             dropped.push({ id: freshest.id, title: freshest.title, reason: 'truncated-to-first-sentence' })
           }
         }

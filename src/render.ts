@@ -29,7 +29,7 @@ export const BLOCK_CLOSE = '⟨/memo-river⟩'
  * 配套的写作侧要求写在 `FIXED_CONTRACT_TEXT`：决定性事实要放正文开头，
  * 否则再宽的窗口也只是把截断点往后挪。
  */
-const EXCERPT_CHARS = 800
+export const EXCERPT_CHARS = 800
 
 const f3 = (x: number): string => (Number.isFinite(x) ? x.toFixed(3) : 'n/a')
 
