@@ -29,6 +29,8 @@ import {
 } from './drafts.js'
 import { cosine, WRITE_EMBED_OPTIONS, WRITE_EMBED_RETRIES, WRITE_EMBED_TIMEOUT_MS } from './embed.js'
 import { formatHealth, healthReport, HUB_RATIO_LIMIT, KV_USAGE, readUsageLedger, recordUsage } from './health.js'
+import { OBSERVATION_CAP, readObservations, recordObservation, summarizeArgs } from './observation.js'
+import { formatVitals, vitalForConsolidation, vitalForCritic, vitalForTool } from './vitals.js'
 import { excerpt } from './render.js'
 import { patrolBucket } from './patrol.js'
 import { setTuning, tuningSnapshot, tuningDefaults, tuningValues } from './tuning.js'
@@ -912,6 +914,68 @@ export function installTools(
 ): void {
   const { config } = deps
 
+  /* ────────────────────────────────────────────────────────────────────────────
+   * **自我观测拦截器**（2026-10-19）
+   *
+   * 动机：本轮做的 `memo_read` 完工时只有探针 13/13，**没人知道它会不会被真实调用**。
+   * 「工具存在」与「工具被用」之间隔着一条沟（对照 D345）。修法不是再加一个工具，
+   * 而是让**每一次调用都留痕**——于是「有没有被用」变成一个可读的读数，而不是猜想。
+   *
+   * 形态：在这里包一层 `ctx.tools.register`，**14 个工具定义一行都不用改**。
+   * 每个工具的 `execute` 被替换成「记开始 → 跑 → 记结束/错误」。
+   *
+   * 三条纪律（与 observation.ts 同）：
+   *   ① 观测失败绝不抛（try/catch 包住，且不影响返回值）；
+   *   ② 只记结构特征（`summarizeArgs` 把长文本压成 `len(N)`，不抄正文）；
+   *   ③ 写 kv_store，不进 artifactSig。
+   *
+   * `memo_selfcheck` 自己**不记**（否则查观测会污染观测）。
+   * ──────────────────────────────────────────────────────────────────────────── */
+  const registeredToolNames = new Set<string>()
+  const innerCtx = ctx /* 原始 ctx：拦截器必须调它注册，否则自我递归（实测爆栈） */
+  const obsCtx = {
+    tools: {
+      register(tool: unknown): () => void {
+        const t = tool as {
+          name?: string
+          execute?: (a: Record<string, unknown>, e: unknown) => unknown
+        }
+        if (t && typeof t.name === 'string') registeredToolNames.add(t.name)
+        if (t && typeof t.name === 'string' && typeof t.execute === 'function' && t.name !== 'memo_selfcheck') {
+          const inner = t.execute.bind(t)
+          const toolName = t.name
+          t.execute = async (args: Record<string, unknown>, exec: unknown) => {
+            const started = Date.now()
+            let failed = false
+            try {
+              return await inner(args, exec)
+            } catch (e) {
+              failed = true
+              throw e
+            } finally {
+              try {
+                const { cwd, sessionId } = viewerOf(exec)
+                const ws = deps.getWorkspace(cwd)
+                recordObservation(ws.store, {
+                  tool: toolName,
+                  at: started,
+                  session: sessionId ?? undefined,
+                  arg: summarizeArgs(args),
+                  error: failed,
+                  ms: Date.now() - started,
+                })
+              } catch {
+                /* 观测失败绝不伤害主流程 */
+              }
+            }
+          }
+        }
+        return innerCtx.tools.register(tool)
+      },
+    },
+  }
+  ctx = obsCtx as typeof ctx
+
   /* ── memo_tuning（§6.6） ── */
   registerMemoTuning(ctx, config)
 
@@ -1208,6 +1272,108 @@ export function installTools(
             /* 静默：台账问题不得让读全文失败 */
           }
           return [head, ...rel, '', body].join('\n')
+        })
+      },
+    }),
+  )
+
+  /* ── memo_selfcheck（生命体征自检；2026-10-19） ── */
+  //
+  /* 为什么需要这个工具：今天最大的发现是一个**形状**——本仓有好几处「以为在跑、其实空转」
+   * 或者「建好了、没人用」的组件，而没有任何地方会说出来。
+   * 压缩式遗忘引擎条件恒假却静默；hurt 传感器建了不印；memo_read 落地后没人知道它被调过几次。
+   *
+   * 它与 memo_stats 的分工：
+   *   · memo_stats  = **语料**体检（数据长什么样：连通性/Tag 分布/覆盖）
+   *   · memo_selfcheck = **系统**体检（组件是活着还是空转：四态 live/idle/inert/unknown）
+   * 两者互补：语料可以很健康，而引擎全是空转。
+   */
+  ctx.tools.register(
+    defineTool({
+      name: 'memo_selfcheck',
+      description:
+        '记忆系统**生命体征自检**：逐个组件报「活着 / 还判断不了 / 空转 / 不知道」四态，' +
+        '并给出判定依据与建议。区别于 memo_stats（那是语料体检）。' +
+        '重点回答 spec 状问题：某个工具到底有没有被调过、遗忘引擎的阈值在当前规模还可达吗、Critic 的零是真的零还是没接上。',
+      parameters: {
+        rebuild: { type: 'boolean', description: '是否顺带重建原生资产（缺省 false）。' },
+      },
+      output: TEXT_OUTPUT,
+      isConcurrencySafe: () => true,
+      async execute(args: Record<string, unknown>, exec: unknown) {
+        const { cwd } = viewerOf(exec)
+        const workspace = deps.getWorkspace(cwd)
+        return workspace.withDb(async () => {
+          const store = workspace.store
+          const obs = readObservations(store)
+          const now = Date.now()
+          const spanHours =
+            obs.length > 1 ? (now - Math.min(...obs.map((o) => o.at))) / 3_600_000 : 0
+          const vitals = []
+
+          /* ① 工具活跃度：每个已注册的 memo_* 工具各报一条。
+           * 这是把「不知道有没有被用」变成读数的关键一步。 */
+          for (const name of [...registeredToolNames].sort()) {
+            vitals.push(vitalForTool(obs, name, 7 * 86_400_000, now))
+          }
+
+          /* ② Critic 传感器 */
+          const ledger = [...readUsageLedger(store).values()]
+          vitals.push(vitalForCritic(ledger, spanHours))
+
+          /* ③ 压缩式遗忘引擎：现算「条件是否可达」（不读守护轮缓存，避免读到陈旧） */
+          const files = store.files()
+          const cfgCons = config.maintenance.consolidation
+          let maxIdleDays = 0
+          let maxPairCos = 0
+          const stamps: number[] = []
+          for (const e of ledger) {
+            const t = Math.max(e.lastPassiveAt ?? 0, e.lastActiveAt ?? 0)
+            if (t > 0) stamps.push(t)
+          }
+          if (stamps.length > 0) {
+            const newest = Math.max(...stamps)
+            const oldest = Math.min(...stamps)
+            maxIdleDays = (newest - oldest) / 86_400_000
+          }
+          /* 两两最大余弦：只在样本足够算（>1 篇且有条目向量）时算，且限制在 120 篇内防 O(n²) 过慢。 */
+          if (files.length > 1 && files.length <= 120) {
+            const vecs = store
+              .chunks()
+              .map((c) => ({ fileId: c.file_id, v: c.vector }))
+              .filter((x): x is { fileId: number; v: Float32Array } => !!x.v)
+            for (let i = 0; i < vecs.length; i += 1) {
+              for (let j = i + 1; j < vecs.length; j += 1) {
+                if (vecs[i]!.fileId === vecs[j]!.fileId) continue
+                const c = cosine(vecs[i]!.v, vecs[j]!.v)
+                if (c > maxPairCos) maxPairCos = c
+              }
+            }
+          }
+          vitals.push(
+            vitalForConsolidation({
+              totalFiles: files.length,
+              maxIdleDays,
+              maxPairCos,
+              minAgeDays: cfgCons.minAgeDays,
+              overlapCosine: cfgCons.overlapCosine,
+              candidates: 0,
+            }),
+          )
+
+          const lines = [formatVitals(vitals)]
+          lines.push(
+            `· 观测环：${obs.length} 条 / 上限 ${OBSERVATION_CAP}，跨度 ${spanHours.toFixed(1)}h` +
+              (obs.length === 0 ? '（**空** —— 说明拦截器还没跑过，或本桶确实没工具调用）' : ''),
+          )
+          if (args.rebuild === true) {
+            const loaded = await workspace.ensureLoaded()
+            if (loaded) {
+              const state = await workspace.engine.ensureArtifact(true)
+              lines.push(`· 原生资产已重建：sig=${state.artifactSig.slice(0, 24)}… 节点=${state.nodeCount} 边=${state.edgeCount}`)
+            }
+          }
+          return lines.join('\n')
         })
       },
     }),
