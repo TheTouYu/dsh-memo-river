@@ -19,6 +19,9 @@ const DB_PATH = arg('db');
 const QUERIES_PATH = arg('queries');
 const OUT_PATH = arg('out');
 const LABEL = arg('label') || 'track';
+// 配置面（P2）：--config 指一份 rag_params.json，两侧轨道吃同一份。
+// 未给 = 旧行为（VCP_ROOT/rag_params.json，v9.2 基准件），逐字不变。
+const CONFIG_PATH = arg('config');
 const VCP_ROOT = process.env.VCP_ROOT || '/home/h/app/VCPToolBox';
 
 // modelSig 只影响 artifactSig 字符串，不影响数值（已实证：WSL 有 config.env、本机没有，
@@ -41,16 +44,25 @@ try {
 }
 
 const queries = JSON.parse(fs.readFileSync(QUERIES_PATH, 'utf8'));
-const ragParams = JSON.parse(fs.readFileSync(path.join(VCP_ROOT, 'rag_params.json'), 'utf8'));
+// --config 给了就用它（P2 开闸对照：两侧轨道吃同一份 2.0 rag_params），否则旧行为。
+const RAG_PARAMS_PATH = CONFIG_PATH || path.join(VCP_ROOT, 'rag_params.json');
+const ragParams = JSON.parse(fs.readFileSync(RAG_PARAMS_PATH, 'utf8'));
 const KBM = ragParams.KnowledgeBaseManager;
+// 扩展映射只在 --config 模式启用：缺省路径的 pipelineConfig 输出保持逐字不变
+// （五腿零漂移硬判据）——不把 v9.2 rag_params 里旧映射未覆盖的键引入缺省臂。
+const EXTENDED = !!CONFIG_PATH;
 
 const Database = createRequire(import.meta.url)(path.join(VCP_ROOT, 'node_modules', 'better-sqlite3'));
+
+// 数值兜底：配置缺项时用我方 Default 值（与 kernel/src/memo_pipeline.rs:164-195 对齐）
+const num = (v, dflt) => (typeof v === 'number' && Number.isFinite(v) ? v : dflt);
 
 function pipelineConfig() {
   const rm = KBM.riverMemo || {};
   const local = rm.localField || {}, transfer = rm.transferField || {};
   const support = rm.effectiveSupport || {}, lang = KBM.languageCompensator || {};
-  return {
+  const spike = KBM.spikeRouting || {};
+  const base = {
     baseTagBoost: rm.sourceObservation?.baseTagBoost ?? 0.6,
     coreBoostFactor: rm.sourceObservation?.coreBoostFactor ?? 1.33,
     localAlpha: local.alpha ?? 0.15,
@@ -72,6 +84,49 @@ function pipelineConfig() {
     langPenaltyCrossDomain: lang.penaltyCrossDomain ?? 0.1,
     deduplicationThreshold: KBM.deduplicationThreshold ?? 0.88,
   };
+  // 闸门键（P0.2/P1 的暗上线开关）：两侧**键名不同、语义等价**，同一数值都发出去，
+  // 两边 serde 各自忽略对方的键名（2.0 全模块无 deny_unknown_fields——已核）：
+  //   我方 kernel/src/memo_pipeline.rs:144 max_projection_nodes ← maxProjectionNodes（缺省 0）
+  //   2.0  rust-vexus-lite/src/memo_pipeline.rs:118 max_field_projection_nodes ← maxFieldProjectionNodes（缺省 256）
+  // 缺省臂（v9.2 rag_params 无 maxProjectionNodes）⇒ 0 ⇒ 我方仍走 v9.2 全支撑投影。
+  const rawGate = support.maxProjectionNodes;
+  const gateNodes = Number.isFinite(rawGate) && rawGate >= 0 ? Math.floor(rawGate) : (EXTENDED ? 256 : 0);
+  base.maxProjectionNodes = gateNodes;
+  if (!EXTENDED) return base;
+  // ── 2.0 配置面（P2 开闸对照用）───────────────────────────────────────
+  // 键名/取值域照抄 2.0 原生管线配置的唯一权威构造点
+  // /home/h/app/VCPToolBox-2.0/KnowledgeBaseManager.js:2137-2315
+  // （它把 rag_params 折成 runMemoPipeline 的 config JSON）。
+  base.maxFieldProjectionNodes = gateNodes;
+  base.epaGateMode = KBM.epaGateMode ?? 'backgroundRelative';
+  base.maxFusionTags = 128;
+  base.maxEmergentNodes = Math.max(0, Math.floor(num(spike.maxEmergentNodes, 50)));
+  base.techTagThreshold = num(KBM.techTagThreshold, 0.08);
+  base.normalTagThreshold = num(KBM.normalTagThreshold, 0.015);
+  base.spikeRouting = {
+    maxSafeHops: num(spike.maxSafeHops, 4),
+    baseMomentum: num(spike.baseMomentum, 2),
+    firingThreshold: num(spike.firingThreshold, 0.1),
+    baseDecay: num(spike.baseDecay, 0.25),
+    wormholeDecay: num(spike.wormholeDecay, 0.7),
+    tensionThreshold: num(spike.tensionThreshold, 1),
+    maxNeighborsPerNode: num(spike.maxNeighborsPerNode, 20),
+    // 2.0 配置写作 v91* 前缀，我方 SenseConfig 字段是 returnFlowFactor/firGamma/
+    // maxPropagationStates——两种拼写都认（2.0 侧只认前者，我方只认后者）。
+    returnFlowFactor: num(spike.returnFlowFactor ?? spike.v91ReturnFlowFactor, 0.15),
+    firGamma: num(spike.firGamma ?? spike.v91FirGamma, 0.6),
+    maxPropagationStates: num(spike.maxPropagationStates ?? spike.v91MaxPropagationStates, 2000),
+    minimumInjectedCurrent: num(spike.minimumInjectedCurrent, 0.01),
+    maxOutputNodes: 0,
+    maxOutputEdges: 0,
+    maxTransitionRecords: 0,
+    // 暗上线闸：2.0 侧无此键（上游恒开），我方缺省 false；要对照就必须显式打开。
+    dynamicWormholes: spike.dynamicWormholes === true,
+    dynamicWormholeThreshold: num(spike.dynamicWormholeThreshold, 0.2),
+    dynamicWormholeSlots: Math.floor(num(spike.dynamicWormholeSlots, 2)),
+    dynamicWormholeMaxTargets: Math.floor(num(spike.dynamicWormholeMaxTargets, 4096)),
+  };
+  return base;
 }
 
 const cos = (a, b) => {
@@ -192,10 +247,18 @@ const cos = (a, b) => {
   artifact.payload = artifactPayload;
 
   // ②③ 每查询：pipeline + 双读出
+  const PIPE_CONFIG = pipelineConfig();
   const out = {
     label: LABEL, status: 'ok',
     identity: abiIdentity ? `${identity} [${abiIdentity}]` : identity,
     abi: ABI2 ? 2 : 1,
+    config: {
+      path: RAG_PARAMS_PATH,
+      extended: EXTENDED,
+      maxProjectionNodes: PIPE_CONFIG.maxProjectionNodes,
+      maxFieldProjectionNodes: PIPE_CONFIG.maxFieldProjectionNodes ?? null,
+      dynamicWormholes: PIPE_CONFIG.spikeRouting?.dynamicWormholes ?? null,
+    },
     artifact, queries: [],
   };
   for (const q of queries) {
@@ -210,7 +273,7 @@ const cos = (a, b) => {
       if (!caps.pipeline) { entry.error = 'not-implemented:pipeline'; out.queries.push(entry); continue; }
       const pipe = await idx.runMemoPipeline(
         DB_PATH, artifactSig,
-        JSON.stringify({ queryId: q.id, queryText: q.text || q.id, coreTags: [], ghostTags: [], config: pipelineConfig() }),
+        JSON.stringify({ queryId: q.id, queryText: q.text || q.id, coreTags: [], ghostTags: [], config: PIPE_CONFIG }),
         qVec, new Float32Array(0),
       );
       const meta = JSON.parse(pipe.metadataJson || '{}');

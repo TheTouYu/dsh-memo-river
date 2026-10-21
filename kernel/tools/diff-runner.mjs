@@ -27,6 +27,14 @@ const arg = (name, dflt) => {
 const ORACLE = arg('oracle', path.join(VCP_ROOT, 'rust-vexus-lite'));
 const CANDIDATE = arg('candidate', path.join(REPO, 'kernel'));
 const LEGS = (arg('legs', 'selfcheck,classroom,buckets')).split(',');
+// 配置面（P2 开闸对照）：两侧轨道吃同一份 rag_params.json；不给 = 旧行为。
+const CONFIG = arg('config');
+// 夹具覆盖（P2）：2.0 的 openAndInitStore 会**改写副本**（schema.rs 迁移：删
+// tag_pair_similarity / tag_intrinsic_residuals / kv_store.epa_basis_cache 等），
+// 于是同一份源库在两轨上看到的世界不一样。要做 apples-to-apples，先用 2.0 把
+// 一份副本预迁移，再把这份「已迁移副本」同时喂两轨。
+const CLASSROOM_DB_OVERRIDE = arg('classroom-db');
+const BUCKET_DB_OVERRIDE = arg('bucket-db');
 const BUCKET_CWDS = (arg('buckets', '/home/h/dsh-plugins/dsh-memo-river,/home/h/dsh-plugins/dsh-preset-composer,/home/h/genshin-ts')).split(',');
 
 // ── 容差（判据口径，勿放宽） ─────────────────────────────────────────────
@@ -93,7 +101,9 @@ function runTrack(modulePath, dbPath, queries, dir, label) {
   const qFile = path.join(dir, `${label}-queries.json`);
   const rFile = path.join(dir, `${label}-result.json`);
   fs.writeFileSync(qFile, JSON.stringify(queries));
-  const res = spawnSync(process.execPath, [DRIVER, '--module', modulePath, '--db', dbPath, '--queries', qFile, '--out', rFile, '--label', label], {
+  const args = [DRIVER, '--module', modulePath, '--db', dbPath, '--queries', qFile, '--out', rFile, '--label', label];
+  if (CONFIG) args.push('--config', CONFIG);
+  const res = spawnSync(process.execPath, args, {
     timeout: 300_000, encoding: 'utf8', env: { ...process.env, VCP_ROOT },
   });
   if (res.status !== 0 || !fs.existsSync(rFile)) {
@@ -156,6 +166,133 @@ function compareRanked(name, a, b, issues) {
     if ((a[i].role ?? null) !== (b[i].role ?? null)) issues.push(`${name}[${i}] D${a[i].id}: role ${a[i].role} vs ${b[i].role}`);
   }
 }
+
+// ── 阶段级差异度量（P2 开闸对照）─────────────────────────────────────────
+// 与判据无关：只**量化**各阶段差多少、差在哪，供归因；不改 TOL、不改 verdict。
+// 判据那套（compareStageMeta）在开闸对照里会刷出成百条 issue，读数不可用。
+const STAGE_TOL = 1e-9;
+
+function flattenNums(obj, prefix = '', out = new Map(), depth = 0) {
+  if (obj == null || depth > 8) return out;
+  if (typeof obj === 'number' && Number.isFinite(obj)) { out.set(prefix, obj); return out; }
+  if (Array.isArray(obj)) { obj.forEach((v, i) => flattenNums(v, `${prefix}[${i}]`, out, depth + 1)); return out; }
+  if (typeof obj === 'object') for (const k of Object.keys(obj)) flattenNums(obj[k], prefix ? `${prefix}.${k}` : k, out, depth + 1);
+  return out;
+}
+
+// 数值叶子逐键比：maxDiff / 变化键数 / 单侧键数。数组按下标比（同序前提）。
+function numLeavesDiff(a, b) {
+  const fa = flattenNums(a), fb = flattenNums(b);
+  const r = { maxDiff: 0, changed: 0, leftOnly: 0, rightOnly: 0, keys: 0 };
+  for (const [k, va] of fa) {
+    if (!fb.has(k)) { r.leftOnly++; continue; }
+    r.keys++;
+    const d = Math.abs(va - fb.get(k));
+    if (d > STAGE_TOL) r.changed++;
+    if (d > r.maxDiff) r.maxDiff = d;
+  }
+  for (const k of fb.keys()) if (!fa.has(k)) r.rightOnly++;
+  return r;
+}
+
+// 金字塔：按 Tag id 键化（顺序漂移不该算成数值漂移），逐层比 similarity/contribution/energy。
+function pyramidDiff(pa, pb) {
+  const la = pa?.levels || [], lb = pb?.levels || [];
+  const r = { levelsA: la.length, levelsB: lb.length, pairs: 0, simMax: 0, simChanged: 0, contribMax: 0, contribChanged: 0, membershipFlips: 0, orderFlips: 0, energyMax: 0 };
+  for (let i = 0; i < Math.min(la.length, lb.length); i++) {
+    const ta = new Map((la[i].tags || []).map((t) => [Number(t.id), t]));
+    const tb = new Map((lb[i].tags || []).map((t) => [Number(t.id), t]));
+    r.membershipFlips += Math.abs(ta.size - tb.size);
+    // 层内 Tag 序（同集合不同序 = 相似度近乎并列时口径不同的直接证据）
+    if ((la[i].tags || []).map((t) => Number(t.id)).join(',') !== (lb[i].tags || []).map((t) => Number(t.id)).join(',')) r.orderFlips++;
+    for (const [id, x] of ta) {
+      const y = tb.get(id);
+      if (!y) { r.membershipFlips++; continue; }
+      r.pairs++;
+      const ds = Math.abs((x.similarity ?? 0) - (y.similarity ?? 0));
+      const dc = Math.abs((x.contribution ?? 0) - (y.contribution ?? 0));
+      if (ds > STAGE_TOL) r.simChanged++;
+      if (dc > STAGE_TOL) r.contribChanged++;
+      if (ds > r.simMax) r.simMax = ds;
+      if (dc > r.contribMax) r.contribMax = dc;
+    }
+    const de = Math.abs((la[i].energyExplained ?? 0) - (lb[i].energyExplained ?? 0));
+    if (de > r.energyMax) r.energyMax = de;
+  }
+  const f = numLeavesDiff(pa?.features, pb?.features);
+  r.featuresMax = f.maxDiff;
+  r.featuresChanged = f.changed;
+  return r;
+}
+
+// 名次段：top-k 内位置翻转 / 集合进出 / 同 id 分数差 / role 翻转。
+function rankedDiff(ra, rb, k = 12) {
+  const a = (ra || []).slice(0, k), b = (rb || []).slice(0, k);
+  const mb = new Map(b.map((row) => [row.id, row]));
+  const r = { k: Math.min(a.length, b.length), posFlips: 0, dropped: 0, added: 0, pairs: 0, scoreMax: 0, scoreSum: 0, roleFlips: 0 };
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i], y = b[i];
+    if (x && y && x.id !== y.id) r.posFlips++;
+  }
+  for (const row of a) {
+    const other = mb.get(row.id);
+    if (!other) { r.dropped++; continue; }
+    r.pairs++;
+    const d = Math.abs(row.score - other.score);
+    if (d > r.scoreMax) r.scoreMax = d;
+    r.scoreSum += d;
+    if ((row.role ?? null) !== (other.role ?? null)) r.roleFlips++;
+  }
+  const idsA = new Set(a.map((row) => row.id));
+  r.added = b.filter((row) => !idsA.has(row.id)).length;
+  r.scoreMean = r.pairs ? r.scoreSum / r.pairs : 0;
+  return r;
+}
+
+function newStages() {
+  return {
+    epa: { maxDiff: 0, changed: 0, leftOnly: 0, rightOnly: 0 },
+    pyramid: { levelsA: 0, levelsB: 0, pairs: 0, simMax: 0, simChanged: 0, contribMax: 0, contribChanged: 0, membershipFlips: 0, orderFlips: 0, energyMax: 0, featuresMax: 0, featuresChanged: 0 },
+    fusion: { maxDiff: 0, changed: 0, leftOnly: 0, rightOnly: 0, selectedFlips: 0 },
+    dualField: { maxDiff: 0, changed: 0, leftOnly: 0, rightOnly: 0 },
+    enhanced: { minCos: Infinity },
+    topo: { posFlips: 0, dropped: 0, added: 0, pairs: 0, scoreMax: 0, scoreSum: 0, roleFlips: 0, scoreMean: 0, queries: 0 },
+    omega: { maxDiff: 0, regimeFlips: 0 },
+  };
+}
+
+function stageMetrics(qa, qb, s) {
+  const merge = (dst, src, keys) => { for (const k of keys) { if (k.endsWith('Max') || k === 'maxDiff') dst[k] = Math.max(dst[k] ?? 0, src[k] ?? 0); else if (typeof src[k] === 'number') dst[k] = (dst[k] ?? 0) + src[k]; } };
+  const numKeys = ['maxDiff', 'changed', 'leftOnly', 'rightOnly'];
+  if (qa.epa || qb.epa) merge(s.epa, numLeavesDiff(qa.epa, qb.epa), numKeys);
+  if (qa.pyramid || qb.pyramid) {
+    const p = pyramidDiff(qa.pyramid, qb.pyramid);
+    s.pyramid.levelsA = Math.max(s.pyramid.levelsA, p.levelsA);
+    s.pyramid.levelsB = Math.max(s.pyramid.levelsB, p.levelsB);
+    merge(s.pyramid, p, ['pairs', 'simMax', 'simChanged', 'contribMax', 'contribChanged', 'membershipFlips', 'orderFlips', 'energyMax', 'featuresMax', 'featuresChanged']);
+  }
+  const fa = qa.diagnostics?.fusion, fb = qb.diagnostics?.fusion;
+  if (fa || fb) {
+    merge(s.fusion, numLeavesDiff(fa, fb), numKeys);
+    if ((fa?.selectedTagIds || []).join(',') !== (fb?.selectedTagIds || []).join(',')) s.fusion.selectedFlips++;
+  }
+  if (qa.diagnostics?.dualField || qb.diagnostics?.dualField) merge(s.dualField, numLeavesDiff(qa.diagnostics.dualField, qb.diagnostics.dualField), numKeys);
+  if (qa.enhancedVector && qb.enhancedVector) {
+    s.enhanced.minCos = Math.min(s.enhanced.minCos, cos(qa.enhancedVector, qb.enhancedVector));
+  }
+  if (qa.topo?.ranked || qb.topo?.ranked) {
+    const r = rankedDiff(qa.topo?.ranked, qb.topo?.ranked);
+    s.topo.posFlips += r.posFlips; s.topo.dropped += r.dropped; s.topo.added += r.added;
+    s.topo.pairs += r.pairs; s.topo.roleFlips += r.roleFlips; s.topo.scoreSum += r.scoreSum;
+    s.topo.scoreMax = Math.max(s.topo.scoreMax, r.scoreMax);
+    s.topo.queries++;
+  }
+  if (qa.topo?.omega != null && qb.topo?.omega != null) {
+    s.omega.maxDiff = Math.max(s.omega.maxDiff, Math.abs(qa.topo.omega - qb.topo.omega));
+    if (qa.topo.regime !== qb.topo.regime) s.omega.regimeFlips++;
+  }
+}
+
 
 // 阶段级对账（票 08）：EPA / 金字塔 / 融合选择 / 双场收敛——比端到端更可定位。
 // 计时字段（*_ms）不比；Tag 名集合化（去重序不定）。
@@ -220,7 +357,7 @@ function recordBothAbsent(meta, name) {
 
 function compareLeg(a, b) {
   const issues = [];
-  const meta = { queries: 0, scoreMaxDiff: 0, omegaMaxDiff: 0, enhancedMinCos: Infinity, notImplemented: 0, payloadMaxDiff: 0, payloadMismatches: 0, bothAbsent: [] };
+  const meta = { queries: 0, scoreMaxDiff: 0, omegaMaxDiff: 0, enhancedMinCos: Infinity, notImplemented: 0, payloadMaxDiff: 0, payloadMismatches: 0, bothAbsent: [], stages: newStages() };
   if (a.status !== 'ok' || b.status !== 'ok') {
     return { verdict: a.status !== 'ok' ? a.status : b.status, issues, meta: { queries: 0, scoreMaxDiff: 0, omegaMaxDiff: 0, enhancedMinCos: null }, detail: `${a.status}/${b.status}: ${a.detail || ''}${b.detail || ''}` };
   }
@@ -246,6 +383,7 @@ function compareLeg(a, b) {
       continue;
     }
     compareStageMeta(qa, qb, issues, meta);
+    stageMetrics(qa, qb, meta.stages);
     if (JSON.stringify(qa.knnOrder) !== JSON.stringify(qb.knnOrder)) issues.push(`${qid}: KNN 基线序不一致（语料副本漂移？）`);
     if (qa.dtsc?.ranked && qb.dtsc?.ranked) {
       compareRanked(`${qid}/dtsc`, qa.dtsc.ranked, qb.dtsc.ranked, issues);
@@ -276,6 +414,8 @@ function compareLeg(a, b) {
       issues.push(`${qid}: enhancedVector 单侧缺失`);
     }
   }
+  if (!isFinite(meta.stages.enhanced.minCos)) meta.stages.enhanced.minCos = null;
+  meta.stages.topo.scoreMean = meta.stages.topo.pairs ? meta.stages.topo.scoreSum / meta.stages.topo.pairs : 0;
   if (!isFinite(meta.enhancedMinCos)) meta.enhancedMinCos = null;
   const verdict = issues.length ? 'FAIL' : (meta.notImplemented ? 'PARTIAL' : 'PASS');
   return { verdict, issues, meta };
@@ -289,13 +429,15 @@ async function main() {
   const legs = [];
   const sources = [];
 
-  const classroomDb = path.join(VCP_ROOT, 'sandbox/classroom-flow/full/knowledge_base.sqlite');
+  const classroomDb = CLASSROOM_DB_OVERRIDE || path.join(VCP_ROOT, 'sandbox/classroom-flow/full/knowledge_base.sqlite');
   if (LEGS.includes('selfcheck')) sources.push({ leg: 'selfcheck', db: classroomDb, queries: classroomQueries() });
   if (LEGS.includes('classroom')) sources.push({ leg: 'classroom', db: classroomDb, queries: classroomQueries() });
-  if (LEGS.includes('buckets')) {
+  if (LEGS.includes('buckets') || LEGS.some((l) => l.startsWith('bucket:'))) {
     for (const cwd of BUCKET_CWDS) {
+      const name = path.basename(cwd);
+      if (!LEGS.includes('buckets') && !LEGS.includes(`bucket:${name}`)) continue;
       const hash = crypto.createHash('sha256').update(cwd).digest('hex').slice(0, 16);
-      const db = path.join(os.homedir(), '.dsh/memo-river', hash, 'knowledge_base.sqlite');
+      const db = BUCKET_DB_OVERRIDE || path.join(os.homedir(), '.dsh/memo-river', hash, 'knowledge_base.sqlite');
       if (!fs.existsSync(db)) { legs.push({ leg: `bucket:${path.basename(cwd)}`, verdict: 'SKIP', note: `桶不存在 ${hash}` }); continue; }
       sources.push({ leg: `bucket:${path.basename(cwd)}`, db, queries: await makeBucketQueries(db, path.basename(cwd)) });
     }
@@ -312,10 +454,12 @@ async function main() {
     console.log(`▶ ${src.leg}：${src.leg === 'selfcheck' ? 'oracle(第二实例)' : 'candidate'} 轨…`);
     const trackB = runTrack(moduleB, dbB, src.queries, tmp, src.leg === 'selfcheck' ? 'oracle2' : 'cand');
     const cmp = compareLeg(trackA, trackB);
-    legs.push({ leg: src.leg, ...cmp, oracleIdentity: trackA.identity, candidateIdentity: trackB.identity });
+    legs.push({ leg: src.leg, ...cmp, oracleIdentity: trackA.identity, candidateIdentity: trackB.identity, oracleConfig: trackA.config ?? null, candidateConfig: trackB.config ?? null });
     fs.writeFileSync(path.join(outDir, `${src.leg.replace(/[^a-z0-9-]/gi, '_')}-tracks.json`), JSON.stringify({ oracle: trackA, candidate: trackB }, null, 2));
     fs.rmSync(tmp, { recursive: true, force: true });
     console.log(`  → ${cmp.verdict}${cmp.meta.queries ? `（${cmp.meta.queries} 查询，分数最大差 ${(cmp.meta.scoreMaxDiff || 0).toExponential(2)}，Ω 最大差 ${(cmp.meta.omegaMaxDiff || 0).toExponential(2)}${cmp.meta.bothAbsent?.length ? `，双侧同缺不可比 ${cmp.meta.bothAbsent.join('/')}` : ''}）` : ''}`);
+    const sm = cmp.meta.stages;
+    if (sm) console.log(`    阶段: 金字塔 simMax=${sm.pyramid.simMax.toExponential(2)} 序翻=${sm.pyramid.orderFlips} 集合差=${sm.pyramid.membershipFlips}｜融合 maxΔ=${sm.fusion.maxDiff.toExponential(2)} 选集翻=${sm.fusion.selectedFlips}｜enhanced cos=${sm.enhanced.minCos == null ? '-' : sm.enhanced.minCos.toFixed(9)}｜topo 名次翻=${sm.topo.posFlips}/${sm.topo.queries}q 分数maxΔ=${sm.topo.scoreMax.toExponential(2)}｜Ω=${sm.omega.maxDiff.toExponential(2)}`);
   }
 
   // 报告
@@ -329,10 +473,25 @@ async function main() {
   };
   const ident = legs.find((l) => l.oracleIdentity || l.candidateIdentity) || {};
   const md = [`# 差分报告 ${runId}`, '', `- oracle: ${ORACLE}`, `- candidate: ${CANDIDATE}`,
-    `- oracle identity: ${ident.oracleIdentity ?? '-'}`, `- candidate identity: ${ident.candidateIdentity ?? '-'}`, '',
+    `- 配置面: ${CONFIG || `(缺省) ${path.join(VCP_ROOT, 'rag_params.json')}`}`,
+    `- 夹具覆盖: classroom=${CLASSROOM_DB_OVERRIDE || '(缺省)'} bucket=${BUCKET_DB_OVERRIDE || '(缺省)'}`,
+    `- oracle identity: ${ident.oracleIdentity ?? '-'}`, `- candidate identity: ${ident.candidateIdentity ?? '-'}`,
+    `- oracle config: ${JSON.stringify(ident.oracleConfig)}`, `- candidate config: ${JSON.stringify(ident.candidateConfig)}`, '',
     '| 腿 | 判定 | 查询数 | 分数最大差 | Ω 最大差 | enhanced 最小余弦 | 备注 |', '|---|---|---|---|---|---|---|'];
   for (const l of legs) {
     md.push(`| ${l.leg} | ${l.verdict} | ${l.meta?.queries ?? '-'} | ${l.meta?.scoreMaxDiff != null ? l.meta.scoreMaxDiff.toExponential(2) : '-'} | ${l.meta?.omegaMaxDiff != null ? l.meta.omegaMaxDiff.toExponential(2) : '-'} | ${l.meta?.enhancedMinCos != null ? l.meta.enhancedMinCos.toFixed(9) : '-'} | ${noteOf(l)} |`);
+  }
+  // 阶段级差异表（P2 归因用；纯读数，不参与 verdict）
+  const staged = legs.filter((l) => l.meta?.stages);
+  if (staged.length) {
+    const e = (v) => (v == null ? '-' : Number(v).toExponential(2));
+    md.push('', '## 阶段级差异（归因读数，非判据）', '');
+    md.push('| 腿 | EPA maxΔ/变键 | 金字塔 层数 simMax/变Tag/序翻 | 融合 maxΔ/变键/选集翻 | 双场 maxΔ | enhanced cos_min | topo 名次翻/进出 | topo 分数 maxΔ/均值 | Ω maxΔ/regime翻 |');
+    md.push('|---|---|---|---|---|---|---|---|---|');
+    for (const l of staged) {
+      const s = l.meta.stages;
+      md.push(`| ${l.leg} | ${e(s.epa.maxDiff)}/${s.epa.changed} | ${s.pyramid.levelsA} ${e(s.pyramid.simMax)}/${s.pyramid.simChanged}/${s.pyramid.orderFlips}(${s.pyramid.membershipFlips}) | ${e(s.fusion.maxDiff)}/${s.fusion.changed}/${s.fusion.selectedFlips} | ${e(s.dualField.maxDiff)} | ${s.enhanced.minCos != null ? s.enhanced.minCos.toFixed(9) : '-'} | ${s.topo.posFlips}/${s.topo.dropped + s.topo.added} | ${e(s.topo.scoreMax)}/${e(s.topo.scoreMean)} | ${e(s.omega.maxDiff)}/${s.omega.regimeFlips} |`);
+    }
   }
   if (legs.some((l) => l.issues?.length)) {
     md.push('', '## 分歧明细', '');
