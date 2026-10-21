@@ -219,10 +219,45 @@ fn load_file_tags(connection: &Connection) -> std::result::Result<Vec<FileTag>, 
     Ok(output)
 }
 
+/// P2 交付2（schema-v2 兼容）：2.0 的 schema 迁移会**删除**派生表
+/// （`rust-vexus-lite/src/schema.rs:305-322` 删 `tag_pair_similarity` /
+/// `tag_intrinsic_residuals(_status)` / `kv_store['epa_basis_cache']` /
+/// `tagmemo_artifacts` 的 pairwise·intrinsic 行）。缺表 = 那个世界本就没有这类证据，
+/// 走空集/缺省增益，**绝不硬崩**（此前 `prepare pairwise failed: no such table`）。
+static PAIRWISE_TABLE_MISSING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static INTRINSIC_TABLE_MISSING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 上一次 build 是否在 schema-v2 世界里（供诊断面读取；本文件其他函数不在本轮写域，
+/// 故先以访问器外露，接线进 metadata 需再改 `run_build`/`artifact_payload` 一处）。
+#[allow(dead_code)]
+pub(crate) fn schema_v2_fallback_flags() -> (bool, bool) {
+    (
+        PAIRWISE_TABLE_MISSING.load(std::sync::atomic::Ordering::Relaxed),
+        INTRINSIC_TABLE_MISSING.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+fn table_exists(connection: &Connection, table: &str) -> std::result::Result<bool, String> {
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("schema probe failed for {}: {}", table, error))?;
+    Ok(count > 0)
+}
+
 fn load_pairwise(
     connection: &Connection,
     model_sig: &str,
 ) -> std::result::Result<HashMap<(i64, i64), f64>, String> {
+    if !table_exists(connection, "tag_pair_similarity")? {
+        PAIRWISE_TABLE_MISSING.store(true, std::sync::atomic::Ordering::Relaxed);
+        return Ok(HashMap::new());
+    }
     let mut statement = connection
         .prepare("SELECT tag_a, tag_b, similarity FROM tag_pair_similarity WHERE model_sig = ?1")
         .map_err(|error| format!("prepare pairwise failed: {}", error))?;
@@ -253,6 +288,13 @@ fn load_pairwise(
 fn load_anchor_gains(
     connection: &Connection,
 ) -> std::result::Result<(HashMap<i64, f64>, HashMap<i64, f64>, String), String> {
+    // 同族守卫（与 load_pairwise 同判据）：2.0 迁移删了 tag_intrinsic_residuals，
+    // 缺表 = 没有几何残差证据 → 空增益（build_fact_matrix 的 unwrap_or(1.0) 兜底），
+    // 不硬崩。lead 只批了 load_pairwise，此处为达成「不崩」必不可少，已在汇报中申报。
+    if !table_exists(connection, "tag_intrinsic_residuals")? {
+        INTRINSIC_TABLE_MISSING.store(true, std::sync::atomic::Ordering::Relaxed);
+        return Ok((HashMap::new(), HashMap::new(), String::new()));
+    }
     let mut statement = connection
         .prepare(
             "SELECT tag_id, COALESCE(v9_anchor_gain, residual_energy, 1.0), \

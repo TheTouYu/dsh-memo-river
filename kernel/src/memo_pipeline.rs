@@ -75,6 +75,41 @@ fn cosine(left: &[f32], right: &[f32]) -> f64 {
     }
 }
 
+/// P2 交付1：金字塔相似度口径。
+/// - `legacy`（缺省）= v9.2 逐字实现：`1/(1+d)`，其中 d 是 usearch 返回的**平方** L2
+///   （等价 1/(1+L2²)；实测口径见 research/vcp2.0/port/p2-divergence-2026-10-22.md §5）。
+/// - `cosine` = 上游 2.0 `memo_pipeline.rs:648`：`cosine(residual, SQL 原件向量)`。
+///
+/// 这条通道的杀伤力在动态虫洞：相似度经 `reuse_score` 进 `known_scores` 后被当作
+/// 更深层共鸣值，再与 `dynamic_wormhole_threshold`(0.2) 二值化比较——近正交时
+/// legacy 给 1/3（恒过阈）、cosine 给 ≈0（恒不过阈）。闸关时 context=None，零漂移。
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+enum SimilarityMode {
+    Legacy,
+    Cosine,
+}
+
+fn pyramid_similarity(
+    mode: SimilarityMode,
+    distance: Option<f32>,
+    residual: &[f32],
+    vector: &[f32],
+) -> f64 {
+    match mode {
+        SimilarityMode::Legacy => distance
+            .map(|distance| 1.0 / (1.0 + distance as f64))
+            .unwrap_or(0.0),
+        SimilarityMode::Cosine => cosine(residual, vector),
+    }
+}
+
+/// 配置键优先；缺省（None）= legacy。
+/// 不做 env 后门（裁决②：kernel 只留一个配置面；B 的 driver 白名单已加转发）。
+fn resolve_similarity_mode(configured: Option<SimilarityMode>) -> SimilarityMode {
+    configured.unwrap_or(SimilarityMode::Legacy)
+}
+
 fn normalize(vector: &mut [f64]) -> bool {
     let norm = vector.iter().map(|value| value * value).sum::<f64>().sqrt();
     if norm <= 1e-12 {
@@ -142,6 +177,10 @@ struct PipelineConfig {
     /// JS 侧取值 = rag_params 的 KnowledgeBaseManager.riverMemo.effectiveSupport.maxProjectionNodes。
     #[serde(default)]
     max_projection_nodes: usize,
+    /// P2 交付1（暗上线）：金字塔相似度口径。缺省（None）= v9.2 的 1/(1+L2²)；
+    /// `"cosine"` = 上游 2.0 memo_pipeline.rs:648。
+    #[serde(default)]
+    similarity_mode: Option<SimilarityMode>,
     max_levels: usize,
     pyramid_top_k: usize,
     min_energy_ratio: f64,
@@ -174,6 +213,7 @@ impl Default for PipelineConfig {
             local_mass_ratio: 0.8,
             transfer_mass_ratio: 0.9,
             max_projection_nodes: 0, // 暗上线：0 = v9.2 全支撑投影
+            similarity_mode: None,   // 暗上线：None = v9.2 的 1/(1+L2²)
             max_levels: 3,
             pyramid_top_k: 10,
             min_energy_ratio: 0.1,
@@ -581,6 +621,7 @@ fn analyze_pyramid(
     }
 
     let mut residual = query.to_vec();
+    let similarity_mode = resolve_similarity_mode(config.similarity_mode);
     let mut levels_output = Vec::new();
     let mut levels_work = Vec::new();
     let mut residuals: Vec<Vec<f32>> = Vec::new();
@@ -618,12 +659,13 @@ fn analyze_pyramid(
                     .get(id)
                     .cloned()
                     .unwrap_or_else(|| format!("Tag#{}", id)),
+                similarity: pyramid_similarity(
+                    similarity_mode,
+                    matches.distances.get(position).copied(),
+                    &residual,
+                    &vector,
+                ),
                 vector,
-                similarity: matches
-                    .distances
-                    .get(position)
-                    .map(|distance| 1.0 / (1.0 + *distance as f64))
-                    .unwrap_or(0.0),
                 contribution: 0.0,
                 handshake_magnitude: 0.0,
             });
@@ -1997,5 +2039,73 @@ mod geometry_epa_tests {
         assert_eq!(diagnostics.sql_batches, 0);
         assert_eq!(diagnostics.sql_fetched_nodes, 0);
         assert_eq!(pool.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod similarity_mode_tests {
+    use super::*;
+
+    #[test]
+    fn similarity_mode_config_defaults_to_legacy_and_rejects_unknown() {
+        let default: PipelineConfig = serde_json::from_str("{}").unwrap();
+        assert!(default.similarity_mode.is_none());
+        assert_eq!(
+            resolve_similarity_mode(default.similarity_mode),
+            SimilarityMode::Legacy
+        );
+        let cosine: PipelineConfig =
+            serde_json::from_value(serde_json::json!({ "similarityMode": "cosine" })).unwrap();
+        assert_eq!(
+            resolve_similarity_mode(cosine.similarity_mode),
+            SimilarityMode::Cosine
+        );
+        let legacy: PipelineConfig =
+            serde_json::from_value(serde_json::json!({ "similarityMode": "legacy" })).unwrap();
+        assert_eq!(
+            resolve_similarity_mode(legacy.similarity_mode),
+            SimilarityMode::Legacy
+        );
+        // 未知档位必须炸（不静默回退：配置面写错要立刻知道）
+        assert!(serde_json::from_value::<PipelineConfig>(
+            serde_json::json!({ "similarityMode": "cos" })
+        )
+        .is_err());
+    }
+
+    /// B 实测口径（p2-divergence-2026-10-22.md §5）：单位向量下 L2² = 2-2cos，
+    /// 所以 legacy 的 1/(1+d)（d = usearch 的平方距离）= 1/(1+2-2cos)，与 cos 不同口径。
+    /// tag5 实测：cos 0.5525 / L2² 0.895 / legacy 0.5277。
+    #[test]
+    fn legacy_is_one_over_one_plus_squared_l2_while_cosine_is_geometric() {
+        let residual = [1.0f32, 0.0];
+        let cosine_target = 0.5525f32;
+        let vector = [cosine_target, (1.0 - cosine_target * cosine_target).sqrt()];
+        let squared_l2 = 2.0 - 2.0 * cosine_target as f64; // 0.895
+        let distance = Some(squared_l2 as f32);
+        let legacy = pyramid_similarity(SimilarityMode::Legacy, distance, &residual, &vector);
+        let cosine = pyramid_similarity(SimilarityMode::Cosine, distance, &residual, &vector);
+        assert!((legacy - 1.0 / (1.0 + squared_l2)).abs() < 1e-12);
+        assert!((legacy - 0.5277).abs() < 1e-4, "legacy {}", legacy);
+        assert!((cosine - cosine_target as f64).abs() < 1e-6, "cosine {}", cosine);
+        assert!(cosine > legacy, "正交附近 cos 高于 1/(1+L2²)");
+    }
+
+    /// 杀伤力所在：近正交时 legacy 给 1/3（>0.2 恒过阈），cosine 给 ≈0（恒不过阈）⇒
+    /// 动态虫洞的 known_scores 通道被二值化翻转（闸关时 context=None，零漂移）。
+    #[test]
+    fn near_orthogonal_similarity_straddles_dynamic_wormhole_threshold() {
+        let residual = [1.0f32, 0.0];
+        let orthogonal = [0.0f32, 1.0];
+        let legacy = pyramid_similarity(SimilarityMode::Legacy, Some(2.0), &residual, &orthogonal);
+        let cosine = pyramid_similarity(SimilarityMode::Cosine, Some(2.0), &residual, &orthogonal);
+        assert!((legacy - 1.0 / 3.0).abs() < 1e-12);
+        assert!(legacy >= 0.2, "legacy {} 应过 0.2 阈值", legacy);
+        assert!(cosine < 0.2, "cosine {} 不应过 0.2 阈值", cosine);
+        // 向量维度不匹配（未装载成功的脏行）时余弦给 0，不伪造支撑
+        assert_eq!(
+            pyramid_similarity(SimilarityMode::Cosine, Some(2.0), &residual, &[1.0f32]),
+            0.0
+        );
     }
 }
