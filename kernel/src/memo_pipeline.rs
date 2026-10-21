@@ -1515,6 +1515,17 @@ struct PipelineDiagnostics {
     /// P1.2（上游 1646）：感知层诊断（含动态虫洞 6 计数与工作账）随管线外露——
     /// 暗上线期间看「关」是否真零工作、开闸后看虫洞命中。
     sensing: SenseDiagnostics,
+    /// P2：上一次 `rebuildMemoArtifact` 的 schema-v2 兜底探针（2.0 迁移会删
+    /// `tag_pair_similarity` / `tag_intrinsic_residuals`）。放这里而不是 artifact payload，
+    /// 因为 payload 是逐字节深比对面（多一个键就记「缺侧」）。
+    build_schema_v2: BuildSchemaV2Flags,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildSchemaV2Flags {
+    pairwise_table_missing: bool,
+    intrinsic_table_missing: bool,
 }
 
 #[derive(Serialize)]
@@ -1759,6 +1770,14 @@ fn run_pipeline(
             dual_field: dual_field_diagnostics,
             fusion,
             sensing: sensing_diagnostics,
+            build_schema_v2: {
+                let (pairwise_missing, intrinsic_missing) =
+                    crate::memo_artifact_builder::schema_v2_fallback_flags();
+                BuildSchemaV2Flags {
+                    pairwise_table_missing: pairwise_missing,
+                    intrinsic_table_missing: intrinsic_missing,
+                }
+            },
         },
     })
     .map_err(|error| format!("encode unified Memo pipeline metadata failed: {}", error))?;

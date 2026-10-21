@@ -9,7 +9,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -229,9 +229,8 @@ static PAIRWISE_TABLE_MISSING: std::sync::atomic::AtomicBool =
 static INTRINSIC_TABLE_MISSING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// 上一次 build 是否在 schema-v2 世界里（供诊断面读取；本文件其他函数不在本轮写域，
-/// 故先以访问器外露，接线进 metadata 需再改 `run_build`/`artifact_payload` 一处）。
-#[allow(dead_code)]
+/// 上一次 build 是否在 schema-v2 世界里（vectors 档写进 metadata.schemaV2Fallbacks，
+/// 便于暗上线时观测「缺表兜底真的发生了」）。
 pub(crate) fn schema_v2_fallback_flags() -> (bool, bool) {
     (
         PAIRWISE_TABLE_MISSING.load(std::sync::atomic::Ordering::Relaxed),
@@ -248,6 +247,128 @@ fn table_exists(connection: &Connection, table: &str) -> std::result::Result<boo
         )
         .map_err(|error| format!("schema probe failed for {}: {}", table, error))?;
     Ok(count > 0)
+}
+
+/// P2-A（暗上线）：fact matrix 的语义门输入源。
+/// `pairwise`（缺省）= v9.2 逐字：查 `tag_pair_similarity` 表；
+/// `vectors` = 上游 2.0 `memo_artifact_builder.rs:194-307`：每 file 窗口（2..=100 tags）
+/// 现读 tag 单位向量，`memo_geometry::dot(unit,unit).clamp(-1,1)` —— 2.0 用 AGS 几何
+/// 取代了 pairwise 表（迁移会删表，见 schema.rs:305-322）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FactMatrixMode {
+    Pairwise,
+    Vectors,
+}
+
+fn read_fact_matrix_mode(config: &Value) -> std::result::Result<FactMatrixMode, String> {
+    match config.get("factMatrixMode").and_then(Value::as_str) {
+        None | Some("pairwise") => Ok(FactMatrixMode::Pairwise),
+        Some("vectors") => Ok(FactMatrixMode::Vectors),
+        Some(other) => Err(format!(
+            "invalid factMatrixMode \"{}\"（合法：pairwise | vectors）",
+            other
+        )),
+    }
+}
+
+/// 单位化（上游 `memo_geometry::read_unit_vectors` 的口径）：非有限/零向量缺席。
+fn unit_normalize(vector: &mut [f64]) -> bool {
+    let norm = vector.iter().map(|value| value * value).sum::<f64>().sqrt();
+    if !norm.is_finite() || norm <= 1e-12 {
+        return false;
+    }
+    for value in vector.iter_mut() {
+        *value /= norm;
+    }
+    true
+}
+
+/// 语义门输入源抽象：两种档位共用同一条共现权重循环，只有 similarity 来源不同。
+struct FactCompat<'a> {
+    mode: FactMatrixMode,
+    pairwise: &'a HashMap<(i64, i64), f64>,
+    connection: &'a Connection,
+    dimension: usize,
+    semantic_enabled: bool,
+    low_fallback: f64,
+    vectors: HashMap<i64, Vec<f64>>,
+}
+
+impl<'a> FactCompat<'a> {
+    fn new(
+        mode: FactMatrixMode,
+        pairwise: &'a HashMap<(i64, i64), f64>,
+        connection: &'a Connection,
+        dimension: usize,
+        config: &Value,
+    ) -> Self {
+        let ordered = config.get("orderedCooccurrence").unwrap_or(&Value::Null);
+        Self {
+            mode,
+            pairwise,
+            connection,
+            dimension,
+            semantic_enabled: boolean(ordered, &["semanticGainEnabled"], false)
+                || boolean(ordered, &["semanticGain", "enabled"], false),
+            low_fallback: number(
+                ordered,
+                &["semanticGainLowSimFallback"],
+                number(ordered, &["semanticGain", "lowSimFallback"], 0.1),
+            ),
+            vectors: HashMap::new(),
+        }
+    }
+
+    /// 每个 file 窗口开一次：vectors 档按批装载该窗口 tag 的单位向量（上游同量级 128/批）。
+    fn begin_file(&mut self, tag_ids: &[i64]) -> std::result::Result<(), String> {
+        self.vectors.clear();
+        if self.mode != FactMatrixMode::Vectors || !self.semantic_enabled {
+            return Ok(());
+        }
+        let mut ids: Vec<i64> = tag_ids.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        for batch in ids.chunks(128) {
+            let rows = crate::memo_vector_pool::load_vectors_by_ids(
+                self.connection,
+                "tags",
+                batch,
+                self.dimension,
+            )?;
+            for (id, vector) in rows {
+                let mut unit: Vec<f64> = vector.iter().map(|value| *value as f64).collect();
+                if unit_normalize(&mut unit) {
+                    self.vectors.insert(id, unit);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn similarity(&self, left: i64, right: i64) -> f64 {
+        match self.mode {
+            FactMatrixMode::Pairwise => {
+                let key = (left.min(right), left.max(right));
+                self.pairwise.get(&key).copied().unwrap_or(self.low_fallback)
+            }
+            FactMatrixMode::Vectors => {
+                match (self.vectors.get(&left), self.vectors.get(&right)) {
+                    (Some(a), Some(b)) => crate::memo_geometry::dot(a, b).clamp(-1.0, 1.0),
+                    _ => self.low_fallback,
+                }
+            }
+        }
+    }
+}
+
+/// 语义增益曲线（上游 build_fact_matrix 的 semantic_gain 闭包，逐字）。
+fn semantic_curve(similarity: f64, peak: f64, sigma: f64) -> f64 {
+    if similarity < 0.15 {
+        0.4 + similarity * 1.0
+    } else {
+        0.5 + 0.8
+            * (-((similarity - peak).powi(2)) / (2.0 * sigma * sigma)).exp()
+    }
 }
 
 fn load_pairwise(
@@ -285,39 +406,111 @@ fn load_pairwise(
     Ok(output)
 }
 
+fn anchor_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(i64, f64, f64, String)> {
+    Ok((
+        row.get::<_, i64>(0)?,
+        row.get::<_, f64>(1)?,
+        row.get::<_, f64>(2)?,
+        row.get::<_, String>(3)?,
+    ))
+}
+
+fn column_exists(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> std::result::Result<bool, String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({})", table))
+        .map_err(|error| format!("schema probe failed for {}: {}", table, error))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("schema probe failed for {}: {}", table, error))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("schema probe failed for {}: {}", table, error))?
+    {
+        let name: String = row
+            .get(1)
+            .map_err(|error| format!("schema probe failed for {}: {}", table, error))?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// vectors 档需要向量维度：从 tags.vector 的字节长度反推（无向量行 = 无法走几何语义门）。
+fn detect_dimension(connection: &Connection) -> std::result::Result<usize, String> {
+    let bytes: Option<i64> = connection
+        .query_row(
+            "SELECT length(vector) FROM tags WHERE vector IS NOT NULL AND length(vector) > 0 LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("factMatrixMode=vectors 需要 tags.vector：{}", error))?;
+    match bytes {
+        Some(bytes) if bytes > 0 && bytes % 4 == 0 => Ok((bytes / 4) as usize),
+        _ => Err("factMatrixMode=vectors 需要 tags.vector（当前库没有可用向量行）".to_string()),
+    }
+}
+
 fn load_anchor_gains(
     connection: &Connection,
+    model_sig: &str,
+    mode: FactMatrixMode,
 ) -> std::result::Result<(HashMap<i64, f64>, HashMap<i64, f64>, String), String> {
     // 同族守卫（与 load_pairwise 同判据）：2.0 迁移删了 tag_intrinsic_residuals，
     // 缺表 = 没有几何残差证据 → 空增益（build_fact_matrix 的 unwrap_or(1.0) 兜底），
-    // 不硬崩。lead 只批了 load_pairwise，此处为达成「不崩」必不可少，已在汇报中申报。
+    // 不硬崩。
     if !table_exists(connection, "tag_intrinsic_residuals")? {
         INTRINSIC_TABLE_MISSING.store(true, std::sync::atomic::Ordering::Relaxed);
         return Ok((HashMap::new(), HashMap::new(), String::new()));
     }
-    let mut statement = connection
-        .prepare(
-            "SELECT tag_id, COALESCE(v9_anchor_gain, residual_energy, 1.0), \
-             COALESCE(raw_residual_ratio, 0.0), COALESCE(artifact_sig, '') \
-             FROM tag_intrinsic_residuals",
-        )
-        .map_err(|error| format!("prepare intrinsic residuals failed: {}", error))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, f64>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })
-        .map_err(|error| format!("query intrinsic residuals failed: {}", error))?;
+    // P2-B（暗上线）：vectors 档照上游 2.0 :134-186 —— 按 model_sig 过滤 + ORDER BY tag_id；
+    // pairwise 档保持 v9.2 逐字（无过滤、signature 取 intrinsic 行里的 artifact_sig）。
+    let vectors_mode = mode == FactMatrixMode::Vectors;
+    let sql = if vectors_mode {
+        "SELECT tag_id, COALESCE(v9_anchor_gain, residual_energy, 1.0), \
+         COALESCE(raw_residual_ratio, 0.0), COALESCE(artifact_sig, '') \
+         FROM tag_intrinsic_residuals WHERE model_sig = ?1 ORDER BY tag_id"
+    } else {
+        "SELECT tag_id, COALESCE(v9_anchor_gain, residual_energy, 1.0), \
+         COALESCE(raw_residual_ratio, 0.0), COALESCE(artifact_sig, '') \
+         FROM tag_intrinsic_residuals"
+    };
+    let mut collected: Vec<(i64, f64, f64, String)> = Vec::new();
+    {
+        let mut statement = connection
+            .prepare(sql)
+            .map_err(|error| format!("prepare intrinsic residuals failed: {}", error))?;
+        if vectors_mode {
+            let rows = statement
+                .query_map(params![model_sig], anchor_row)
+                .map_err(|error| format!("query intrinsic residuals failed: {}", error))?;
+            for row in rows {
+                collected.push(row.map_err(|error| {
+                    format!("decode intrinsic residual row failed: {}", error)
+                })?);
+            }
+        } else {
+            let rows = statement
+                .query_map([], anchor_row)
+                .map_err(|error| format!("query intrinsic residuals failed: {}", error))?;
+            for row in rows {
+                collected.push(row.map_err(|error| {
+                    format!("decode intrinsic residual row failed: {}", error)
+                })?);
+            }
+        }
+    }
     let mut gains = HashMap::new();
     let mut raw = HashMap::new();
     let mut signature = String::new();
-    for row in rows {
-        let (tag_id, gain, raw_residual, artifact_sig) =
-            row.map_err(|error| format!("decode intrinsic residual row failed: {}", error))?;
+    for (tag_id, gain, raw_residual, artifact_sig) in collected {
         if !gain.is_finite() || !raw_residual.is_finite() {
             return Err(format!(
                 "intrinsic residual row for Tag {} contains non-finite values",
@@ -329,6 +522,46 @@ fn load_anchor_gains(
         if signature.is_empty() && !artifact_sig.is_empty() {
             signature = artifact_sig;
         }
+    }
+    if vectors_mode {
+        // 上游 2.0 :154-171：residual signature 的权威源是 unified_geometry 资产行
+        // （不是 intrinsic 行），并校验 memo_tag_facts 指纹；不符 ⇒ 硬拒建。
+        let has_asset_columns = table_exists(connection, "tagmemo_artifacts")?
+            && column_exists(connection, "tagmemo_artifacts", "asset_type")?
+            && column_exists(connection, "tagmemo_artifacts", "graph_generation")?;
+        let geometry: Option<(String, String)> = if has_asset_columns {
+            connection
+                .query_row(
+                    "SELECT artifact_sig, graph_generation FROM tagmemo_artifacts \
+                     WHERE asset_type = 'unified_geometry' AND model_sig = ?1 AND status = 'ready' \
+                     ORDER BY updated_at DESC LIMIT 1",
+                    params![model_sig],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(|error| format!("query unified geometry asset failed: {}", error))?
+        } else {
+            None
+        };
+        signature = match geometry {
+            Some((asset_sig, generation)) => {
+                let facts: String = connection
+                    .query_row(
+                        "SELECT value FROM kbm_runtime_meta WHERE key = 'memo_tag_facts'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| format!("query memo_tag_facts failed: {}", error))?;
+                if generation != format!("facts:{}", facts) {
+                    return Err(
+                        "KNOWLEDGE_STORE_DERIVED_DEPENDENCY_CONFLICT: geometry facts are stale"
+                            .into(),
+                    );
+                }
+                asset_sig
+            }
+            None => String::new(),
+        };
     }
     Ok((gains, raw, signature))
 }
@@ -342,10 +575,10 @@ fn add_edge(matrix: &mut HashMap<i64, HashMap<i64, f64>>, source: i64, target: i
 
 fn build_fact_matrix(
     rows: &[FileTag],
-    pairwise: &HashMap<(i64, i64), f64>,
+    compat: &mut FactCompat<'_>,
     anchor_gain: &HashMap<i64, f64>,
     config: &Value,
-) -> HashMap<i64, HashMap<i64, f64>> {
+) -> std::result::Result<HashMap<i64, HashMap<i64, f64>>, String> {
     let ordered = config.get("orderedCooccurrence").unwrap_or(&Value::Null);
     let forward_gain = number(ordered, &["forwardGain"], 1.0).max(0.0);
     let reverse_gain = number(ordered, &["reverseGain"], 0.42).clamp(
@@ -369,27 +602,7 @@ fn build_fact_matrix(
         number(ordered, &["semanticGain", "sigma"], 0.25),
     )
     .max(0.001);
-    let low_fallback = number(
-        ordered,
-        &["semanticGainLowSimFallback"],
-        number(ordered, &["semanticGain", "lowSimFallback"], 0.1),
-    );
-
-    let semantic_gain = |left: i64, right: i64| -> f64 {
-        if !semantic_enabled {
-            return 1.0;
-        }
-        let key = (left.min(right), left.max(right));
-        let similarity = pairwise.get(&key).copied().unwrap_or(low_fallback);
-        if similarity < 0.15 {
-            0.4 + similarity * 1.0
-        } else {
-            0.5 + 0.8
-                * (-((similarity - semantic_peak).powi(2))
-                    / (2.0 * semantic_sigma * semantic_sigma))
-                    .exp()
-        }
-    };
+    let semantic_enabled = compat.semantic_enabled;
 
     let mut matrix = HashMap::new();
     let mut offset = 0usize;
@@ -401,6 +614,7 @@ fn build_fact_matrix(
         }
         let tags = &rows[offset..end];
         if tags.len() >= 2 && tags.len() <= 100 {
+            compat.begin_file(&tags.iter().map(|tag| tag.tag_id).collect::<Vec<i64>>())?;
             for left_index in 0..tags.len() {
                 for right_index in (left_index + 1)..tags.len() {
                     let left = &tags[left_index];
@@ -408,7 +622,15 @@ fn build_fact_matrix(
                     if left.tag_id == right.tag_id {
                         continue;
                     }
-                    let semantic = semantic_gain(left.tag_id, right.tag_id);
+                    let semantic = if semantic_enabled {
+                        semantic_curve(
+                            compat.similarity(left.tag_id, right.tag_id),
+                            semantic_peak,
+                            semantic_sigma,
+                        )
+                    } else {
+                        1.0
+                    };
                     if left.position > 0 && right.position > 0 {
                         let count = tags.len() as f64;
                         let phi_left =
@@ -446,7 +668,7 @@ fn build_fact_matrix(
         }
         offset = end;
     }
-    matrix
+    Ok(matrix)
 }
 
 fn build_transport(
@@ -677,7 +899,7 @@ fn build_native_artifact(
         })
         .collect();
     let max_inbound = inbound.values().copied().fold(0.0, f64::max);
-    Arc::new(NativeArtifact {
+    let artifact = NativeArtifact {
         node_ids,
         node_index,
         row_offsets,
@@ -688,17 +910,21 @@ fn build_native_artifact(
         anchor_gain,
         wormhole_edges: wormholes,
         provenance: native_provenance,
-        // P0.1：node_anchor_gain/edge_is_wormhole 只能由 prepared() 物化；
-        // 本构造的产物先按 v9.2 行序序列化 payload（:816）保签名，
-        // 运行时发布时再克隆出 prepared 版本（:870）。
+        // P0.1：node_anchor_gain/edge_is_wormhole 只能由 prepared() 物化；payload 序列化
+        // 保持 v9.2 行序（target 升序），运行时发布时再克隆出 prepared 版本。
+        // P2-F 实测修正：2.0 **持久化的** payload 行序同样是 target 升序（不是权重降序）——
+        // 按「上游代码里 build_native_artifact 返回 .prepared()」推断会写出行序差异，
+        // 实测 oracle 的 sharedTransport 逐行非降序即证伪。
         ..NativeArtifact::default()
-    })
+    };
+    Arc::new(artifact)
 }
 
 fn artifact_payload(
     artifact: &NativeArtifact,
     provenance: &BTreeMap<(i64, i64), Vec<ProvenanceContribution>>,
     metadata: &Value,
+    compact_provenance: bool,
 ) -> Value {
     let provenance_edges: Vec<Value> = provenance
         .iter()
@@ -707,7 +933,15 @@ fn artifact_payload(
                 format!("{}:{}", source, target),
                 contributions
                     .iter()
-                    .map(|item| { json!([item.file_id, item.diary_name, item.path, item.mass]) })
+                    .map(|item| {
+                        // P2-F（暗上线）：vectors 档照上游 2.0 用二元组 [fileId, mass]；
+                        // pairwise 档保持 v9.2 的四元组（payload 逐字节不变 ⇒ 五腿零漂移）。
+                        if compact_provenance {
+                            json!([item.file_id, item.mass])
+                        } else {
+                            json!([item.file_id, item.diary_name, item.path, item.mass])
+                        }
+                    })
                     .collect::<Vec<_>>()
             ])
         })
@@ -764,10 +998,31 @@ fn run_build(
     }
 
     let readonly = open_readonly(db_path)?;
+    // P2-A/B/F 暗上线闸：缺省 pairwise = v9.2 逐字（表 + intrinsic 行 signature +
+    // 非 prepared payload + 四项 provenance）；vectors = 上游 2.0 语义。
+    let mode = read_fact_matrix_mode(&input.effective_config)?;
     let rows = load_file_tags(&readonly)?;
-    let pairwise = load_pairwise(&readonly, &input.model_sig)?;
-    let (anchor_gain, _raw_residuals, residual_sig) = load_anchor_gains(&readonly)?;
-    let fact = build_fact_matrix(&rows, &pairwise, &anchor_gain, &input.effective_config);
+    let pairwise = if mode == FactMatrixMode::Vectors {
+        HashMap::new()
+    } else {
+        load_pairwise(&readonly, &input.model_sig)?
+    };
+    let (anchor_gain, _raw_residuals, residual_sig) =
+        load_anchor_gains(&readonly, &input.model_sig, mode)?;
+    let dimension = if mode == FactMatrixMode::Vectors {
+        detect_dimension(&readonly)?
+    } else {
+        0
+    };
+    let mut compat = FactCompat::new(
+        mode,
+        &pairwise,
+        &readonly,
+        dimension,
+        &input.effective_config,
+    );
+    let fact = build_fact_matrix(&rows, &mut compat, &anchor_gain, &input.effective_config)?;
+    drop(compat);
     let (transport, wormholes) = build_transport(&fact, &anchor_gain, &input.effective_config);
     let provenance = build_provenance(&rows, &input.effective_config);
 
@@ -842,9 +1097,10 @@ fn run_build(
         48,
     );
 
+    let vectors_mode = mode == FactMatrixMode::Vectors;
     let native = build_native_artifact(&transport, inbound, anchor_gain, wormholes, &provenance);
     let published_at = now_ms();
-    let metadata = json!({
+    let mut metadata = json!({
         "schema": "tagmemo-v10-alpha-artifact-v1",
         "version": "v10_alpha",
         "algorithmVersion": ALGORITHM_VERSION,
@@ -859,7 +1115,10 @@ fn run_build(
         "maxInbound": native.max_inbound,
         "effectiveConfig": input.effective_config
     });
-    let payload = artifact_payload(&native, &provenance, &metadata);
+    // 注：artifact payload 的 metadata **不加任何键** —— diff-runner 对 payload 做全量深比对，
+    // 多一个键即记「缺侧」（实测 2.0 metadata 13 键 vs 我方 13 键；曾加 2 个诊断键 ⇒ 缺侧）。
+    // schema-v2 兜底标记改由 pipeline metadata 的 diagnostics 面外露（见 memo_pipeline.rs）。
+    let payload = artifact_payload(&native, &provenance, &metadata, vectors_mode);
     let raw = serde_json::to_vec(&payload)
         .map_err(|error| format!("encode native artifact payload failed: {}", error))?;
     let checksum = sha256_hex(&raw);
@@ -991,6 +1250,23 @@ mod tests {
         .unwrap()
     }
 
+
+    /// pairwise 档 compat 构造（测试用：无 DB 依赖，表走空 map）。
+    fn pairwise_compat<'a>(
+        connection: &'a Connection,
+        pairwise: &'a HashMap<(i64, i64), f64>,
+        config: &Value,
+    ) -> FactCompat<'a> {
+        FactCompat::new(FactMatrixMode::Pairwise, pairwise, connection, 0, config)
+    }
+
+    fn memory_db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY, vector BLOB);")
+            .unwrap();
+        db
+    }
+
     fn canonical_transport(transport: &HashMap<i64, HashMap<i64, f64>>) -> Vec<(i64, Vec<(i64, f64)>)> {
         let mut out: Vec<(i64, Vec<(i64, f64)>)> = transport
             .iter()
@@ -1013,13 +1289,15 @@ mod tests {
         let pairwise = HashMap::new();
         let anchor_gain = HashMap::from([(13i64, 1.4f64), (14i64, 0.7f64)]);
         let cfg = config();
+        let db = memory_db();
+        let mut compat = pairwise_compat(&db, &pairwise, &cfg);
         let first = build_transport(
-            &build_fact_matrix(&rows, &pairwise, &anchor_gain, &cfg),
+            &build_fact_matrix(&rows, &mut compat, &anchor_gain, &cfg).unwrap(),
             &anchor_gain,
             &cfg,
         );
         let second = build_transport(
-            &build_fact_matrix(&rows, &pairwise, &anchor_gain, &cfg),
+            &build_fact_matrix(&rows, &mut compat, &anchor_gain, &cfg).unwrap(),
             &anchor_gain,
             &cfg,
         );
@@ -1035,8 +1313,10 @@ mod tests {
         let pairwise = HashMap::new();
         let anchor_gain = HashMap::new();
         let cfg = config();
+        let db = memory_db();
+        let mut compat = pairwise_compat(&db, &pairwise, &cfg);
         let (transport, _) = build_transport(
-            &build_fact_matrix(&rows, &pairwise, &anchor_gain, &cfg),
+            &build_fact_matrix(&rows, &mut compat, &anchor_gain, &cfg).unwrap(),
             &anchor_gain,
             &cfg,
         );
@@ -1069,6 +1349,127 @@ mod tests {
         a.sort_by_key(|item| item.0);
         b.sort_by_key(|item| item.0);
         assert_eq!(a, b);
+    }
+
+
+    #[test]
+    fn fact_matrix_mode_config_parsing() {
+        let empty = serde_json::json!({});
+        assert_eq!(read_fact_matrix_mode(&empty).unwrap(), FactMatrixMode::Pairwise);
+        let pairwise = serde_json::json!({"factMatrixMode": "pairwise"});
+        assert_eq!(read_fact_matrix_mode(&pairwise).unwrap(), FactMatrixMode::Pairwise);
+        let vectors = serde_json::json!({"factMatrixMode": "vectors"});
+        assert_eq!(read_fact_matrix_mode(&vectors).unwrap(), FactMatrixMode::Vectors);
+        let bogus = serde_json::json!({"factMatrixMode": "cos"});
+        assert!(read_fact_matrix_mode(&bogus).is_err());
+    }
+
+    /// P2-A：vectors 档的 compat 来自现读单位向量 dot（上游 2.0 :194-307），
+    /// pairwise 档来自表；同一对同向量 tag 下两者语义增益可解析对照。
+    #[test]
+    fn vectors_mode_uses_unit_dot_instead_of_pairwise_table() {
+        let db = memory_db();
+        for id in [10i64, 11] {
+            let values = [1.0f32, 0.0, 0.0, 0.0];
+            let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            db.execute("INSERT INTO tags VALUES (?1,?2)", params![id, bytes]).unwrap();
+        }
+        let rows = vec![
+            FileTag { file_id: 1, tag_id: 10, position: 1, diary_name: "t".into(), path: "t".into() },
+            FileTag { file_id: 1, tag_id: 11, position: 2, diary_name: "t".into(), path: "t".into() },
+        ];
+        let cfg = config();
+        let anchor_gain = HashMap::new();
+        // pairwise 档：空表 ⇒ lowFallback 0.1 ⇒ gain = 0.4+0.1 = 0.5
+        let empty = HashMap::new();
+        let mut pairwise_compat = FactCompat::new(FactMatrixMode::Pairwise, &empty, &db, 4, &cfg);
+        let pairwise = build_fact_matrix(&rows, &mut pairwise_compat, &anchor_gain, &cfg).unwrap();
+        // vectors 档：两向量同向 ⇒ cos=1 ⇒ gain = 0.5+0.8*exp(-(0.35²)/(2*0.25²))
+        let mut vectors_compat = FactCompat::new(FactMatrixMode::Vectors, &empty, &db, 4, &cfg);
+        let vectors = build_fact_matrix(&rows, &mut vectors_compat, &anchor_gain, &cfg).unwrap();
+        let pairwise_forward = pairwise[&10][&11];
+        let vectors_forward = vectors[&10][&11];
+        let ratio = vectors_forward / pairwise_forward;
+        let expected = semantic_curve(1.0, 0.65, 0.25) / semantic_curve(0.1, 0.65, 0.25);
+        assert!((ratio - expected).abs() < 1e-12, "ratio {} vs {}", ratio, expected);
+        assert!(vectors_forward > pairwise_forward);
+        // 反向边同样走语义增益（2.0 同构），且 <= forward*guard
+        assert!(vectors[&11][&10] <= vectors_forward + 1e-12);
+    }
+
+    /// P2-B：vectors 档的 residual signature 来自 unified_geometry 资产行 + facts 指纹校验；
+    /// pairwise 档保持 v9.2（无 geometry 也能跑，signature 取 intrinsic 行）。
+    #[test]
+    fn anchor_signature_requires_geometry_row_and_matching_facts() {
+        let db = memory_db();
+        db.execute_batch(
+            "CREATE TABLE tag_intrinsic_residuals(tag_id INTEGER, model_sig TEXT, residual_energy REAL, \
+             v9_anchor_gain REAL, raw_residual_ratio REAL, artifact_sig TEXT);\
+             CREATE TABLE tagmemo_artifacts(artifact_sig TEXT, graph_generation TEXT, asset_type TEXT, \
+             model_sig TEXT, status TEXT, updated_at INTEGER);\
+             CREATE TABLE kbm_runtime_meta(key TEXT, value TEXT);",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO tag_intrinsic_residuals VALUES (10,'sig-a',1.0,1.4,0.0,'intrinsic-sig')",
+            [],
+        )
+        .unwrap();
+        // 无 geometry 行 ⇒ signature 空（不报错），增益照读
+        let (gains, _, signature) = load_anchor_gains(&db, "sig-a", FactMatrixMode::Vectors).unwrap();
+        assert_eq!(signature, "");
+        assert!((gains[&10] - 1.4).abs() < 1e-12);
+        // pairwise 档：signature 取 intrinsic 行（v9.2 逐字）
+        let (_, _, legacy_sig) = load_anchor_gains(&db, "sig-a", FactMatrixMode::Pairwise).unwrap();
+        assert_eq!(legacy_sig, "intrinsic-sig");
+        // geometry 行 + 指纹相符 ⇒ signature = 资产行 sig
+        db.execute(
+            "INSERT INTO tagmemo_artifacts VALUES ('geometry-sig','facts:abc','unified_geometry','sig-a','ready',1)",
+            [],
+        )
+        .unwrap();
+        db.execute("INSERT INTO kbm_runtime_meta VALUES ('memo_tag_facts','abc')", []).unwrap();
+        let (_, _, sig_ok) = load_anchor_gains(&db, "sig-a", FactMatrixMode::Vectors).unwrap();
+        assert_eq!(sig_ok, "geometry-sig");
+        // 指纹不符 ⇒ 硬拒建（上游 :163-165 同语义）
+        db.execute("UPDATE kbm_runtime_meta SET value='stale' WHERE key='memo_tag_facts'", []).unwrap();
+        let error = load_anchor_gains(&db, "sig-a", FactMatrixMode::Vectors).err().unwrap();
+        assert!(error.starts_with("KNOWLEDGE_STORE_DERIVED_DEPENDENCY_CONFLICT:"), "{}", error);
+    }
+
+    /// P2-F：payload 行序两档都保持 v9.2（实测 2.0 持久化 payload 也是 target 升序），
+    /// 只有 provenance 项形状在 vectors 档收成二元组 [fileId, mass]。
+    #[test]
+    fn vectors_mode_compacts_provenance_without_changing_row_order() {
+        let transport: HashMap<i64, HashMap<i64, f64>> = HashMap::from([
+            (10i64, HashMap::from([(11i64, 0.2), (12i64, 0.9)])),
+            (11i64, HashMap::from([(12i64, 0.5)])),
+        ]);
+        let wormholes = HashSet::new();
+        let inside = build_native_artifact(
+            &transport,
+            HashMap::new(),
+            HashMap::new(),
+            wormholes,
+            &BTreeMap::new(),
+        );
+        // v9.2 行序：target 升序（10 → 11, 12）
+        assert_eq!(inside.targets, vec![1, 2, 2]);
+        assert_eq!(inside.weights, vec![0.2, 0.9, 0.5]);
+        let provenance = BTreeMap::from([(
+            (10i64, 11i64),
+            vec![ProvenanceContribution {
+                file_id: 7,
+                diary_name: "d".into(),
+                path: "p".into(),
+                mass: 0.5,
+            }],
+        )]);
+        let metadata = serde_json::json!({"graphGeneration": "g"});
+        let wide = artifact_payload(&inside, &provenance, &metadata, false);
+        let compact = artifact_payload(&inside, &provenance, &metadata, true);
+        assert_eq!(wide["provenanceView"]["edges"][0][1][0].as_array().unwrap().len(), 4);
+        assert_eq!(compact["provenanceView"]["edges"][0][1][0].as_array().unwrap().len(), 2);
     }
 
     /// 语义增益公式回归：低相似与峰值两侧的分支形状（上游 build_fact_matrix 的
