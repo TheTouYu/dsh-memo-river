@@ -29,6 +29,7 @@ pub(crate) fn clamp01(value: f64) -> f64 {
     value.clamp(0.0, 1.0)
 }
 
+#[derive(Default, Clone)]
 pub(crate) struct NativeArtifact {
     pub(crate) node_ids: Vec<i64>,
     pub(crate) node_index: HashMap<i64, usize>,
@@ -40,9 +41,53 @@ pub(crate) struct NativeArtifact {
     pub(crate) anchor_gain: HashMap<i64, f64>,
     pub(crate) wormhole_edges: HashSet<(i64, i64)>,
     pub(crate) provenance: HashMap<(i64, i64), Vec<(i64, f64)>>,
+    /// 2.0 复刻 P0.1：prepared() 物化的按 node_ids 序锚增益（缺省 1.0）。
+    /// sensing 的张力规则 `conductance × node_anchor_gain[target] >= tension_threshold`
+    /// 读这里而不是逐查 anchor_gain HashMap（与上游 2.0 topology_v3:313 对齐）。
+    pub(crate) node_anchor_gain: Vec<f64>,
+    /// 2.0 复刻 P0.1：prepared() 在 CSR 逐行权重降序重排后物化的虫洞边标志。
+    /// ⚠️ 只在 prepared() 里赋值——直接构造不经 prepared() 的路径读到的是全 false，
+    /// 虫洞会静默退化（上游 bug 类，decode 强制 prepared 防）。
+    pub(crate) edge_is_wormhole: Vec<bool>,
 }
 
 impl NativeArtifact {
+    /// 2.0 复刻 P0.1（上游 rivermemo_topology_v3.rs:320-339 逐语义对齐）：
+    /// ① 摊平 anchor_gain → node_anchor_gain（按 node_ids 序，缺省 1.0）；
+    /// ② CSR 逐行按 positive(weight) 降序、平手按 node_ids[target] 升序**确定性重排**，
+    ///    重排后物化 edge_is_wormhole（源/目标 id 对查 wormhole_edges）。
+    /// 我方 v9.2 sensing 在查询时自行整行排序截断（memo_sensing.rs:274-280），
+    /// 行序不参与 v9.2 读出 ⇒ 本重排对 v9.2 五腿零漂移（diff-runner 实证）。
+    pub(crate) fn prepared(mut self) -> Self {
+        self.node_anchor_gain = self
+            .node_ids
+            .iter()
+            .map(|id| self.anchor_gain.get(id).copied().unwrap_or(1.0))
+            .collect();
+        self.edge_is_wormhole = vec![false; self.targets.len()];
+        for source in 0..self.node_ids.len() {
+            let start = self.row_offsets[source];
+            let end = self.row_offsets[source + 1];
+            // 逐行一个临时 Vec，不整图物化（上游注释：workspace bounded to one row）。
+            let mut row: Vec<(usize, f64)> = (start..end)
+                .map(|cursor| (self.targets[cursor], self.weights[cursor]))
+                .collect();
+            row.sort_by(|left, right| {
+                positive(right.1)
+                    .total_cmp(&positive(left.1))
+                    .then_with(|| self.node_ids[left.0].cmp(&self.node_ids[right.0]))
+            });
+            for (cursor, (target, weight)) in (start..end).zip(row) {
+                self.targets[cursor] = target;
+                self.weights[cursor] = weight;
+                self.edge_is_wormhole[cursor] = self
+                    .wormhole_edges
+                    .contains(&(self.node_ids[source], self.node_ids[target]));
+            }
+        }
+        self
+    }
+
     pub(crate) fn edge_weight(&self, source_id: i64, target_id: i64) -> f64 {
         let Some(&source) = self.node_index.get(&source_id) else {
             return 0.0;
@@ -569,18 +614,22 @@ fn decode_artifact(
         }
     }
 
-    Ok(Arc::new(NativeArtifact {
-        node_ids,
-        node_index,
-        row_offsets,
-        targets,
-        weights,
-        inbound,
-        max_inbound,
-        anchor_gain,
-        wormhole_edges,
-        provenance,
-    }))
+    Ok(Arc::new(
+        NativeArtifact {
+            node_ids,
+            node_index,
+            row_offsets,
+            targets,
+            weights,
+            inbound,
+            max_inbound,
+            anchor_gain,
+            wormhole_edges,
+            provenance,
+            ..NativeArtifact::default()
+        }
+        .prepared(),
+    ))
 }
 
 pub(crate) fn load_artifact_from_runtime(
@@ -596,4 +645,67 @@ pub(crate) fn load_artifact_from_runtime(
     let staging = decode_artifact(db_path, artifact_sig)?;
     runtime.publish(artifact_sig, staging.clone())?;
     Ok(staging)
+}
+
+#[cfg(test)]
+mod prepared_tests {
+    use super::*;
+
+    fn sample() -> NativeArtifact {
+        let mut node_index = HashMap::new();
+        node_index.insert(5i64, 0usize);
+        node_index.insert(2i64, 1usize);
+        node_index.insert(9i64, 2usize);
+        NativeArtifact {
+            node_ids: vec![5, 2, 9],
+            node_index,
+            row_offsets: vec![0, 3, 5, 7],
+            // 行0(node5): [idx1 w=0.3, idx2 w=0.9, idx0 w=0.9]（乱序 + 0.9 平手）
+            // 行1(node2): [idx2 w=0.5, idx0 w=-0.4]（负权重 positive()=0 沉底）
+            // 行2(node9): [idx1 w=0.2, idx0 w=0.8]
+            targets: vec![1, 2, 0, 2, 0, 1, 0],
+            weights: vec![0.3, 0.9, 0.9, 0.5, -0.4, 0.2, 0.8],
+            anchor_gain: HashMap::from([(9i64, 1.4f64)]),
+            wormhole_edges: HashSet::from([(5i64, 9i64), (2i64, 5i64)]),
+            ..NativeArtifact::default()
+        }
+    }
+
+    #[test]
+    fn prepared_sorts_rows_desc_with_id_tiebreak_and_flags() {
+        let artifact = sample().prepared();
+        // 行0：权重降序 (0.9,0.9)，平手按 node_ids[target] 升序 → node5(idx0) 先于 node9(idx2)，末位 0.3
+        assert_eq!(&artifact.targets[0..3], &[0, 2, 1]);
+        assert_eq!(&artifact.weights[0..3], &[0.9, 0.9, 0.3]);
+        // (5,9) 是虫洞：行0 cursor1（target idx2=node9）为 true
+        assert_eq!(&artifact.edge_is_wormhole[0..3], &[false, true, false]);
+        // 行1：0.5 在前，负权重沉底；(2,5) 是虫洞 → cursor4 为 true
+        assert_eq!(&artifact.targets[3..5], &[2, 0]);
+        assert_eq!(&artifact.weights[3..5], &[0.5, -0.4]);
+        assert_eq!(&artifact.edge_is_wormhole[3..5], &[false, true]);
+        // 行2：(9,5)/(9,2) 均非虫洞
+        assert_eq!(&artifact.targets[5..7], &[0, 1]);
+        assert_eq!(&artifact.edge_is_wormhole[5..7], &[false, false]);
+        // 锚增益按 node_ids 序摊平，缺省 1.0
+        assert_eq!(artifact.node_anchor_gain, vec![1.0, 1.0, 1.4]);
+    }
+
+    #[test]
+    fn prepared_is_idempotent() {
+        let once = sample().prepared();
+        let twice = once.clone().prepared();
+        assert_eq!(once.targets, twice.targets);
+        assert_eq!(once.weights, twice.weights);
+        assert_eq!(once.edge_is_wormhole, twice.edge_is_wormhole);
+        assert_eq!(once.node_anchor_gain, twice.node_anchor_gain);
+    }
+
+    #[test]
+    fn unprepared_artifact_has_no_wormhole_flags() {
+        // 危险形态存档：未经 prepared() 的 artifact 两字段为空——
+        // 生产路径必须全部经 prepared()（builder 发布克隆 / decode 均已挂）。
+        let raw = sample();
+        assert!(raw.edge_is_wormhole.is_empty());
+        assert!(raw.node_anchor_gain.is_empty());
+    }
 }

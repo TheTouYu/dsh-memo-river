@@ -11,6 +11,7 @@
 
 mod memo_artifact_builder;
 mod memo_dtsc;
+mod memo_geometry;
 mod memo_pipeline;
 mod memo_sensing;
 mod rivermemo_topology_v3;
@@ -300,4 +301,22 @@ impl VexusIndex {
             input_json,
         )
     }
+}
+
+/// 2.0 复刻 P0.2：AGS 统一几何任务（写侧产出方，独立于 rebuild 读出链——
+/// 不经此任务运行，五腿差分零漂移）。geometry 只写
+/// tag_intrinsic_residuals(_status)/kv_store/tagmemo_artifacts/kbm_runtime_meta。
+#[napi]
+pub fn run_memo_geometry(
+    db_path: String,
+    model_sig: String,
+    config_json: String,
+    dimensions: u32,
+) -> AsyncTask<memo_geometry::GeometryTask> {
+    AsyncTask::new(memo_geometry::GeometryTask {
+        dimensions: dimensions as usize,
+        db_path,
+        model_sig,
+        config_json,
+    })
 }

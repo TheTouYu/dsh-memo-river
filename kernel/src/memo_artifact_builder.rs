@@ -83,7 +83,7 @@ fn hash_text(value: &str, length: usize) -> String {
     digest[..length.min(digest.len())].to_string()
 }
 
-fn open_readonly(path: &str) -> std::result::Result<Connection, String> {
+pub(crate) fn open_readonly(path: &str) -> std::result::Result<Connection, String> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| format!("open readonly SQLite failed: {}", error))?;
     connection
@@ -157,7 +157,7 @@ fn ensure_sqlite_keepalive(db_path: &str) {
     }
 }
 
-fn open_readwrite(path: &str) -> std::result::Result<Connection, String> {
+pub(crate) fn open_readwrite(path: &str) -> std::result::Result<Connection, String> {
     let connection = open_readwrite_inner(path)?;
     ensure_sqlite_keepalive(path);
     Ok(connection)
@@ -646,6 +646,10 @@ fn build_native_artifact(
         anchor_gain,
         wormhole_edges: wormholes,
         provenance: native_provenance,
+        // P0.1：node_anchor_gain/edge_is_wormhole 只能由 prepared() 物化；
+        // 本构造的产物先按 v9.2 行序序列化 payload（:816）保签名，
+        // 运行时发布时再克隆出 prepared 版本（:870）。
+        ..NativeArtifact::default()
     })
 }
 
@@ -867,7 +871,10 @@ fn run_build(
         .commit()
         .map_err(|error| format!("commit native artifact failed: {}", error))?;
 
-    let generation = runtime.publish(&artifact_sig, native.clone())?;
+    // P0.1：持久化 payload(:816) 已用 v9.2 行序算完签名并落库——运行时侧发布
+    // prepared 克隆（物化 node_anchor_gain/edge_is_wormhole + 行内降序重排），
+    // 持久化字节与 artifactSig 保持 v9.2 形态（五腿身份不动），运行时语义升 2.0。
+    let generation = runtime.publish(&artifact_sig, Arc::new((*native).clone().prepared()))?;
     Ok(NativeMemoArtifactBuildResult {
         success: true,
         artifact_sig,
