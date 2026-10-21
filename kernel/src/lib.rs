@@ -13,6 +13,7 @@ mod memo_artifact_builder;
 mod memo_dtsc;
 mod memo_geometry;
 mod memo_pipeline;
+mod memo_projection;
 mod memo_sensing;
 mod memo_vector_pool;
 mod rivermemo_topology_v3;
