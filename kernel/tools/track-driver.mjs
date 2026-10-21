@@ -103,6 +103,11 @@ function pipelineConfig() {
   base.maxEmergentNodes = Math.max(0, Math.floor(num(spike.maxEmergentNodes, 50)));
   base.techTagThreshold = num(KBM.techTagThreshold, 0.08);
   base.normalTagThreshold = num(KBM.normalTagThreshold, 0.015);
+  // 金字塔相似度口径（P2 定罪实验通道）：'legacy' = 1/(1+L2²)（v9.2 行为），
+  // 'cosine' = 上游 2.0 memo_pipeline.rs:648。Rust 侧键名同（serde camelCase，
+  // 取值 legacy|cosine，缺省 legacy）。配置取值 = rag_params 的
+  // KnowledgeBaseManager.riverMemo.similarityMode；不给就显式写 legacy（可审计）。
+  base.similarityMode = rm.similarityMode ?? 'legacy';
   base.spikeRouting = {
     maxSafeHops: num(spike.maxSafeHops, 4),
     baseMomentum: num(spike.baseMomentum, 2),
