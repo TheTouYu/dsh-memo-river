@@ -126,7 +126,7 @@ http://127.0.0.1:3080/memo-river/tuning/panel      # 写入节律调参 + 草稿
 ```bash
 cd kernel
 cargo build --release
-cp target/release/libmemo_kernel.so memo-kernel.linux-x64-gnu.node
+./install-kernel.sh   # 原子安装（临时文件+rename）；严禁 cp 原地覆盖——见脚本头事故复盘
 ```
 
 **期望**：`kernel/memo-kernel.linux-x64-gnu.node` 出现（几十 MB）。首次编译要拉 crates，耗时取决于网络。
