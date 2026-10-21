@@ -7,6 +7,10 @@
 //! 层相似度经 reuse_score 复用）；③请求级 TagVectorPool 跨金字塔/融合/双场三段共享
 //! （池优先、索引兜底，既有读数口径不变）。缺省 dynamic_wormholes=false → 残差为空、
 //! context 被 sensing 强制 None，行为逐字等于 v9.2（五腿零漂移硬判据）。
+//!
+//! P1.3（暗上线）：双场投影增 basin 圈选分支——`maxProjectionNodes > 0` 时走
+//! memo_projection::{seed_basins, grow}（上游 1404/1412/1806），圈选并集一次性补池（:1431）；
+//! 缺省 0 = v9.2 全支撑投影逐字不变，basin 与 river_ids 都不计算。
 
 use crate::memo_sensing::{
     sense_with_context, DynamicWormholeContext, SenseConfig, SenseDiagnostics, SenseInput,
@@ -133,6 +137,11 @@ struct PipelineConfig {
     transfer_tolerance: f64,
     local_mass_ratio: f64,
     transfer_mass_ratio: f64,
+    /// P1.3（暗上线）：双场投影的圈选预算。0 = v9.2 全支撑投影逐字不变；
+    /// >0 = memo_projection::grow 的 basin 圈选路径（上游 memo_pipeline.rs:1404）。
+    /// JS 侧取值 = rag_params 的 KnowledgeBaseManager.riverMemo.effectiveSupport.maxProjectionNodes。
+    #[serde(default)]
+    max_projection_nodes: usize,
     max_levels: usize,
     pyramid_top_k: usize,
     min_energy_ratio: f64,
@@ -164,6 +173,7 @@ impl Default for PipelineConfig {
             transfer_tolerance: 1e-9,
             local_mass_ratio: 0.8,
             transfer_mass_ratio: 0.9,
+            max_projection_nodes: 0, // 暗上线：0 = v9.2 全支撑投影
             max_levels: 3,
             pyramid_top_k: 10,
             min_energy_ratio: 0.1,
@@ -1052,7 +1062,7 @@ fn fuse_observation(
     Ok((fused, diagnostics, selected))
 }
 
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DualFieldDiagnostics {
     iterations: usize,
@@ -1062,6 +1072,34 @@ struct DualFieldDiagnostics {
     transfer_residual: f64,
     local_mass: f64,
     transfer_mass: f64,
+    // ── P1.3（上游 1098-1123）：投影支撑账。maxProjectionNodes=0 时全部留在缺省 0。──
+    /// 圈选并集里已装载到池的节点数；0 表示没走 basin 圈选（或空 core）。
+    projected_nodes: usize,
+    selected_projection_nodes: usize,
+    sql_fetched_nodes: usize,
+    sql_requested_nodes: usize,
+    sql_batches: usize,
+    growth: crate::memo_projection::GrowthDiagnostics,
+    local_support: ProjectionSupportDiagnostics,
+    transfer_support: ProjectionSupportDiagnostics,
+    local_selected_mass_ratio: f64,
+    transfer_selected_mass_ratio: f64,
+    local_projected_mass_ratio: f64,
+    transfer_projected_mass_ratio: f64,
+    solve_ms: f64,
+    domain_ms: f64,
+    project_ms: f64,
+}
+
+/// 每侧支撑的读数（上游 1273-1281）。
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionSupportDiagnostics {
+    core_nodes: usize,
+    selected_nodes: usize,
+    outside_domain_nodes: usize,
+    missing_vector_nodes: usize,
+    stop_reason: String,
 }
 
 struct DualFieldOutput {
@@ -1170,11 +1208,112 @@ fn project_field(
     Ok(output.into_iter().map(|value| value as f32).collect())
 }
 
+/// P1.3 basin 圈选投影（上游 memo_pipeline.rs:1404-1444 逐语义）：
+/// grow 给出两场各自的支撑（并集共用 maxProjectionNodes 预算），并集一次性补池后按
+/// 选中节点的场质量加权平均。缺向量的节点跳过——读数由 missing_vector_nodes /
+/// projected_mass_ratio 明示，绝不静默补 0。
+fn project_basin_fields(
+    connection: &Connection,
+    artifact: &NativeArtifact,
+    fields: [&[f64]; 2],
+    domains: [&[i64]; 2],
+    dimension: usize,
+    limit: usize,
+    river_ids: &[i64],
+    basins: &[crate::memo_projection::Basin],
+    pool: &mut TagVectorPool,
+    diagnostics: &mut DualFieldDiagnostics,
+) -> std::result::Result<(Vec<f32>, Vec<f32>), String> {
+    let supports = crate::memo_projection::grow(
+        artifact, fields, domains, river_ids, basins, limit,
+    )?;
+    let selected = supports.ids;
+    let growth = supports.diagnostics;
+    let support_diagnostics = |field: usize| {
+        let domain: HashSet<i64> = domains[field].iter().copied().collect();
+        ProjectionSupportDiagnostics {
+            core_nodes: growth.core_nodes,
+            selected_nodes: selected[field].len(),
+            outside_domain_nodes: selected[field]
+                .iter()
+                .filter(|id| !domain.contains(id))
+                .count(),
+            stop_reason: growth.stop_reason.clone(),
+            ..ProjectionSupportDiagnostics::default()
+        }
+    };
+    diagnostics.local_support = support_diagnostics(0);
+    diagnostics.transfer_support = support_diagnostics(1);
+    let mut union: Vec<i64> = selected.iter().flatten().copied().collect();
+    union.sort_unstable();
+    union.dedup();
+    diagnostics.selected_projection_nodes = union.len();
+    let stats = ensure_tag_vectors_loaded(connection, pool, &union, dimension)?;
+    diagnostics.sql_fetched_nodes = stats.fetched_nodes;
+    diagnostics.sql_requested_nodes = stats.requested_nodes;
+    diagnostics.sql_batches = stats.sql_batches;
+    diagnostics.projected_nodes = union.iter().filter(|id| pool.contains_key(id)).count();
+    diagnostics.local_support.missing_vector_nodes = selected[0]
+        .iter()
+        .filter(|id| !pool.contains_key(id))
+        .count();
+    diagnostics.transfer_support.missing_vector_nodes = selected[1]
+        .iter()
+        .filter(|id| !pool.contains_key(id))
+        .count();
+    diagnostics.growth = growth;
+
+    let mut outputs = [vec![0.0f64; dimension], vec![0.0f64; dimension]];
+    let mut selected_ratios = [0.0; 2];
+    let mut projected_ratios = [0.0; 2];
+    for field in 0..2 {
+        let total_mass = field_mass(fields[field]);
+        let mut selected_mass = 0.0;
+        let mut projected_mass = 0.0;
+        for id in &selected[field] {
+            let Some(&index) = artifact.node_index.get(id) else {
+                continue;
+            };
+            let mass = positive(fields[field][index]);
+            selected_mass += mass;
+            let Some(vector) = pool.get(id) else {
+                continue;
+            };
+            projected_mass += mass;
+            for (out, value) in outputs[field].iter_mut().zip(vector.iter()) {
+                *out += *value as f64 * mass;
+            }
+        }
+        if projected_mass > 0.0 {
+            for out in &mut outputs[field] {
+                *out /= projected_mass;
+            }
+            normalize(&mut outputs[field]);
+        }
+        if total_mass > 0.0 {
+            selected_ratios[field] = selected_mass / total_mass;
+            projected_ratios[field] = projected_mass / total_mass;
+        }
+    }
+    diagnostics.local_selected_mass_ratio = selected_ratios[0];
+    diagnostics.transfer_selected_mass_ratio = selected_ratios[1];
+    diagnostics.local_projected_mass_ratio = projected_ratios[0];
+    diagnostics.transfer_projected_mass_ratio = projected_ratios[1];
+    let [local, transfer] = outputs;
+    Ok((
+        local.into_iter().map(|value| value as f32).collect(),
+        transfer.into_iter().map(|value| value as f32).collect(),
+    ))
+}
+
 fn solve_dual_fields(
     artifact: &NativeArtifact,
     index: &Index,
-    tag_vectors: &TagVectorPool,
+    connection: &Connection,
+    tag_vectors: &mut TagVectorPool,
     source_entries: &[(i64, f64)],
+    river_ids: &[i64],
+    basins: &[crate::memo_projection::Basin],
     dimension: usize,
     config: &PipelineConfig,
 ) -> std::result::Result<DualFieldOutput, String> {
@@ -1197,10 +1336,7 @@ fn solve_dual_fields(
                 iterations: 0,
                 local_converged: true,
                 transfer_converged: true,
-                local_residual: 0.0,
-                transfer_residual: 0.0,
-                local_mass: 0.0,
-                transfer_mass: 0.0,
+                ..DualFieldDiagnostics::default()
             },
         });
     }
@@ -1210,6 +1346,7 @@ fn solve_dual_fields(
 
     let local_alpha = config.local_alpha.clamp(0.0, 0.999999);
     let transfer_alpha = config.transfer_alpha.clamp(0.0, 0.999999);
+    let solve_started = Instant::now();
     let mut local = source.clone();
     let mut transfer = source.clone();
     let mut next_local = vec![0.0; source.len()];
@@ -1263,12 +1400,47 @@ fn solve_dual_fields(
         .zip(transfer.iter().copied())
         .filter(|(_, mass)| *mass > 0.0)
         .collect();
+    let solve_ms = solve_started.elapsed().as_secs_f64() * 1000.0;
+    let domain_started = Instant::now();
     let local_domain_ids = effective_domain(artifact, &local, config.local_mass_ratio);
     let transfer_domain_ids = effective_domain(artifact, &transfer, config.transfer_mass_ratio);
-    let local_vector = project_field(index, tag_vectors, artifact, &local, dimension)?;
-    let transfer_vector = project_field(index, tag_vectors, artifact, &transfer, dimension)?;
+    let domain_ms = domain_started.elapsed().as_secs_f64() * 1000.0;
     let local_mass = field_mass(&local);
     let transfer_mass = field_mass(&transfer);
+    let mut diagnostics = DualFieldDiagnostics {
+        iterations,
+        local_converged,
+        transfer_converged,
+        local_residual,
+        transfer_residual,
+        local_mass,
+        transfer_mass,
+        solve_ms,
+        domain_ms,
+        ..DualFieldDiagnostics::default()
+    };
+    // P1.3 闸：0 = v9.2 全支撑投影（逐字不变）；>0 = basin 圈选。
+    let project_started = Instant::now();
+    let (local_vector, transfer_vector) = if config.max_projection_nodes > 0 {
+        project_basin_fields(
+            connection,
+            artifact,
+            [&local, &transfer],
+            [&local_domain_ids, &transfer_domain_ids],
+            dimension,
+            config.max_projection_nodes,
+            river_ids,
+            basins,
+            tag_vectors,
+            &mut diagnostics,
+        )?
+    } else {
+        (
+            project_field(index, tag_vectors, artifact, &local, dimension)?,
+            project_field(index, tag_vectors, artifact, &transfer, dimension)?,
+        )
+    };
+    diagnostics.project_ms = project_started.elapsed().as_secs_f64() * 1000.0;
 
     Ok(DualFieldOutput {
         local_field,
@@ -1277,15 +1449,7 @@ fn solve_dual_fields(
         transfer_domain_ids,
         local_vector,
         transfer_vector,
-        diagnostics: DualFieldDiagnostics {
-            iterations,
-            local_converged,
-            transfer_converged,
-            local_residual,
-            transfer_residual,
-            local_mass,
-            transfer_mass,
-        },
+        diagnostics,
     })
 }
 
@@ -1462,11 +1626,24 @@ fn run_pipeline(
         &input.config,
     )?;
     let fusion_ms = fusion_started.elapsed().as_secs_f64() * 1000.0;
+    // P1.3（上游 1786-1806）：basin 圈选每查询现算；闸关时既不算 basin 也不传 river_ids，
+    // 双场投影走 v9.2 全支撑路径。
+    let (river_ids, basins) = if input.config.max_projection_nodes > 0 {
+        (
+            observation.nodes.iter().map(|node| node.id).collect::<Vec<i64>>(),
+            crate::memo_projection::seed_basins(&observation, &artifact),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let dual_fields = solve_dual_fields(
         &artifact,
         &index_guard,
-        &tag_vectors,
+        &connection,
+        &mut tag_vectors,
         &observation.source_field,
+        &river_ids,
+        &basins,
         dimensions,
         &input.config,
     )?;
@@ -1608,4 +1785,217 @@ pub(crate) fn run_with_runtime(
         query_vector,
         ghost_vectors,
     })
+}
+
+#[cfg(test)]
+mod geometry_epa_tests {
+    use super::*;
+    use crate::memo_projection::grow;
+
+    /// 生产路径的诊断折算（project_basin_fields 前半段的纯函数版，无 SQL）。
+    /// 第二场恒为 0 质量 → 该 lane 不活跃，等价于单场观测。
+    fn support(
+        graph: &NativeArtifact,
+        field: &[f64],
+        domain: &[i64],
+        core: &[i64],
+        limit: usize,
+    ) -> std::result::Result<(Vec<i64>, ProjectionSupportDiagnostics), String> {
+        let zero = vec![0.0f64; graph.node_ids.len()];
+        let supports = grow(graph, [field, &zero], [domain, domain], core, &[], limit)?;
+        let domain_set: HashSet<i64> = domain.iter().copied().collect();
+        let diagnostics = ProjectionSupportDiagnostics {
+            core_nodes: supports.diagnostics.core_nodes,
+            selected_nodes: supports.ids[0].len(),
+            outside_domain_nodes: supports.ids[0]
+                .iter()
+                .filter(|id| !domain_set.contains(id))
+                .count(),
+            stop_reason: supports.diagnostics.stop_reason.clone(),
+            ..ProjectionSupportDiagnostics::default()
+        };
+        Ok((supports.ids[0].clone(), diagnostics))
+    }
+
+    /// 1 -> 2 -> 3；1 -> 4；5 是不可达的高质量孤岛（上游 2370 同构）。
+    fn support_graph() -> NativeArtifact {
+        NativeArtifact {
+            node_ids: vec![1, 2, 3, 4, 5],
+            node_index: (1..=5).enumerate().map(|(i, id)| (id, i)).collect(),
+            row_offsets: vec![0, 2, 3, 3, 3, 3],
+            targets: vec![1, 3, 2],
+            weights: vec![0.5, 0.5, 1.0],
+            ..NativeArtifact::default()
+        }
+    }
+
+    #[test]
+    fn growing_keeps_low_mass_bridge_and_rejects_global_islands() {
+        let graph = support_graph();
+        let field = [0.1, 0.01, 0.3, 0.02, 0.57];
+        let (ids, diagnostics) = support(&graph, &field, &[5, 3, 1], &[1], 0).unwrap();
+        // 我方 grow 按图距离（-ln w）推进；上游旧启发式给 [1,4,2,3]——集合相同。
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+        assert_eq!(diagnostics.outside_domain_nodes, 2); // 2、4 在域外，3 在域内
+        assert_eq!(diagnostics.stop_reason, "frontier_exhausted");
+        // 每个非 core 节点都有更早入选的正权前驱：绝不发明连接边。
+        for (position, id) in ids.iter().enumerate().skip(1) {
+            assert!(
+                ids[..position]
+                    .iter()
+                    .any(|parent| graph.edge_weight(*parent, *id) > 0.0),
+                "node {} lacks an admitted predecessor",
+                id
+            );
+        }
+        let (limited, diagnostics) = support(&graph, &field, &[5, 3, 1], &[1], 3).unwrap();
+        assert_eq!(limited, vec![1, 2, 3]);
+        assert_eq!(limited.len(), 3);
+        assert_eq!(diagnostics.stop_reason, "budget");
+    }
+
+    #[test]
+    fn fields_grow_independently_and_ties_use_tag_id() {
+        let graph = support_graph();
+        // 每场只在自家节点上有质量 → 支撑互不借用（上游同构断言）。
+        let (local, _) = support(&graph, &[0.1, 0.6, 0.0, 0.0, 0.0], &[1, 2], &[1], 2).unwrap();
+        let (transfer, _) = support(&graph, &[0.1, 0.0, 0.0, 0.6, 0.0], &[1, 4], &[1], 2).unwrap();
+        assert_eq!(local, vec![1, 2]);
+        assert_eq!(transfer, vec![1, 4]);
+        // 等距平手按 Tag ID 升序取席。
+        let (tied, diagnostics) = support(&graph, &[0.2; 5], &[1, 2, 3, 4, 5], &[1], 2).unwrap();
+        assert_eq!(tied, vec![1, 2]);
+        assert_eq!(diagnostics.stop_reason, "budget");
+    }
+
+    #[test]
+    fn core_budget_empty_core_and_mass_stop_are_explicit() {
+        let graph = support_graph();
+        let field = [0.2; 5];
+        let error = support(&graph, &field, &[1, 2], &[1, 2], 1).err().unwrap();
+        assert!(error.starts_with("MEMO_PROJECTION_CORE_EXCEEDS_BUDGET:"));
+        let (empty, diagnostics) = support(&graph, &field, &[1, 2], &[], 2).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(diagnostics.stop_reason, "empty_core");
+        let (stopped, diagnostics) = support(&graph, &field, &[1], &[1], 256).unwrap();
+        assert_eq!(stopped, vec![1]);
+        assert_eq!(diagnostics.stop_reason, "mass_target");
+        // 独立的 seed 分量各自成立；不发明桥接边。
+        let (multi, diagnostics) = support(&graph, &field, &[1, 5], &[5, 1, 5], 2).unwrap();
+        assert_eq!(multi, vec![1, 5]);
+        assert_eq!(diagnostics.core_nodes, 2);
+    }
+
+    #[test]
+    fn zero_edges_cycles_and_numerical_tails_never_fill_seats() {
+        let mut graph = support_graph();
+        graph.weights[0] = 0.0; // 1 的唯一入边权重为 0
+        let (ids, diagnostics) =
+            support(&graph, &[0.1, 0.4, 0.3, 1e-15, 0.2], &[1, 2, 3, 5], &[1], 256).unwrap();
+        assert_eq!(ids, vec![1]);
+        assert_eq!(diagnostics.stop_reason, "frontier_exhausted");
+        // 自环 + 双边环：不重复占席、不卡死。
+        let cyclic = NativeArtifact {
+            node_ids: vec![1, 2],
+            node_index: HashMap::from([(1, 0), (2, 1)]),
+            row_offsets: vec![0, 2, 3],
+            targets: vec![0, 1, 0],
+            weights: vec![1.0; 3],
+            ..NativeArtifact::default()
+        };
+        let (ids, diagnostics) = support(&cyclic, &[0.5, 0.5], &[1, 2], &[1], 0).unwrap();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(diagnostics.stop_reason, "mass_target");
+    }
+
+    #[test]
+    fn budget_config_is_nonnegative_integer_with_default() {
+        // 我方闸缺省 0（暗上线：v9.2 全支撑投影），上游缺省 256。
+        let default: PipelineConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.max_projection_nodes, 0);
+        for k in [0usize, 64, 193, 512] {
+            let config: PipelineConfig =
+                serde_json::from_value(serde_json::json!({ "maxProjectionNodes": k })).unwrap();
+            assert_eq!(config.max_projection_nodes, k);
+        }
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("256"),
+        ] {
+            assert!(serde_json::from_value::<PipelineConfig>(
+                serde_json::json!({ "maxProjectionNodes": value })
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn basin_projection_loads_union_once_and_reports_sql_batches() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY, vector BLOB);")
+            .unwrap();
+        for (id, values) in [(1i64, [1.0f32, 0.0]), (2, [0.0, 1.0]), (3, [0.5, 0.5])] {
+            let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            connection
+                .execute("INSERT INTO tags VALUES (?1,?2)", rusqlite::params![id, bytes])
+                .unwrap();
+        }
+        let artifact = NativeArtifact {
+            node_ids: vec![1, 2, 3],
+            node_index: HashMap::from([(1, 0), (2, 1), (3, 2)]),
+            row_offsets: vec![0, 2, 2, 2],
+            targets: vec![1, 2],
+            weights: vec![0.5, 0.5],
+            ..NativeArtifact::default()
+        };
+        let local = [0.7, 0.2, 0.1];
+        let transfer = [0.1, 0.7, 0.2];
+        let mut pool = TagVectorPool::new();
+        let mut diagnostics = DualFieldDiagnostics::default();
+        let projected = project_basin_fields(
+            &connection,
+            &artifact,
+            [&local, &transfer],
+            [&[1, 2], &[2, 3]],
+            2,
+            2,
+            &[1],
+            &[],
+            &mut pool,
+            &mut diagnostics,
+        )
+        .unwrap();
+        // 每场被自家质量主导（不是被对方的向量拉平）。
+        assert!(projected.0[0] > projected.0[1]);
+        assert!(projected.1[1] > projected.1[0]);
+        assert_eq!(diagnostics.selected_projection_nodes, 2);
+        assert_eq!(diagnostics.projected_nodes, 2);
+        assert_eq!(diagnostics.sql_requested_nodes, 2);
+        assert_eq!(diagnostics.sql_fetched_nodes, 2);
+        assert_eq!(diagnostics.sql_batches, 1);
+        assert_eq!(diagnostics.local_support.selected_nodes, 2);
+        assert_eq!(diagnostics.local_support.outside_domain_nodes, 0);
+        assert_eq!(diagnostics.transfer_support.outside_domain_nodes, 1);
+        assert_eq!(diagnostics.local_support.stop_reason, "budget");
+        assert!((diagnostics.local_selected_mass_ratio - 0.9).abs() < 1e-12);
+        // 同一请求内池已热：第二次零 SQL（并集一次性补池的判据）。
+        project_basin_fields(
+            &connection,
+            &artifact,
+            [&local, &transfer],
+            [&[1, 2], &[2, 3]],
+            2,
+            2,
+            &[1],
+            &[],
+            &mut pool,
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert_eq!(diagnostics.sql_batches, 0);
+        assert_eq!(diagnostics.sql_fetched_nodes, 0);
+        assert_eq!(pool.len(), 2);
+    }
 }
