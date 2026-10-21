@@ -155,6 +155,23 @@ export function pipelineConfig(kbm: Record<string, unknown>): Record<string, unk
     langPenaltyUnknown: num(lang.penaltyUnknown, 0.05),
     langPenaltyCrossDomain: num(lang.penaltyCrossDomain, 0.1),
     deduplicationThreshold: num(kbm.deduplicationThreshold, 0.88),
+    // ── VCP 2.0 四闸中的三闸（P3.1 接线；四闸缺省全暗 = 生产零变化）─────────────
+    // 键名/取值域照抄 2.0 原生管线的唯一权威构造点
+    // /home/h/app/VCPToolBox-2.0/KnowledgeBaseManager.js:2137-2315；转发写法同
+    // kernel/tools/track-driver.mjs:103-115（B 的定罪通道，键名已与 Rust 对齐）。
+    // 三键都**显式写缺省值**（可审计：一眼看出跑的是哪一档，不靠"没传"推断）；
+    // 显式缺省 ≡ Rust 缺省，故五腿/验收零漂移：
+    //   · factMatrixMode: KBM 顶层。'pairwise' ≡ 不传（memo_artifact_builder.rs:263-270
+    //     的 read_fact_matrix_mode 缺省即 Pairwise；'vectors' 需 tags.vector，缺则硬报错）。
+    //   · similarityMode: 'legacy' ≡ None（memo_pipeline.rs:109 resolve_similarity_mode
+    //     把 None 折成 Legacy）；'cosine' = 上游 memo_pipeline.rs:648 口径。
+    //   · maxProjectionNodes: 0 ≡ 全支撑投影（memo_pipeline.rs:1472/:1700 的
+    //     `>0` 才进 projection::grow）；取值域 [0,∞) 整数。
+    factMatrixMode: kbm.factMatrixMode ?? 'pairwise',
+    similarityMode: rm.similarityMode ?? 'legacy',
+    maxProjectionNodes: Math.max(0, Math.floor(num(support.maxProjectionNodes, 0))),
+    // 第四闸 spikeRouting.dynamicWormholes 本处**故意不转发**（P3.1 范围外）：
+    // Rust 侧 SenseConfig 缺省 false 保持暗档，生产开关另案；这里补就等于生产开闸。
   }
 }
 
