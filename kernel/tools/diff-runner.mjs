@@ -209,9 +209,18 @@ function compareStageMeta(qa, qb, issues, meta) {
   }
 }
 
+// 双侧同缺的可选读出（例：2.0 上游删除了 rerankMemoDtsc）——该读出在这对模块里
+// 两边都不存在，没有可比对象：记入 bothAbsent 明细（报告与 console 显式打印，
+// 不静默），不计「候选缺口」。单侧缺仍记 notImplemented（能力面非对称 = 不可比，
+// 绝不记 PASS）。这不改任何判据：TOL、名次、Ω、role、payload 全部原样。
+function recordBothAbsent(meta, name) {
+  if (!meta.bothAbsent) meta.bothAbsent = [];
+  if (!meta.bothAbsent.includes(name)) meta.bothAbsent.push(name);
+}
+
 function compareLeg(a, b) {
   const issues = [];
-  const meta = { queries: 0, scoreMaxDiff: 0, omegaMaxDiff: 0, enhancedMinCos: Infinity, notImplemented: 0, payloadMaxDiff: 0, payloadMismatches: 0 };
+  const meta = { queries: 0, scoreMaxDiff: 0, omegaMaxDiff: 0, enhancedMinCos: Infinity, notImplemented: 0, payloadMaxDiff: 0, payloadMismatches: 0, bothAbsent: [] };
   if (a.status !== 'ok' || b.status !== 'ok') {
     return { verdict: a.status !== 'ok' ? a.status : b.status, issues, meta: { queries: 0, scoreMaxDiff: 0, omegaMaxDiff: 0, enhancedMinCos: null }, detail: `${a.status}/${b.status}: ${a.detail || ''}${b.detail || ''}` };
   }
@@ -243,7 +252,8 @@ function compareLeg(a, b) {
       for (let i = 0; i < Math.min(qa.dtsc.ranked.length, qb.dtsc.ranked.length); i++) {
         meta.scoreMaxDiff = Math.max(meta.scoreMaxDiff, Math.abs(qa.dtsc.ranked[i].score - qb.dtsc.ranked[i].score));
       }
-    } else if (qa.dtsc?.notImplemented || qb.dtsc?.notImplemented) meta.notImplemented++;
+    } else if (qa.dtsc?.notImplemented && qb.dtsc?.notImplemented) recordBothAbsent(meta, 'dtsc');
+    else if (qa.dtsc?.notImplemented || qb.dtsc?.notImplemented) meta.notImplemented++;
     if (qa.topo?.ranked && qb.topo?.ranked) {
       compareRanked(`${qid}/topo`, qa.topo.ranked, qb.topo.ranked, issues);
       for (let i = 0; i < Math.min(qa.topo.ranked.length, qb.topo.ranked.length); i++) {
@@ -256,7 +266,8 @@ function compareLeg(a, b) {
       }
       if (qa.topo.regime !== qb.topo.regime) issues.push(`${qid}: regime ${qa.topo.regime} vs ${qb.topo.regime}`);
       if (qa.topo.queryMode !== qb.topo.queryMode) issues.push(`${qid}: queryMode ${qa.topo.queryMode} vs ${qb.topo.queryMode}`);
-    } else if (qa.topo?.notImplemented || qb.topo?.notImplemented) meta.notImplemented++;
+    } else if (qa.topo?.notImplemented && qb.topo?.notImplemented) recordBothAbsent(meta, 'topo');
+    else if (qa.topo?.notImplemented || qb.topo?.notImplemented) meta.notImplemented++;
     if (qa.enhancedVector && qb.enhancedVector) {
       const c = cos(qa.enhancedVector, qb.enhancedVector);
       meta.enhancedMinCos = Math.min(meta.enhancedMinCos, c);
@@ -304,13 +315,24 @@ async function main() {
     legs.push({ leg: src.leg, ...cmp, oracleIdentity: trackA.identity, candidateIdentity: trackB.identity });
     fs.writeFileSync(path.join(outDir, `${src.leg.replace(/[^a-z0-9-]/gi, '_')}-tracks.json`), JSON.stringify({ oracle: trackA, candidate: trackB }, null, 2));
     fs.rmSync(tmp, { recursive: true, force: true });
-    console.log(`  → ${cmp.verdict}${cmp.meta.queries ? `（${cmp.meta.queries} 查询，分数最大差 ${(cmp.meta.scoreMaxDiff || 0).toExponential(2)}，Ω 最大差 ${(cmp.meta.omegaMaxDiff || 0).toExponential(2)}）` : ''}`);
+    console.log(`  → ${cmp.verdict}${cmp.meta.queries ? `（${cmp.meta.queries} 查询，分数最大差 ${(cmp.meta.scoreMaxDiff || 0).toExponential(2)}，Ω 最大差 ${(cmp.meta.omegaMaxDiff || 0).toExponential(2)}${cmp.meta.bothAbsent?.length ? `，双侧同缺不可比 ${cmp.meta.bothAbsent.join('/')}` : ''}）` : ''}`);
   }
 
   // 报告
-  const md = [`# 差分报告 ${runId}`, '', `- oracle: ${ORACLE}`, `- candidate: ${CANDIDATE}`, '', '| 腿 | 判定 | 查询数 | 分数最大差 | Ω 最大差 | enhanced 最小余弦 | 备注 |', '|---|---|---|---|---|---|---|'];
+  const noteOf = (l) => {
+    const parts = [];
+    if (l.meta?.bothAbsent?.length) parts.push(`双侧同缺不可比：${l.meta.bothAbsent.join(',')}`);
+    if (l.detail) parts.push(l.detail);
+    if (l.note) parts.push(l.note);
+    if (l.issues?.length) parts.push(`首个分歧：${l.issues[0]}`);
+    return parts.join('；');
+  };
+  const ident = legs.find((l) => l.oracleIdentity || l.candidateIdentity) || {};
+  const md = [`# 差分报告 ${runId}`, '', `- oracle: ${ORACLE}`, `- candidate: ${CANDIDATE}`,
+    `- oracle identity: ${ident.oracleIdentity ?? '-'}`, `- candidate identity: ${ident.candidateIdentity ?? '-'}`, '',
+    '| 腿 | 判定 | 查询数 | 分数最大差 | Ω 最大差 | enhanced 最小余弦 | 备注 |', '|---|---|---|---|---|---|---|'];
   for (const l of legs) {
-    md.push(`| ${l.leg} | ${l.verdict} | ${l.meta?.queries ?? '-'} | ${l.meta?.scoreMaxDiff != null ? l.meta.scoreMaxDiff.toExponential(2) : '-'} | ${l.meta?.omegaMaxDiff != null ? l.meta.omegaMaxDiff.toExponential(2) : '-'} | ${l.meta?.enhancedMinCos != null ? l.meta.enhancedMinCos.toFixed(9) : '-'} | ${l.detail || l.note || (l.issues?.length ? `首个分歧：${l.issues[0]}` : '')} |`);
+    md.push(`| ${l.leg} | ${l.verdict} | ${l.meta?.queries ?? '-'} | ${l.meta?.scoreMaxDiff != null ? l.meta.scoreMaxDiff.toExponential(2) : '-'} | ${l.meta?.omegaMaxDiff != null ? l.meta.omegaMaxDiff.toExponential(2) : '-'} | ${l.meta?.enhancedMinCos != null ? l.meta.enhancedMinCos.toFixed(9) : '-'} | ${noteOf(l)} |`);
   }
   if (legs.some((l) => l.issues?.length)) {
     md.push('', '## 分歧明细', '');

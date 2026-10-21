@@ -102,6 +102,52 @@ const cos = (a, b) => {
   const chunkRows = db.prepare('SELECT id, vector FROM chunks').all().filter((r) => r.vector);
   const dim = chunkRows.length ? chunkRows[0].vector.byteLength / 4 : 3072;
   const idx = new VexusIndex(dim, 512);
+
+  // ── ABI 分叉（2.0 oracle 适配臂）────────────────────────────────────
+  // v9.2：免注册直查——recover/rebuild/pipeline/topo 拿到 dbPath 直接开库。
+  // 2.0 ：注册制——所有库访问都走进程级 storage_registry
+  //       （rust-vexus-lite/src/storage.rs with_registered_read/write），未注册
+  //       一律返回 KNOWLEDGE_STORE_NOT_REGISTERED。必须先
+  //       new NativeKnowledgeRuntime(tagIndex) → openAndInitStore(dbPath, optionsJson)
+  //       把 store 注册进 registry，同一进程同一 dbPath 只能注册一次。
+  // optionsJson 权威形态抄 2.0 的 KnowledgeBaseManager.js:438-452
+  // （readPoolSize 4 / mmapSize 64MB / busyTimeoutMs 10000 / schemaVersion 2），
+  // 键名见 storage.rs normalize_storage_options（HashMap<String,i64>，全整数）。
+  // 两条路径共用同一 DB 副本、同一查询载荷，只是初始化形态不同。
+  // 探测判据（踩过）：v9.2 **也导出** NativeKnowledgeRuntime——但那是旧日记索引
+  // 注册制（prototype 只有 registerDiaryIndex/executeRiverQuery 等，没有
+  // capabilities/openAndInitStore）。2.0 才有 ABI 握手 + 中央 Store 注册这两个方法。
+  // 所以用**原型面**探测，不构造实例、无副作用；仅凭 `NativeKnowledgeRuntime 存在`
+  // 会把 v9.2 oracle 误送进 2.0 臂（实测：abi handshake failed: null）。
+  const ABI2 = typeof mod.NativeKnowledgeRuntime === 'function'
+    && typeof mod.NativeKnowledgeRuntime.prototype?.capabilities === 'function'
+    && typeof mod.NativeKnowledgeRuntime.prototype?.openAndInitStore === 'function';
+  let runtime = null;
+  let abiIdentity = null;
+  if (ABI2) {
+    try {
+      runtime = new mod.NativeKnowledgeRuntime(idx);
+      const runtimeCaps = typeof runtime.capabilities === 'function' ? runtime.capabilities() : null;
+      if (!runtimeCaps || Number(runtimeCaps.abiVersion) !== 2) {
+        die('error', `abi handshake failed: ${JSON.stringify(runtimeCaps)}`);
+      }
+      if (Number(runtimeCaps.dimension) !== dim) {
+        die('error', `abi dimension ${runtimeCaps.dimension} != chunks dim ${dim}`);
+      }
+      if (typeof runtime.openAndInitStore !== 'function') die('error', 'abi2: missing openAndInitStore');
+      const storeState = runtime.openAndInitStore(DB_PATH, JSON.stringify({
+        readPoolSize: 4,
+        mmapSize: 64 * 1024 * 1024,
+        busyTimeoutMs: 10000,
+        schemaVersion: 2,
+      }));
+      abiIdentity = `abi=2 schemaVersion=${storeState.schemaVersion} dbGen=${storeState.databaseGeneration} caps=${runtimeCaps.capabilities.length}`;
+      console.log(`[${LABEL}] abi2 store registered: ${JSON.stringify(storeState)}`);
+    } catch (e) {
+      die('error', `abi2 store-init: ${e.message}`);
+    }
+  }
+
   if (caps.recover) await idx.recoverFromSqlite(DB_PATH, 'tags', null);
   else console.log(`[${LABEL}] recover 不可用（票 10 前正常），跳过索引载入`);
 
@@ -146,7 +192,12 @@ const cos = (a, b) => {
   artifact.payload = artifactPayload;
 
   // ②③ 每查询：pipeline + 双读出
-  const out = { label: LABEL, status: 'ok', identity, artifact, queries: [] };
+  const out = {
+    label: LABEL, status: 'ok',
+    identity: abiIdentity ? `${identity} [${abiIdentity}]` : identity,
+    abi: ABI2 ? 2 : 1,
+    artifact, queries: [],
+  };
   for (const q of queries) {
     const qVec = Float32Array.from(q.vector);
     const knn = chunkRows
@@ -206,6 +257,11 @@ const cos = (a, b) => {
       entry.error = `${e.message}`;
     }
     out.queries.push(entry);
+  }
+  // 2.0 注册制：显式关停 runtime（释放 store registry + Write Actor），
+  // 避免进程退出时残留后台线程。v9.2 无 runtime，空转。
+  if (runtime && typeof runtime.shutdown === 'function') {
+    try { runtime.shutdown(); } catch (_) { /* 关停失败不影响已产出的对账读数 */ }
   }
   fs.writeFileSync(OUT_PATH, JSON.stringify(out));
   console.log(`[${LABEL}] ok: ${out.queries.length} queries, sig=${artifactSig.slice(0, 12)}…`);
