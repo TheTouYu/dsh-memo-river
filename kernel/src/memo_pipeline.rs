@@ -1,8 +1,18 @@
-//! memo_pipeline —— 票 08：行为等价复刻上游 memo_pipeline.rs（1,550 行，统一查询管线七阶段）。
+//! memo_pipeline —— 票 08 + VCP 2.0 复刻 P1.2：行为等价复刻上游 memo_pipeline.rs（2.0 HEAD 2460 行）。
 //! EPA 轴分析 → 残差金字塔（Gram-Schmidt）→ Handshake → 门控 → Spike 感知 → 融合 → 双场传播。
 //! 公式与系数逐字对齐上游；索引层为 usearch（同版本/同参数/同插入序 → 同 knn 结果）。
+//!
+//! P1.2：①金字塔按层收集**输入残差**（仅 dynamic_wormholes 开时，上游 696）；
+//! ②DynamicWormholeContext 接线（上游 1759-1780：seed_levels 由 level_tags 最小层号构建，
+//! 层相似度经 reuse_score 复用）；③请求级 TagVectorPool 跨金字塔/融合/双场三段共享
+//! （池优先、索引兜底，既有读数口径不变）。缺省 dynamic_wormholes=false → 残差为空、
+//! context 被 sensing 强制 None，行为逐字等于 v9.2（五腿零漂移硬判据）。
 
-use crate::memo_sensing::{sense_typed, SenseConfig, SenseInput, SenseOutput, SenseSeed};
+use crate::memo_sensing::{
+    sense_with_context, DynamicWormholeContext, SenseConfig, SenseDiagnostics, SenseInput,
+    SenseOutput, SenseSeed,
+};
+use crate::memo_vector_pool::{ensure_tag_vectors_loaded, TagVectorPool};
 use crate::rivermemo_topology_v3::{load_artifact_from_runtime, MemoRuntime, NativeArtifact};
 use base64::Engine;
 use napi::bindgen_prelude::*;
@@ -541,7 +551,8 @@ fn analyze_pyramid(
     query: &[f32],
     dimension: usize,
     config: &PipelineConfig,
-) -> std::result::Result<(PyramidOutput, Vec<Vec<PyramidTagWork>>), String> {
+    tag_vectors: &mut TagVectorPool,
+) -> std::result::Result<(PyramidOutput, Vec<Vec<PyramidTagWork>>, Vec<Vec<f32>>), String> {
     let original_energy = magnitude(query).powi(2);
     if original_energy <= 1e-12 {
         return Ok((
@@ -555,12 +566,14 @@ fn analyze_pyramid(
                 },
             },
             Vec::new(),
+            Vec::new(),
         ));
     }
 
     let mut residual = query.to_vec();
     let mut levels_output = Vec::new();
     let mut levels_work = Vec::new();
+    let mut residuals: Vec<Vec<f32>> = Vec::new();
     let mut total_explained = 0.0;
     for level in 0..config.max_levels.clamp(1, 8) {
         let matches = index
@@ -571,22 +584,31 @@ fn analyze_pyramid(
         }
         let ids: Vec<i64> = matches.keys.iter().map(|id| *id as i64).collect();
         let names = load_tag_names(connection, &ids)?;
+        // P1.2：向量装载走请求级共享池（SQL 权威行），池里缺的仍读索引——
+        // 相似度口径（1/(1+L2)，取自 usearch 距离）保持不变，既有读数不漂。
+        ensure_tag_vectors_loaded(connection, tag_vectors, &ids, dimension)?;
         let mut buffer = vec![0.0f32; dimension];
         let mut tags = Vec::new();
         for (position, id) in ids.iter().enumerate() {
-            let found = index
-                .get(*id as u64, &mut buffer)
-                .map_err(|error| format!("Memo pyramid Tag vector read failed: {:?}", error))?;
-            if found == 0 {
-                continue;
-            }
+            let vector = match tag_vectors.get(id) {
+                Some(vector) => vector.as_ref().to_vec(),
+                None => {
+                    let found = index.get(*id as u64, &mut buffer).map_err(|error| {
+                        format!("Memo pyramid Tag vector read failed: {:?}", error)
+                    })?;
+                    if found == 0 {
+                        continue;
+                    }
+                    buffer.clone()
+                }
+            };
             tags.push(PyramidTagWork {
                 id: *id,
                 name: names
                     .get(id)
                     .cloned()
                     .unwrap_or_else(|| format!("Tag#{}", id)),
-                vector: buffer.clone(),
+                vector,
                 similarity: matches
                     .distances
                     .get(position)
@@ -629,6 +651,10 @@ fn analyze_pyramid(
             energy_explained,
             handshake_features: handshake,
         });
+        // P1.2（上游 696）：该层**输入**残差进动态虫洞上下文——只有更深的层能给源提供共鸣。
+        if config.spike_routing.dynamic_wormholes {
+            residuals.push(residual.clone());
+        }
         levels_work.push(tags);
         residual = next_residual;
         if residual_energy / original_energy < config.min_energy_ratio.clamp(0.0, 1.0) {
@@ -659,6 +685,7 @@ fn analyze_pyramid(
             features,
         },
         levels_work,
+        residuals,
     ))
 }
 
@@ -802,6 +829,7 @@ struct FusionDiagnostics {
 fn fuse_observation(
     index: &Index,
     connection: &Connection,
+    tag_vectors: &mut TagVectorPool,
     query: &[f32],
     observation: &SenseOutput,
     gated_tags: &[GatedTag],
@@ -897,14 +925,23 @@ fn fuse_observation(
     let requested_count = merged.len() + ghost_tags.len();
     let mut buffer = vec![0.0f32; dimension];
     let mut vectors = Vec::with_capacity(requested_count);
+    // P1.2：融合向量也走共享池（金字塔阶段已装载的行直接命中；缺的读索引兜底）。
+    let merged_ids: Vec<i64> = merged.iter().map(|tag| tag.id).collect();
+    ensure_tag_vectors_loaded(connection, tag_vectors, &merged_ids, dimension)?;
     for tag in merged {
-        let found = index
-            .get(tag.id as u64, &mut buffer)
-            .map_err(|error| format!("Memo pipeline fusion vector read failed: {:?}", error))?;
-        if found == 0 {
-            continue;
-        }
-        if magnitude(&buffer) > 1e-12 {
+        let vector = match tag_vectors.get(&tag.id) {
+            Some(vector) => vector.as_ref().to_vec(),
+            None => {
+                let found = index.get(tag.id as u64, &mut buffer).map_err(|error| {
+                    format!("Memo pipeline fusion vector read failed: {:?}", error)
+                })?;
+                if found == 0 {
+                    continue;
+                }
+                buffer.clone()
+            }
+        };
+        if magnitude(&vector) > 1e-12 {
             vectors.push(FusionTag {
                 id: tag.id,
                 name: if tag.name.is_empty() {
@@ -914,7 +951,7 @@ fn fuse_observation(
                 },
                 weight: tag.weight,
                 is_core: tag.is_core,
-                vector: buffer.clone(),
+                vector,
             });
         }
     }
@@ -1091,6 +1128,7 @@ fn effective_domain(artifact: &NativeArtifact, field: &[f64], ratio: f64) -> Vec
 
 fn project_field(
     index: &Index,
+    tag_vectors: &TagVectorPool,
     artifact: &NativeArtifact,
     field: &[f64],
     dimension: usize,
@@ -1103,6 +1141,15 @@ fn project_field(
             continue;
         }
         let id = artifact.node_ids[node_index];
+        // P1.2：池里已有的权威行直接用（金字塔/融合阶段装载过）；不为双场段强制
+        // 装载（那是 P2 basin 支撑的活），缺的仍读索引。
+        if let Some(vector) = tag_vectors.get(&id) {
+            total += mass;
+            for offset in 0..dimension {
+                output[offset] += vector[offset] as f64 * mass;
+            }
+            continue;
+        }
         let found = index
             .get(id as u64, &mut buffer)
             .map_err(|error| format!("Memo field projection failed for Tag {}: {:?}", id, error))?;
@@ -1126,6 +1173,7 @@ fn project_field(
 fn solve_dual_fields(
     artifact: &NativeArtifact,
     index: &Index,
+    tag_vectors: &TagVectorPool,
     source_entries: &[(i64, f64)],
     dimension: usize,
     config: &PipelineConfig,
@@ -1217,8 +1265,8 @@ fn solve_dual_fields(
         .collect();
     let local_domain_ids = effective_domain(artifact, &local, config.local_mass_ratio);
     let transfer_domain_ids = effective_domain(artifact, &transfer, config.transfer_mass_ratio);
-    let local_vector = project_field(index, artifact, &local, dimension)?;
-    let transfer_vector = project_field(index, artifact, &transfer, dimension)?;
+    let local_vector = project_field(index, tag_vectors, artifact, &local, dimension)?;
+    let transfer_vector = project_field(index, tag_vectors, artifact, &transfer, dimension)?;
     let local_mass = field_mass(&local);
     let transfer_mass = field_mass(&transfer);
 
@@ -1258,6 +1306,9 @@ struct PipelineDiagnostics {
     observation_cache_error: Option<String>,
     dual_field: DualFieldDiagnostics,
     fusion: FusionDiagnostics,
+    /// P1.2（上游 1646）：感知层诊断（含动态虫洞 6 计数与工作账）随管线外露——
+    /// 暗上线期间看「关」是否真零工作、开闸后看虫洞命中。
+    sensing: SenseDiagnostics,
 }
 
 #[derive(Serialize)]
@@ -1336,12 +1387,15 @@ fn run_pipeline(
     let index_guard = index
         .read()
         .map_err(|error| format!("Memo pipeline index lock failed: {}", error))?;
-    let (pyramid, level_tags) = analyze_pyramid(
+    // P1.2：请求级共享 Tag 向量池——金字塔装载、虫洞共鸣、融合、双场投影共用。
+    let mut tag_vectors = TagVectorPool::new();
+    let (pyramid, level_tags, residuals) = analyze_pyramid(
         &index_guard,
         &connection,
         &input.query_vector,
         dimensions,
         &input.config,
+        &mut tag_vectors,
     )?;
     let pyramid_ms = pyramid_started.elapsed().as_secs_f64() * 1000.0;
 
@@ -1363,7 +1417,22 @@ fn run_pipeline(
     let gating_ms = gating_started.elapsed().as_secs_f64() * 1000.0;
 
     let sensing_started = Instant::now();
-    let observation = sense_typed(
+    // P1.2（上游 1759-1780）：种子层号 = 该 Tag 在金字塔中出现的最小层；层相似度复用
+    // （同层残差与目标向量的余弦就是金字塔的 similarity，无需重复点积）。
+    let mut seed_levels: HashMap<i64, usize> = HashMap::new();
+    for (level, tags) in level_tags.iter().enumerate() {
+        for tag in tags {
+            seed_levels.entry(tag.id).or_insert(level);
+        }
+    }
+    let mut wormholes =
+        DynamicWormholeContext::new(&connection, &mut tag_vectors, residuals, seed_levels);
+    for (layer, tags) in level_tags.iter().enumerate() {
+        for tag in tags {
+            wormholes.reuse_score(layer, tag.id, tag.similarity);
+        }
+    }
+    let observation = sense_with_context(
         &artifact,
         artifact_sig,
         SenseInput {
@@ -1371,13 +1440,17 @@ fn run_pipeline(
             seeds,
             config: input.config.spike_routing.clone(),
         },
+        Some(&mut wormholes),
     )?;
+    let sensing_diagnostics = observation.diagnostics.clone();
+    drop(wormholes);
     let sensing_ms = sensing_started.elapsed().as_secs_f64() * 1000.0;
 
     let fusion_started = Instant::now();
     let (enhanced_vector, fusion, selected_tags) = fuse_observation(
         &index_guard,
         &connection,
+        &mut tag_vectors,
         &input.query_vector,
         &observation,
         &gated_tags,
@@ -1392,6 +1465,7 @@ fn run_pipeline(
     let dual_fields = solve_dual_fields(
         &artifact,
         &index_guard,
+        &tag_vectors,
         &observation.source_field,
         dimensions,
         &input.config,
@@ -1465,6 +1539,7 @@ fn run_pipeline(
             observation_cache_error: None,
             dual_field: dual_field_diagnostics,
             fusion,
+            sensing: sensing_diagnostics,
         },
     })
     .map_err(|error| format!("encode unified Memo pipeline metadata failed: {}", error))?;
