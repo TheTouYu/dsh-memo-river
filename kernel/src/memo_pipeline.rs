@@ -181,6 +181,11 @@ struct PipelineConfig {
     /// `"cosine"` = 上游 2.0 memo_pipeline.rs:648。
     #[serde(default)]
     similarity_mode: Option<SimilarityMode>,
+    /// 诊断档（P2 取证）：把请求级双场投影向量外露到 pipeline metadata 的
+    /// `diagnostics.dualFieldVectors`。**只写 pipeline metadata，绝不进 artifact payload**；
+    /// 缺省 false ⇒ 输出逐字节不变（五腿零漂移）。
+    #[serde(default)]
+    debug_dual_field_vectors: bool,
     max_levels: usize,
     pyramid_top_k: usize,
     min_energy_ratio: f64,
@@ -214,6 +219,7 @@ impl Default for PipelineConfig {
             transfer_mass_ratio: 0.9,
             max_projection_nodes: 0, // 暗上线：0 = v9.2 全支撑投影
             similarity_mode: None,   // 暗上线：None = v9.2 的 1/(1+L2²)
+            debug_dual_field_vectors: false,
             max_levels: 3,
             pyramid_top_k: 10,
             min_energy_ratio: 0.1,
@@ -1519,6 +1525,16 @@ struct PipelineDiagnostics {
     /// `tag_pair_similarity` / `tag_intrinsic_residuals`）。放这里而不是 artifact payload，
     /// 因为 payload 是逐字节深比对面（多一个键就记「缺侧」）。
     build_schema_v2: BuildSchemaV2Flags,
+    /// 仅 `debugDualFieldVectors: true` 时出现（取证用；缺省 None ⇒ 不序列化）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dual_field_vectors: Option<DualFieldVectors>,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DualFieldVectors {
+    local: Vec<f32>,
+    transfer: Vec<f32>,
 }
 
 #[derive(Default, Serialize)]
@@ -1770,6 +1786,14 @@ fn run_pipeline(
             dual_field: dual_field_diagnostics,
             fusion,
             sensing: sensing_diagnostics,
+            dual_field_vectors: if input.config.debug_dual_field_vectors {
+                Some(DualFieldVectors {
+                    local: dual_fields.local_vector.clone(),
+                    transfer: dual_fields.transfer_vector.clone(),
+                })
+            } else {
+                None
+            },
             build_schema_v2: {
                 let (pairwise_missing, intrinsic_missing) =
                     crate::memo_artifact_builder::schema_v2_fallback_flags();
