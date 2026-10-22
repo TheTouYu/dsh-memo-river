@@ -170,8 +170,13 @@ export function pipelineConfig(kbm: Record<string, unknown>): Record<string, unk
     factMatrixMode: kbm.factMatrixMode ?? 'pairwise',
     similarityMode: rm.similarityMode ?? 'legacy',
     maxProjectionNodes: Math.max(0, Math.floor(num(support.maxProjectionNodes, 0))),
-    // 第四闸 spikeRouting.dynamicWormholes 本处**故意不转发**（P3.1 范围外）：
-    // Rust 侧 SenseConfig 缺省 false 保持暗档，生产开关另案；这里补就等于生产开闸。
+    // 第四闸（2026-10-22 用户令「开闸」）：dynamicWormholes 转发。闭环验证档位 =
+    // vectors+cosine+maxProj=0+wormholes=true（P2 收官 1.11e-16/名次翻 0 的四开形态）。
+    // 部分转发安全：serde(default) 其余字段走 SenseConfig 缺省（与今日生产一致），
+    // 唯一变量 = dynamic_wormholes。rag_params 源：KBM.spikeRouting.dynamicWormholes。
+    spikeRouting: {
+      dynamicWormholes: bag(kbm.spikeRouting).dynamicWormholes === true,
+    },
   }
 }
 
