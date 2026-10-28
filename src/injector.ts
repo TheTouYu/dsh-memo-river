@@ -202,6 +202,71 @@ function isClaimedMessage(m: unknown): boolean {
 }
 
 /**
+ * Source kinds that are `role: 'user'` but are NOT the user speaking.
+ *
+ * `hasFreshUserInput` and `currentUserText` used to accept ANY user-role row,
+ * so teammate messages, the clock snapshot, skill recommendations and
+ * memo-river's own injections each looked like a fresh user turn. Live session
+ * 4b71d96c (genshin-ts, 38 turns): 96 memory injections, 93 marked
+ * `injectMode=interactive`; 55 of the 95 step-mapped injections fired in
+ * mid-turn steps whose only "input" was an injected row (one step's claimed
+ * batch was a single memo-river block). Injection was triggering injection.
+ *
+ * Unknown kinds stay REAL on purpose: a new real-user channel (command,
+ * future source) must not silently lose its trigger. Extend this set instead
+ * of narrowing `isRealUserMessage` to `kind === 'user'`.
+ */
+export const NON_USER_SOURCE_KINDS: ReadonlySet<string> = new Set([
+  'tool',
+  'memo-river',
+  'time-context',
+  'skill-rec',
+  'skill-catalog',
+  'skill-invocation',
+  'agent-instructions',
+  'preset-composer',
+  'repeat-tool-reminder',
+  'plugin:acp-nudge',
+  'plugin:billion-context-dsh',
+  'compact-checkpoint',
+  'compact-basic',
+  'runtime-context',
+  'model-selection',
+  'user-approval',
+  'subagent-settled',
+  'subagent-report',
+  'agent-message',
+])
+
+export function isRealUserMessage(m: unknown): boolean {
+  const msg = m as { role?: string; source?: { kind?: string } }
+  if (msg.role !== 'user') return false
+  const kind = msg.source?.kind
+  return kind === undefined || !NON_USER_SOURCE_KINDS.has(kind)
+}
+
+/**
+ * Query-field whitelist exceptions inside NON_USER_SOURCE_KINDS: teammate
+ * relays and skill bodies are genuine CONTENT (a sub-session's only "user
+ * intent" is an agent-message), they just must not count as "the user spoke".
+ */
+const QUERY_FIELD_CONTENT_KINDS: ReadonlySet<string> = new Set([
+  'agent-message',
+  'skill-invocation',
+])
+const QUERY_FIELD_EXCLUDED_KINDS: ReadonlySet<string> = new Set(
+  [...NON_USER_SOURCE_KINDS].filter((kind) => !QUERY_FIELD_CONTENT_KINDS.has(kind)),
+)
+
+/** True for rows that may contribute to the retrieval query field. */
+export function isQueryFieldMessage(m: unknown): boolean {
+  const msg = m as { role?: string; source?: { kind?: string } }
+  if (msg.role !== 'user' && msg.role !== 'assistant') return false
+  const kind = msg.source?.kind
+  return kind === undefined || !QUERY_FIELD_EXCLUDED_KINDS.has(kind)
+}
+
+/**
  * 「仍在上下文里」的注入条目键集（条目级去重的输入，2026-10-15）。
  *
  * 判据是**真消息在场**、不是轮数近似：把消息数组里每条文本的 sha256 反查 session 审计的
@@ -598,11 +663,12 @@ export function recallFailureNotice(
   const claimedMsgs = (claimed ?? []).filter(isClaimedMessage)
 
   /* ── 注入时机策略（docs/PLAN-2026-09-13-自主态记忆优化.md 第一刀）：
-   *    回合首发（step=1 或 claimed 带新用户输入）/ 自主态节律（每 N 步）/ 压缩事件（立即+绕过去重）。 */
+   *    回合首发（step=1 或 claimed 带新用户输入）/ 自主态节律（每 N 步）/ 压缩事件（立即+绕过去重）。
+   *    「新用户输入」只认真人：注入行/队友 relay/时钟/技能推荐不是用户说话
+   *    （见 NON_USER_SOURCE_KINDS；2026-10-28 会话 4b71d96c 实测 55/95 次注入
+   *    由注入行触发，其中一步的 claimed 只有一条 memo-river 块）。 */
   const every = deps.config.inject.autonomousInjectEverySteps
-  const hasFreshUserInput = (claimed ?? []).some(
-    (m) => (m as { role?: string }).role === 'user' && (m as { source?: { kind?: string } }).source?.kind !== 'tool',
-  )
+  const hasFreshUserInput = (claimed ?? []).some(isRealUserMessage)
   const isTurnStart = step === 1 || hasFreshUserInput
   /* 票06（recall-quality-0916）：写侧会话形态信号——把本步 injectMode 持久化到
    * SessionState，写工具（memo_write/update/approve）execute 时可读，做 hub 闸门
@@ -654,13 +720,15 @@ export function recallFailureNotice(
     }
     if (ci >= 0 && ci + 1 < msgs.length) queryMsgs = msgs.slice(ci + 1)
   }
-  const recent = queryMsgs.map(messageText)
+  const recent = queryMsgs.filter(isQueryFieldMessage).map(messageText)
 
-  /** 门控专用（与检索窗口解耦）：优先本轮 claimed 里最后一条 user，其次回落到历史。 */
+  /** 门控专用（与检索窗口解耦）：优先本轮 claimed 里最后一条**真人**消息，其次回落到历史。
+   *  这里必须排除注入行：claimed 里最后一条 user 常常是 time-context / agent-message /
+   *  自己的回忆块，拿它当用户原文 = 门控锚漂移（2026-10-28 4b71d96c 实测）。 */
   let currentUserText = ''
   for (const pool of [claimedMsgs, history]) {
     for (let i = pool.length - 1; i >= 0; i--) {
-      if ((pool[i] as { role?: string }).role === 'user') {
+      if (isRealUserMessage(pool[i])) {
         currentUserText = messageText(pool[i]).trim()
         break
       }

@@ -1103,6 +1103,53 @@ hr('#15–#18 自主态节律注入：cadence / 压缩联动 / 步维刷新 / �
       ],
     )
   }
+
+  // ⑱b 注入行不算「新用户输入」：队友 relay / 时钟 / 自己的回忆块都只能走
+  // 自主节律或压缩事件，不能冒充回合首发（2026-10-28 会话 4b71d96c 实测
+  // 55/95 次注入由注入行触发；真实用户仍必须立即评估）。
+  {
+    const h18b = createMockCtx()
+    apply(h18b.ctx, makeConfig({ bucket: BUCKET_RIVER, inject: { autonomousInjectEverySteps: 15 } }))
+    const agent18b = createAgent('sess-autonomous-18b', WS_RIVER, [textMsg('user', AUT_Q), textMsg('assistant', AUT_A)])
+    const snap = (st) => ({ injected: st.injectedCount, skipped: st.skippedCount, lastAutoStep: st.lastAutoStep })
+    const injected = (kind) => ({
+      role: 'user',
+      content: [{ type: 'text', text: `${kind} 注入行（不是用户说话）` }],
+      source: { kind },
+    })
+    await runPreStep(h18b, agent18b, 1, [], 1)
+    const base = snap(peekSession('sess-autonomous-18b'))
+    agent18b.log.push(textMsg('assistant', '第一步完成。'))
+    await runPreStep(h18b, agent18b, 1, [injected('agent-message')], 5)
+    const afterAgent = snap(peekSession('sess-autonomous-18b'))
+    agent18b.log.push(textMsg('assistant', '第五步完成。'))
+    await runPreStep(h18b, agent18b, 1, [injected('time-context')], 6)
+    const afterClock = snap(peekSession('sess-autonomous-18b'))
+    agent18b.log.push(textMsg('assistant', '第六步完成。'))
+    await runPreStep(h18b, agent18b, 1, [injected('memo-river')], 7)
+    const afterMemo = snap(peekSession('sess-autonomous-18b'))
+    agent18b.log.push(textMsg('assistant', '第七步完成。'))
+    await runPreStep(h18b, agent18b, 1, [textMsg('user', '继续，下一步改哪里？')], 8)
+    const afterReal = snap(peekSession('sess-autonomous-18b'))
+    check(
+      38,
+      '注入行（agent-message/time-context/memo-river）不算新用户输入；真实用户仍立即评估',
+      afterAgent.lastAutoStep === 1
+        && afterClock.lastAutoStep === 1
+        && afterMemo.lastAutoStep === 1
+        && afterAgent.skipped === base.skipped
+        && afterClock.skipped === base.skipped
+        && afterMemo.skipped === base.skipped
+        && afterReal.lastAutoStep === 8,
+      [
+        `step1 基线：lastAutoStep=${base.lastAutoStep} skipped=${base.skipped}（要求 1/0）`,
+        `step5 agent-message 后：lastAutoStep=${afterAgent.lastAutoStep}（要求仍 1=零尝试）`,
+        `step6 time-context 后：lastAutoStep=${afterClock.lastAutoStep}（要求仍 1）`,
+        `step7 memo-river 后：lastAutoStep=${afterMemo.lastAutoStep}（要求仍 1）`,
+        `step8 真实用户后：lastAutoStep=${afterReal.lastAutoStep}（要求 8=立即评估）`,
+      ],
+    )
+  }
 }
 
 /* ══════════════════════ 汇总 ══════════════════════ */
