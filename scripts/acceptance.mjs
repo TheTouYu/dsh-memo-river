@@ -436,9 +436,11 @@ hr('#9 不阻塞主流程（拔掉嵌入 API）')
 
   const appended = decision ? decision.messages.length - claimed.length : -1
   const skipLine = logs.find((l) => l.includes('inject-skip')) ?? ''
-  /* D214 降级可见化：嵌入失败时除了 harness 的 runtime-context，插件还会追加**一条短通知**
-   * （「召回未生效」，form=notice）——这不是注入块（不含 BLOCK_CLOSE），行为上的不变量是
-   * 「不注入记忆 + 主流程不阻塞 + 失败对模型可见」。 */
+  const fallbackLine = logs.find((l) => l.includes('inject-fallback-timeline')) ?? ''
+  /* 2026-10-29 P0-1 行为变更（有意）：嵌入失败 + 桶非空 → 不再只发短通知，而是注入**时间线兜底块**
+   * （含 BLOCK_CLOSE、块头「⚠️降级·时间线兜底」+ 不可信声明 + 最近 N 条时间线）——「宁可给
+   * 时间线也不给空」（D208/D214：端点劣化期 skip 率 45-58% 的空洞轮）。日志双行：inject-skip
+   * （语义通道失败留痕）+ inject-fallback-timeline（兜底注入）。空桶仍走纯 skip+通知（#27 不变）。 */
   const noticeMsg = decision ? decision.messages.slice(claimed.length).find((m) => (m?.source?.kind === 'memo-river')) : null
   const noticeText = noticeMsg ? msgText(noticeMsg) : ''
   const pass =
@@ -446,18 +448,22 @@ hr('#9 不阻塞主流程（拔掉嵌入 API）')
     vecs === null &&
     threw === null &&
     appended === 2 &&
-    !noticeText.includes(BLOCK_CLOSE) &&
-    noticeText.includes('召回未生效') &&
-    skipLine.includes('embed-failed')
-  check(9, '嵌入不可用 → 注入跳过 + 记日志 + 一条模型可见的失败通知，主流程正常返回', pass, [
+    noticeText.includes(BLOCK_CLOSE) &&
+    noticeText.includes('时间线兜底') &&
+    noticeText.includes('历史数据') &&
+    skipLine.includes('embed-failed') &&
+    fallbackLine.includes('n=') &&
+    fallbackLine.includes('embed-failed')
+  check(9, '嵌入不可用 → 时间线兜底注入（非空桶）+ 双日志行，主流程正常返回', pass, [
     `9a 真死端点抛错：${deadErr}`,
     `9a 耗时 ${deadMs}ms（未挂起）`,
     `9b seam 未抛异常：${threw === null}（异常=${threw}）`,
-    `9b decision 额外追加的消息数 = ${appended}（2 = harness 的 runtime-context + 插件的一条「召回未生效」通知；0 注入块）`,
-    `9b 通知首行：${(noticeText.split('\n')[0] ?? '(无)').slice(0, 120)}`,
-    `9b 不含 BLOCK_CLOSE（不冒充召回块）= ${!noticeText.includes(BLOCK_CLOSE)}`,
+    `9b decision 额外追加的消息数 = ${appended}（2 = runtime-context + 时间线兜底块；短通知被兜底块压掉）`,
+    `9b 兜底块首行：${(noticeText.split('\n')[0] ?? '(无)').slice(0, 120)}`,
+    `9b 含 BLOCK_CLOSE（真注入块）= ${noticeText.includes(BLOCK_CLOSE)}；含降级声明 = ${noticeText.includes('历史数据')}`,
     `9b seam 耗时 ${seamMs}ms`,
     `9b 日志行：${skipLine || '(未捕获)'}`,
+    `9b 兜底行：${fallbackLine || '(未捕获)'}`,
   ])
 }
 
@@ -1129,24 +1135,30 @@ hr('#15–#18 自主态节律注入：cadence / 压缩联动 / 步维刷新 / �
     await runPreStep(h18b, agent18b, 1, [injected('memo-river')], 7)
     const afterMemo = snap(peekSession('sess-autonomous-18b'))
     agent18b.log.push(textMsg('assistant', '第七步完成。'))
-    await runPreStep(h18b, agent18b, 1, [textMsg('user', '继续，下一步改哪里？')], 8)
+    await runPreStep(h18b, agent18b, 1, [injected('tool-jobs')], 8)
+    const afterJobs = snap(peekSession('sess-autonomous-18b'))
+    agent18b.log.push(textMsg('assistant', '第八步完成。'))
+    await runPreStep(h18b, agent18b, 1, [textMsg('user', '继续，下一步改哪里？')], 9)
     const afterReal = snap(peekSession('sess-autonomous-18b'))
     check(
       38,
-      '注入行（agent-message/time-context/memo-river）不算新用户输入；真实用户仍立即评估',
+      '注入行（agent-message/time-context/memo-river/tool-jobs）不算新用户输入；真实用户仍立即评估',
       afterAgent.lastAutoStep === 1
         && afterClock.lastAutoStep === 1
         && afterMemo.lastAutoStep === 1
+        && afterJobs.lastAutoStep === 1
         && afterAgent.skipped === base.skipped
         && afterClock.skipped === base.skipped
         && afterMemo.skipped === base.skipped
-        && afterReal.lastAutoStep === 8,
+        && afterJobs.skipped === base.skipped
+        && afterReal.lastAutoStep === 9,
       [
         `step1 基线：lastAutoStep=${base.lastAutoStep} skipped=${base.skipped}（要求 1/0）`,
         `step5 agent-message 后：lastAutoStep=${afterAgent.lastAutoStep}（要求仍 1=零尝试）`,
         `step6 time-context 后：lastAutoStep=${afterClock.lastAutoStep}（要求仍 1）`,
         `step7 memo-river 后：lastAutoStep=${afterMemo.lastAutoStep}（要求仍 1）`,
-        `step8 真实用户后：lastAutoStep=${afterReal.lastAutoStep}（要求 8=立即评估）`,
+        `step8 tool-jobs 后：lastAutoStep=${afterJobs.lastAutoStep}（要求仍 1——2026-10-29 实测 6 次注入由后台任务通知触发）`,
+        `step9 真实用户后：lastAutoStep=${afterReal.lastAutoStep}（要求 9=立即评估）`,
       ],
     )
   }

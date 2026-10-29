@@ -236,6 +236,10 @@ export const NON_USER_SOURCE_KINDS: ReadonlySet<string> = new Set([
   'subagent-settled',
   'subagent-report',
   'agent-message',
+  // Background job lifecycle notices (dsh job system). Caught live 2026-10-29:
+  // as an unknown kind it stayed "real" and 6/53 post-deploy interactive
+  // injections were fired by a ~300-char job notice.
+  'tool-jobs',
 ])
 
 export function isRealUserMessage(m: unknown): boolean {
