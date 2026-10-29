@@ -8,9 +8,11 @@
 //! （池优先、索引兜底，既有读数口径不变）。缺省 dynamic_wormholes=false → 残差为空、
 //! context 被 sensing 强制 None，行为逐字等于 v9.2（五腿零漂移硬判据）。
 //!
-//! P1.3（暗上线）：双场投影增 basin 圈选分支——`maxProjectionNodes > 0` 时走
-//! memo_projection::{seed_basins, grow}（上游 1404/1412/1806），圈选并集一次性补池（:1431）；
-//! 缺省 0 = v9.2 全支撑投影逐字不变，basin 与 river_ids 都不计算。
+//! P1.3（暗上线，P3 已退役）：双场投影增 basin 圈选分支——`maxProjectionNodes > 0` 时走
+//! memo_projection::{seed_basins, grow}（上游 1404/1412/1806），圈选并集一次性补池（:1431）。
+//! P3 二轮：对齐上游 9aa1f67 无条件语义——river_ids + seed_basins 每查询现算，
+//! 投影恒走 basin 圈选，预算 = `maxFieldProjectionNodes`（缺省 256）；v9.2 全支撑
+//! 投影（project_field）与闸键 `maxProjectionNodes` 同步退役（停止消费）。
 //!
 //! P3（上游 174a5e1→9aa1f67，conservative-topology-v2.2）：金字塔 safe-stoploss
 //! （边际解释能量 < minLayerExplainedEnergy=0.03 止损）、贡献门控（同层 max 贡献 10% 与
@@ -182,11 +184,13 @@ struct PipelineConfig {
     transfer_tolerance: f64,
     local_mass_ratio: f64,
     transfer_mass_ratio: f64,
-    /// P1.3（暗上线）：双场投影的圈选预算。0 = v9.2 全支撑投影逐字不变；
-    /// >0 = memo_projection::grow 的 basin 圈选路径（上游 memo_pipeline.rs:1404）。
-    /// JS 侧取值 = rag_params 的 KnowledgeBaseManager.riverMemo.effectiveSupport.maxProjectionNodes。
-    #[serde(default)]
-    max_projection_nodes: usize,
+    /// P3（上游 9aa1f67 memo_pipeline.rs:118）：双场投影的圈选预算
+    /// `maxFieldProjectionNodes`，缺省 256。上游语义为**无条件** basin 圈选
+    /// （river_ids + seed_basins 每查询现算，grow 预算 = 本值）。
+    /// 旧暗上线键 `maxProjectionNodes`（0 = v9.2 全支撑投影）停止消费：
+    /// 差分缺省臂会显式发送 0，若当别名会把 256 预算降级成无界。
+    #[serde(default = "default_max_field_projection_nodes")]
+    max_field_projection_nodes: usize,
     /// P2 交付1（暗上线）：金字塔相似度口径。缺省（None）= v9.2 的 1/(1+L2²)；
     /// `"cosine"` = 上游 2.0 memo_pipeline.rs:648。
     #[serde(default)]
@@ -221,6 +225,10 @@ struct PipelineConfig {
     spike_routing: SenseConfig,
 }
 
+fn default_max_field_projection_nodes() -> usize {
+    256
+}
+
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
@@ -233,7 +241,7 @@ impl Default for PipelineConfig {
             transfer_tolerance: 1e-9,
             local_mass_ratio: 0.8,
             transfer_mass_ratio: 0.9,
-            max_projection_nodes: 0, // 暗上线：0 = v9.2 全支撑投影
+            max_field_projection_nodes: default_max_field_projection_nodes(), // 上游缺省 256（无条件 basin 圈选）
             similarity_mode: None,   // 暗上线：None = v9.2 的 1/(1+L2²)
             debug_dual_field_vectors: false,
             max_levels: 3,
@@ -1563,50 +1571,6 @@ fn effective_domain(artifact: &NativeArtifact, field: &[f64], ratio: f64) -> Vec
     retained
 }
 
-fn project_field(
-    index: &Index,
-    tag_vectors: &TagVectorPool,
-    artifact: &NativeArtifact,
-    field: &[f64],
-    dimension: usize,
-) -> std::result::Result<Vec<f32>, String> {
-    let mut output = vec![0.0f64; dimension];
-    let mut buffer = vec![0.0f32; dimension];
-    let mut total = 0.0;
-    for (node_index, mass) in field.iter().copied().enumerate() {
-        if mass <= 0.0 {
-            continue;
-        }
-        let id = artifact.node_ids[node_index];
-        // P1.2：池里已有的权威行直接用（金字塔/融合阶段装载过）；不为双场段强制
-        // 装载（那是 P2 basin 支撑的活），缺的仍读索引。
-        if let Some(vector) = tag_vectors.get(&id) {
-            total += mass;
-            for offset in 0..dimension {
-                output[offset] += vector[offset] as f64 * mass;
-            }
-            continue;
-        }
-        let found = index
-            .get(id as u64, &mut buffer)
-            .map_err(|error| format!("Memo field projection failed for Tag {}: {:?}", id, error))?;
-        if found == 0 {
-            continue;
-        }
-        total += mass;
-        for offset in 0..dimension {
-            output[offset] += buffer[offset] as f64 * mass;
-        }
-    }
-    if total > 0.0 {
-        for value in &mut output {
-            *value /= total;
-        }
-        normalize(&mut output);
-    }
-    Ok(output.into_iter().map(|value| value as f32).collect())
-}
-
 /// P1.3 basin 圈选投影（上游 memo_pipeline.rs:1404-1444 逐语义）：
 /// grow 给出两场各自的支撑（并集共用 maxProjectionNodes 预算），并集一次性补池后按
 /// 选中节点的场质量加权平均。缺向量的节点跳过——读数由 missing_vector_nodes /
@@ -1719,7 +1683,6 @@ fn project_basin_fields(
 
 fn solve_dual_fields(
     artifact: &NativeArtifact,
-    index: &Index,
     connection: &Connection,
     tag_vectors: &mut TagVectorPool,
     source_entries: &[(i64, f64)],
@@ -1841,27 +1804,22 @@ fn solve_dual_fields(
         domain_ms,
         ..DualFieldDiagnostics::default()
     };
-    // P1.3 闸：0 = v9.2 全支撑投影（逐字不变）；>0 = basin 圈选。
+    // P3（上游 9aa1f67 solve_dual_fields_with_pool:1893-1896）：投影无条件走
+    // basin 圈选（grow 预算 = max_field_projection_nodes，缺省 256），
+    // v9.2 全支撑投影路径退役。
     let project_started = Instant::now();
-    let (local_vector, transfer_vector) = if config.max_projection_nodes > 0 {
-        project_basin_fields(
-            connection,
-            artifact,
-            [&local, &transfer],
-            [&local_domain_ids, &transfer_domain_ids],
-            dimension,
-            config.max_projection_nodes,
-            river_ids,
-            basins,
-            tag_vectors,
-            &mut diagnostics,
-        )?
-    } else {
-        (
-            project_field(index, tag_vectors, artifact, &local, dimension)?,
-            project_field(index, tag_vectors, artifact, &transfer, dimension)?,
-        )
-    };
+    let (local_vector, transfer_vector) = project_basin_fields(
+        connection,
+        artifact,
+        [&local, &transfer],
+        [&local_domain_ids, &transfer_domain_ids],
+        dimension,
+        config.max_field_projection_nodes,
+        river_ids,
+        basins,
+        tag_vectors,
+        &mut diagnostics,
+    )?;
     diagnostics.project_ms = project_started.elapsed().as_secs_f64() * 1000.0;
 
     Ok(DualFieldOutput {
@@ -2098,19 +2056,16 @@ fn run_pipeline(
         &input.config,
     )?;
     let fusion_ms = fusion_started.elapsed().as_secs_f64() * 1000.0;
-    // P1.3（上游 1786-1806）：basin 圈选每查询现算；闸关时既不算 basin 也不传 river_ids，
-    // 双场投影走 v9.2 全支撑路径。
-    let (river_ids, basins) = if input.config.max_projection_nodes > 0 {
-        (
-            observation.nodes.iter().map(|node| node.id).collect::<Vec<i64>>(),
-            crate::memo_projection::seed_basins(&observation, &artifact),
-        )
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    // P3（上游 9aa1f67 run_pipeline:2105-2111）：basin 圈选与 river_ids 每查询
+    // 无条件现算（上游无闸）；limit 在 solve 内取 max_field_projection_nodes。
+    let river_ids = observation
+        .nodes
+        .iter()
+        .map(|node| node.id)
+        .collect::<Vec<i64>>();
+    let basins = crate::memo_projection::seed_basins(&observation, &artifact);
     let dual_fields = solve_dual_fields(
         &artifact,
-        &index_guard,
         &connection,
         &mut tag_vectors,
         &observation.source_field,
@@ -2401,21 +2356,28 @@ mod geometry_epa_tests {
 
     #[test]
     fn budget_config_is_nonnegative_integer_with_default() {
-        // 我方闸缺省 0（暗上线：v9.2 全支撑投影），上游缺省 256。
+        // P3（上游 9aa1f67）：maxFieldProjectionNodes 缺省 256（无条件 basin 圈选）；
+        // 旧暗上线键 maxProjectionNodes 停止消费（缺省臂会显式发 0，当别名会
+        // 把 256 预算降级成无界），发送它不影响新键取值。
         let default: PipelineConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(default.max_projection_nodes, 0);
+        assert_eq!(default.max_field_projection_nodes, 256);
         for k in [0usize, 64, 193, 512] {
             let config: PipelineConfig =
-                serde_json::from_value(serde_json::json!({ "maxProjectionNodes": k })).unwrap();
-            assert_eq!(config.max_projection_nodes, k);
+                serde_json::from_value(serde_json::json!({ "maxFieldProjectionNodes": k }))
+                    .unwrap();
+            assert_eq!(config.max_field_projection_nodes, k);
         }
+        // 旧键被忽略：显式 maxProjectionNodes=0 不再把缺省 256 降级。
+        let legacy: PipelineConfig =
+            serde_json::from_value(serde_json::json!({ "maxProjectionNodes": 0 })).unwrap();
+        assert_eq!(legacy.max_field_projection_nodes, 256);
         for value in [
             serde_json::json!(-1),
             serde_json::json!(1.5),
             serde_json::json!("256"),
         ] {
             assert!(serde_json::from_value::<PipelineConfig>(
-                serde_json::json!({ "maxProjectionNodes": value })
+                serde_json::json!({ "maxFieldProjectionNodes": value })
             )
             .is_err());
         }
