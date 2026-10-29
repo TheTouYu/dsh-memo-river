@@ -11,10 +11,18 @@
 //! P1.3（暗上线）：双场投影增 basin 圈选分支——`maxProjectionNodes > 0` 时走
 //! memo_projection::{seed_basins, grow}（上游 1404/1412/1806），圈选并集一次性补池（:1431）；
 //! 缺省 0 = v9.2 全支撑投影逐字不变，basin 与 river_ids 都不计算。
+//!
+//! P3（上游 174a5e1→9aa1f67，conservative-topology-v2.2）：金字塔 safe-stoploss
+//! （边际解释能量 < minLayerExplainedEnergy=0.03 止损）、贡献门控（同层 max 贡献 10% 与
+//! 绝对 0.05 下限）、隐式种子等比例缩放（显式最大 0.35 倍）、路由残差尾部（尾残差能量
+//! 占比 ≥2% 追加、只供路由不当种子层）、图外 Tag 金字塔前置过滤（eligible=node_index）、
+//! lexical 锚定（ASCII 词 + CJK bigram，grounding≥0.5）、显式 Core 种子 SQL 解析促升、
+//! 双场单趟 pair 传播 + relax_field、basin 投影 hub 折扣。相似度缺省从 legacy 翻为 cosine
+//! （对齐上游无条件 cosine；legacy 保留为显式兼容档）。
 
 use crate::memo_sensing::{
-    sense_with_context, DynamicWormholeContext, SenseConfig, SenseDiagnostics, SenseInput,
-    SenseOutput, SenseSeed,
+    sense_typed, sense_with_context, DynamicWormholeContext, SenseConfig, SenseDiagnostics,
+    SenseInput, SenseOutput, SenseSeed,
 };
 use crate::memo_vector_pool::{ensure_tag_vectors_loaded, TagVectorPool};
 use crate::rivermemo_topology_v3::{load_artifact_from_runtime, MemoRuntime, NativeArtifact};
@@ -30,7 +38,7 @@ use std::time::{Duration, Instant};
 use usearch::Index;
 
 const PIPELINE_SCHEMA: &str = "vexus-unified-memo-pipeline-v1";
-const PIPELINE_ALGORITHM: &str = "tagmemo.epa-pyramid-spike-fusion-v9.2-rust";
+const PIPELINE_ALGORITHM: &str = "memo.conservative-topology-v2.2";
 
 fn positive(value: f64) -> f64 {
     if value.is_finite() {
@@ -76,9 +84,9 @@ fn cosine(left: &[f32], right: &[f32]) -> f64 {
 }
 
 /// P2 交付1：金字塔相似度口径。
-/// - `legacy`（缺省）= v9.2 逐字实现：`1/(1+d)`，其中 d 是 usearch 返回的**平方** L2
+/// - `legacy` = v9.2 逐字实现：`1/(1+d)`，其中 d 是 usearch 返回的**平方** L2
 ///   （等价 1/(1+L2²)；实测口径见 research/vcp2.0/port/p2-divergence-2026-10-22.md §5）。
-/// - `cosine` = 上游 2.0 `memo_pipeline.rs:648`：`cosine(residual, SQL 原件向量)`。
+/// - `cosine`（P3 起缺省）= 上游 2.0 `memo_pipeline.rs:648`：`cosine(residual, SQL 原件向量)`。
 ///
 /// 这条通道的杀伤力在动态虫洞：相似度经 `reuse_score` 进 `known_scores` 后被当作
 /// 更深层共鸣值，再与 `dynamic_wormhole_threshold`(0.2) 二值化比较——近正交时
@@ -104,10 +112,12 @@ fn pyramid_similarity(
     }
 }
 
-/// 配置键优先；缺省（None）= legacy。
+/// 配置键优先；缺省（None）= cosine（P3 起：对齐上游 2.0 无条件
+/// `cosine(residual, SQL 原件向量)`——上游 memo_pipeline.rs:648）。
+/// `legacy` 保留为显式兼容档（v9.2 的 1/(1+L2²)，五腿 vs 1.0 用）。
 /// 不做 env 后门（裁决②：kernel 只留一个配置面；B 的 driver 白名单已加转发）。
 fn resolve_similarity_mode(configured: Option<SimilarityMode>) -> SimilarityMode {
-    configured.unwrap_or(SimilarityMode::Legacy)
+    configured.unwrap_or(SimilarityMode::Cosine)
 }
 
 fn normalize(vector: &mut [f64]) -> bool {
@@ -139,7 +149,7 @@ struct PipelineInput {
     #[serde(default)]
     query_id: Option<String>,
     #[serde(default, rename = "queryText")]
-    _query_text: String,
+    query_text: String,
     #[serde(default)]
     query_vector: Vec<f32>,
     #[serde(default)]
@@ -190,6 +200,12 @@ struct PipelineConfig {
     pyramid_top_k: usize,
     min_energy_ratio: f64,
     layer_decay: f64,
+    /// P3（上游 9aa1f67）：safe-stoploss——层边际解释能量低于此值即止损（不再入层、
+    /// 不入 total_explained、不产残差）。容器级 serde default ⇒ 缺键取 Default 0.03。
+    min_layer_explained_energy: f64,
+    /// P3：贡献门控阈值 = max(同层最大贡献×ratio, floor)。
+    seed_contribution_ratio: f64,
+    seed_contribution_floor: f64,
     activation_multiplier: Vec<f64>,
     dynamic_boost_range: Vec<f64>,
     core_boost_range: Vec<f64>,
@@ -224,6 +240,10 @@ impl Default for PipelineConfig {
             pyramid_top_k: 10,
             min_energy_ratio: 0.1,
             layer_decay: 0.7,
+            // P3（上游 9aa1f67 Default）：
+            min_layer_explained_energy: 0.03,
+            seed_contribution_ratio: 0.1,
+            seed_contribution_floor: 0.05,
             activation_multiplier: vec![0.5, 1.5],
             dynamic_boost_range: vec![0.3, 2.0],
             core_boost_range: vec![1.2, 1.4],
@@ -608,6 +628,7 @@ fn analyze_pyramid(
     dimension: usize,
     config: &PipelineConfig,
     tag_vectors: &mut TagVectorPool,
+    eligible: Option<&HashMap<i64, usize>>,
 ) -> std::result::Result<(PyramidOutput, Vec<Vec<PyramidTagWork>>, Vec<Vec<f32>>), String> {
     let original_energy = magnitude(query).powi(2);
     if original_energy <= 1e-12 {
@@ -639,7 +660,17 @@ fn analyze_pyramid(
         if matches.keys.is_empty() {
             break;
         }
-        let ids: Vec<i64> = matches.keys.iter().map(|id| *id as i64).collect();
+        // P3（上游 9aa1f67）：Gram-Schmidt 之前过滤图外 Tag——图外方向拿不到被接纳
+        // 传播种子能承载的能量；不要求出度（eligible = artifact.node_index）。
+        // 命中与距离成对过滤，legacy 档的距离配对不因过滤错位。
+        let hits: Vec<(i64, Option<f32>)> = matches
+            .keys
+            .iter()
+            .zip(matches.distances.iter())
+            .map(|(id, distance)| (*id as i64, Some(*distance)))
+            .filter(|(id, _)| eligible.map_or(true, |nodes| nodes.contains_key(id)))
+            .collect();
+        let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
         let names = load_tag_names(connection, &ids)?;
         // P1.2：向量装载走请求级共享池（SQL 权威行），池里缺的仍读索引——
         // 相似度口径（1/(1+L2)，取自 usearch 距离）保持不变，既有读数不漂。
@@ -667,7 +698,7 @@ fn analyze_pyramid(
                     .unwrap_or_else(|| format!("Tag#{}", id)),
                 similarity: pyramid_similarity(
                     similarity_mode,
-                    matches.distances.get(position).copied(),
+                    hits[position].1,
                     &residual,
                     &vector,
                 ),
@@ -683,13 +714,19 @@ fn analyze_pyramid(
         let current_energy = magnitude(&residual).powi(2);
         let (projection, next_residual, coefficients) =
             orthogonal_projection(&residual, &tags, dimension);
+        // P3（上游 9aa1f67）：层内归一化——贡献 = 系数 / sqrt(层输入能量)。
         for (tag, coefficient) in tags.iter_mut().zip(coefficients.iter()) {
-            tag.contribution = *coefficient;
+            tag.contribution = *coefficient / current_energy.sqrt().max(1e-12);
         }
         let handshake = analyze_handshakes(&residual, &mut tags, dimension);
         let residual_magnitude = magnitude(&next_residual);
         let residual_energy = residual_magnitude * residual_magnitude;
         let energy_explained = positive(current_energy - residual_energy) / original_energy;
+        // P3：safe-stoploss——大残差不是「再来一层有用」的证据。在发布层工作与
+        // 残差（含动态虫洞输入）之前拒绝本层。
+        if energy_explained < config.min_layer_explained_energy.clamp(0.0, 1.0) {
+            break;
+        }
         total_explained += energy_explained;
         levels_output.push(PyramidLevelOutput {
             level,
@@ -718,6 +755,18 @@ fn analyze_pyramid(
         if residual_energy / original_energy < config.min_energy_ratio.clamp(0.0, 1.0) {
             break;
         }
+    }
+
+    // P3（上游 9aa1f67）：每个被接纳层一条前置残差，随后是未解释尾部。尾部只供
+    // 路由证据，绝不再当种子层。
+    let tail_energy = magnitude(&residual).powi(2);
+    if config.spike_routing.dynamic_wormholes
+        && !levels_work.is_empty()
+        && tail_energy.is_finite()
+        && tail_energy > 1e-12
+        && tail_energy / original_energy >= 0.02
+    {
+        residuals.push(residual);
     }
 
     let coverage = clamp01(total_explained);
@@ -753,6 +802,54 @@ struct GatedTag {
     name: String,
     weight: f64,
     is_core: bool,
+    /// P3（上游 9aa1f67）：lexical 锚定（query_text 与 Tag 名的词法接地 ≥0.5）。
+    lexical: bool,
+}
+
+// P3（上游 9aa1f67）：ASCII 词有词界；CJK 用相邻 bigram（单字连续段只出单字）。
+// 标点绝不拼接无关 ASCII 词。
+fn lexical_tokens(text: &str) -> HashSet<String> {
+    let mut tokens = HashSet::new();
+    let mut ascii = String::new();
+    let mut cjk = Vec::new();
+    let flush = |ascii: &mut String, cjk: &mut Vec<char>, tokens: &mut HashSet<String>| {
+        if !ascii.is_empty() {
+            tokens.insert(std::mem::take(ascii));
+        }
+        if cjk.len() == 1 {
+            tokens.insert(cjk[0].to_string());
+        }
+        for pair in cjk.windows(2) {
+            tokens.insert(pair.iter().collect());
+        }
+        cjk.clear();
+    };
+    for ch in text.to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            if !cjk.is_empty() {
+                flush(&mut ascii, &mut cjk, &mut tokens);
+            }
+            ascii.push(ch);
+        } else if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+            if !ascii.is_empty() {
+                flush(&mut ascii, &mut cjk, &mut tokens);
+            }
+            cjk.push(ch);
+        } else {
+            flush(&mut ascii, &mut cjk, &mut tokens);
+        }
+    }
+    flush(&mut ascii, &mut cjk, &mut tokens);
+    tokens
+}
+
+fn lexical_grounding(query: &str, name: &str) -> f64 {
+    let query = lexical_tokens(query);
+    let tag = lexical_tokens(name);
+    if tag.is_empty() {
+        return 0.0;
+    }
+    tag.intersection(&query).count() as f64 / tag.len() as f64
 }
 
 fn range_value(values: &[f64], index: usize, fallback: f64) -> f64 {
@@ -779,12 +876,98 @@ fn technical_name(value: &str, allow_space: bool) -> bool {
         })
 }
 
+/// P3（上游 9aa1f67）：旧入口降为测试薄壳——生产路径全部走 gate_tags_for_graph。
+#[cfg(test)]
 fn gate_tags(
     levels: &[Vec<PyramidTagWork>],
     epa: &EpaOutput,
     pyramid: &PyramidOutput,
     core_tags: &[String],
     config: &PipelineConfig,
+    query_text: &str,
+) -> (Vec<GatedTag>, f64, f64) {
+    gate_tags_for_graph(levels, epa, pyramid, core_tags, config, query_text, None, &[])
+}
+
+/// P3（上游 9aa1f67）：隐式种子等比例缩放——非 core/lexical 的最大权重不超过
+/// 显式（core/lexical 且图内）最大权重的 0.35 倍。
+fn scale_implicit_seeds(gated: &mut [GatedTag], eligible: Option<&HashMap<i64, usize>>) {
+    let explicit_max = gated
+        .iter()
+        .filter(|tag| (tag.is_core || tag.lexical)
+            && eligible.map_or(true, |ids| ids.contains_key(&tag.id)))
+        .map(|tag| tag.weight)
+        .fold(0.0, f64::max);
+    let implicit_max = gated
+        .iter()
+        .filter(|tag| !tag.is_core && !tag.lexical)
+        .map(|tag| tag.weight)
+        .fold(0.0, f64::max);
+    if explicit_max > 0.0 && implicit_max > 0.35 * explicit_max {
+        let scale = 0.35 * explicit_max / implicit_max;
+        for tag in gated {
+            if !tag.is_core && !tag.lexical {
+                tag.weight *= scale;
+            }
+        }
+    }
+}
+
+/// P3（上游 9aa1f67）：显式名字对 SQL 原件解析，绝不发明图节点。硬幽灵可绑定
+/// 真 Tag；软幽灵与未知幽灵保持 fusion-only。
+fn resolve_core_seeds(
+    connection: &Connection,
+    core_tags: &[String],
+    ghost_tags: &[GhostTagInput],
+    eligible: &HashMap<i64, usize>,
+    pool: &mut TagVectorPool,
+    dimension: usize,
+) -> std::result::Result<Vec<(i64, String)>, String> {
+    let mut statement = connection
+        .prepare("SELECT id, name FROM tags WHERE lower(name) = lower(?1) LIMIT 1")
+        .map_err(|error| format!("prepare Memo core seed query failed: {}", error))?;
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+    for name in core_tags
+        .iter()
+        .map(String::as_str)
+        .chain(
+            ghost_tags
+                .iter()
+                .filter(|tag| tag.is_core)
+                .map(|tag| tag.name.as_str()),
+        )
+    {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let row = statement.query_row(rusqlite::params![name], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        });
+        match row {
+            Ok((id, name)) if id > 0 && eligible.contains_key(&id) && seen.insert(id) => {
+                resolved.push((id, name));
+            }
+            Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(error) => return Err(format!("query Memo core seed failed: {}", error)),
+        }
+    }
+    let ids: Vec<i64> = resolved.iter().map(|tag| tag.0).collect();
+    ensure_tag_vectors_loaded(connection, pool, &ids, dimension)?;
+    resolved.retain(|(id, _)| pool.get(id).is_some_and(|vector| magnitude(&vector) > 1e-12));
+    Ok(resolved)
+}
+
+fn gate_tags_for_graph(
+    levels: &[Vec<PyramidTagWork>],
+    epa: &EpaOutput,
+    pyramid: &PyramidOutput,
+    core_tags: &[String],
+    config: &PipelineConfig,
+    query_text: &str,
+    eligible: Option<&HashMap<i64, usize>>,
+    explicit_cores: &[(i64, String)],
 ) -> (Vec<GatedTag>, f64, f64) {
     let activation_min = range_value(&config.activation_multiplier, 0, 0.5);
     let activation_max = range_value(&config.activation_multiplier, 1, 1.5);
@@ -802,7 +985,11 @@ fn gate_tags(
     let core_min = range_value(&config.core_boost_range, 0, 1.2);
     let core_max = range_value(&config.core_boost_range, 1, 1.4);
     let dynamic_core_boost = core_min + core_metric * (core_max - core_min);
-    let core_names: HashSet<String> = core_tags.iter().map(|name| name.to_lowercase()).collect();
+    let core_names: HashSet<String> = core_tags
+        .iter()
+        .map(|name| name.trim().to_lowercase())
+        .chain(explicit_cores.iter().map(|(_, name)| name.to_lowercase()))
+        .collect();
     let world = epa
         .dominant_axes
         .first()
@@ -817,11 +1004,78 @@ fn gate_tags(
     let mut seen = HashSet::new();
     let mut gated = Vec::new();
     for (level, tags) in levels.iter().enumerate() {
+        let maximum = tags
+            .iter()
+            .map(|tag| positive(tag.contribution))
+            .fold(0.0, f64::max);
+        let threshold = (maximum * config.seed_contribution_ratio.clamp(0.0, 1.0))
+            .max(config.seed_contribution_floor.max(0.0));
+        let dominant = tags
+            .first()
+            .filter(|tag| tag.contribution.powi(2) > 0.85 && tag.similarity > 0.0);
+        // 至多两个冗余方向借幅，总量有界；原始正交贡献与残差不动。
+        let mut redundancy_left = dominant.map_or(0.0, |tag| 0.3 * tag.contribution);
+        let mut redundancy_slots = 2usize;
         for tag in tags {
-            if tag.id <= 0 || !seen.insert(tag.id) {
+            let is_core = core_names.contains(&tag.name.to_lowercase());
+            if tag.id <= 0 || seen.contains(&tag.id) {
                 continue;
             }
-            let is_core = core_names.contains(&tag.name.to_lowercase());
+            let grounding = lexical_grounding(query_text, &tag.name);
+            let lexical = grounding >= 0.5;
+            // 只有已独立支撑的同伴能借幅；低贡献别名不能递归赞助别的别名。
+            let sponsor = tags
+                .iter()
+                .filter(|peer| peer.id != tag.id
+                    && peer.contribution >= threshold
+                    && peer.similarity > 0.0)
+                .filter_map(|peer| {
+                    let tightness = clamp01(cosine(&peer.vector, &tag.vector));
+                    (tightness >= 0.80).then_some(peer.contribution * tightness)
+                })
+                .fold(0.0, f64::max);
+            let alias = tag.similarity >= 0.20 && sponsor > 0.0;
+            let collapsed_redundant = !is_core
+                && !lexical
+                && tag.contribution < 1e-6
+                && tag.similarity >= 0.75
+                && dominant.is_some_and(|first| first.id != tag.id
+                    && cosine(&first.vector, &tag.vector) >= 0.90);
+            let redundant = collapsed_redundant && redundancy_slots > 0;
+            if collapsed_redundant && !redundant {
+                continue;
+            }
+            let redundancy_floor = if redundant {
+                let first = dominant.unwrap();
+                let borrowed = (0.15 * first.contribution
+                    * clamp01(tag.similarity / first.similarity)
+                    * clamp01(cosine(&first.vector, &tag.vector)))
+                .min(redundancy_left);
+                redundancy_left -= borrowed;
+                redundancy_slots -= 1;
+                borrowed
+            } else {
+                0.0
+            };
+            if !is_core && !lexical && !alias
+                && (tag.contribution < threshold || tag.similarity <= 0.0)
+            {
+                continue;
+            }
+            let effective_contribution = if lexical {
+                // 字面焦点独立点燃，不受别名策略压低。
+                tag.contribution.max(0.6 * sponsor).max(0.6 * maximum)
+            } else if redundant {
+                tag.contribution.max(redundancy_floor)
+            } else if alias {
+                tag.contribution.max(0.6 * sponsor * tag.similarity.clamp(0.2, 1.0))
+            } else {
+                tag.contribution
+            };
+            seen.insert(tag.id);
+            // Cosine zero is a measured orthogonal relationship, not a
+            // missing-score sentinel. Every pyramid candidate is measured
+            // against its SQL original before entering this gate.
             let relevance = if tag.similarity != 0.0 {
                 tag.similarity
             } else {
@@ -833,7 +1087,10 @@ fn gate_tags(
                 1.0
             };
             let mut language_gain = 1.0;
-            if config.lang_confidence_enabled && technical_name(&tag.name, true) && !technical_world
+            if !lexical
+                && config.lang_confidence_enabled
+                && technical_name(&tag.name, true)
+                && !technical_world
             {
                 let penalty = if world == "Unknown" {
                     config.lang_penalty_unknown
@@ -847,18 +1104,56 @@ fn gate_tags(
                     penalty
                 };
             }
-            let layer_gain = config.layer_decay.clamp(0.0, 1.0).powi(level as i32);
-            let weight = positive(tag.contribution) * layer_gain * language_gain * core_gain;
+            let decay = config.layer_decay.clamp(0.0, 1.0).powi(level as i32);
+            // 恢复（绝不放大）被接纳层里的强残差焦点。
+            let independent_support = clamp01(effective_contribution / maximum.max(1e-12));
+            let layer_gain = if lexical {
+                1.0
+            } else {
+                decay + (1.0 - decay) * independent_support
+            };
+            let raw_weight = positive(effective_contribution)
+                * layer_gain
+                * language_gain
+                * core_gain
+                * if lexical && !is_core {
+                    1.6
+                } else {
+                    1.0
+                };
+            let weight = if is_core {
+                raw_weight
+            } else {
+                raw_weight.min(1.0)
+            };
             if weight > 0.0 {
                 gated.push(GatedTag {
                     id: tag.id,
                     name: tag.name.clone(),
                     weight,
                     is_core,
+                    lexical,
                 });
             }
         }
     }
+    // 显式焦点有单位基础幅值，独立于 ANN 召回与 Gram-Schmidt 贡献。
+    // 促升既有 ID，绝不复制。
+    for (id, name) in explicit_cores {
+        if let Some(tag) = gated.iter_mut().find(|tag| tag.id == *id) {
+            tag.is_core = true;
+            tag.weight = tag.weight.max(dynamic_core_boost);
+        } else {
+            gated.push(GatedTag {
+                id: *id,
+                name: name.clone(),
+                weight: dynamic_core_boost,
+                is_core: true,
+                lexical: false,
+            });
+        }
+    }
+    scale_implicit_seeds(&mut gated, eligible);
     (gated, effective_boost.clamp(0.0, 1.0), dynamic_core_boost)
 }
 
@@ -913,6 +1208,7 @@ fn fuse_observation(
                 name: seed.name.clone(),
                 weight: seed.weight.max(node.energy),
                 is_core: seed.is_core,
+                lexical: seed.lexical,
             });
         } else {
             emergent.push(GatedTag {
@@ -920,6 +1216,7 @@ fn fuse_observation(
                 name: String::new(),
                 weight: node.energy,
                 is_core: false,
+                lexical: false,
             });
         }
     }
@@ -948,7 +1245,7 @@ fn fuse_observation(
         .fold(0.0, f64::max)
         .max(if merged.is_empty() { 1.0 } else { 0.0 });
 
-    // 字符串 Core 不参与本轮 Spike 扩散；传播完成后按名称从数据库补入
+    // 图内有效 Core 已提前作为 Spike 起点；此处保留未入图 Core 的融合回退。
     let mut present_names: HashSet<String> = merged
         .iter()
         .filter(|tag| !tag.name.is_empty())
@@ -975,6 +1272,7 @@ fn fuse_observation(
                 name,
                 weight: max_base_weight * dynamic_core_boost,
                 is_core: true,
+                lexical: false,
             });
             supplemented_core_count += 1;
         }
@@ -1018,6 +1316,14 @@ fn fuse_observation(
     let mut ghost_id = -1i64;
     let mut accepted_ghosts = 0usize;
     for ghost in ghost_tags {
+        // P3（上游 9aa1f67）：绑定到真 core 种子的硬幽灵已贡献其 SQL 向量，跳过。
+        if ghost.is_core
+            && gated_tags
+                .iter()
+                .any(|tag| tag.is_core && tag.name.eq_ignore_ascii_case(ghost.name.trim()))
+        {
+            continue;
+        }
         if ghost.vector.len() != dimension || magnitude(&ghost.vector) <= 1e-12 {
             continue;
         }
@@ -1173,8 +1479,53 @@ fn apply_transport(artifact: &NativeArtifact, input: &[f64], output: &mut [f64])
     }
 }
 
-fn l1_distance(left: &[f64], right: &[f64]) -> f64 {
-    left.iter().zip(right).map(|(a, b)| (a - b).abs()).sum()
+/// P3（上游 9aa1f67）：`apply_transport` 的双场单趟版——一次 CSR 遍历同时产出
+/// 两场。每个输出位置收到的加法与两次独立遍历完全同序，各场保留自己的零质量跳过。
+fn apply_transport_pair(
+    artifact: &NativeArtifact,
+    local: &[f64],
+    transfer: &[f64],
+    local_output: &mut [f64],
+    transfer_output: &mut [f64],
+) {
+    local_output.fill(0.0);
+    transfer_output.fill(0.0);
+    for source in 0..artifact.node_ids.len() {
+        let local_mass = local[source];
+        let transfer_mass = transfer[source];
+        let local_active = local_mass != 0.0;
+        let transfer_active = transfer_mass != 0.0;
+        if !local_active && !transfer_active {
+            continue;
+        }
+        for cursor in artifact.row_offsets[source]..artifact.row_offsets[source + 1] {
+            let weight = positive(artifact.weights[cursor]);
+            let target = artifact.targets[cursor];
+            if local_active {
+                local_output[target] += local_mass * weight;
+            }
+            if transfer_active {
+                transfer_output[target] += transfer_mass * weight;
+            }
+        }
+    }
+}
+
+/// P3（上游 9aa1f67）：`next = (1 - alpha) * source + alpha * propagated`，单趟同时
+/// 累计对 `current` 的 L1 变化——算术与索引序和「先更新再求非负项 L1 和」一致。
+fn relax_field(
+    source: &[f64],
+    propagated: &[f64],
+    alpha: f64,
+    current: &[f64],
+    next: &mut [f64],
+) -> f64 {
+    let mut residual = 0.0;
+    for index in 0..source.len() {
+        next[index] = (1.0 - alpha) * source[index] + alpha * propagated[index];
+        residual += (next[index] - current[index]).abs();
+    }
+    residual
 }
 
 fn field_mass(field: &[f64]) -> f64 {
@@ -1328,8 +1679,20 @@ fn project_basin_fields(
                 continue;
             };
             projected_mass += mass;
+            // P3（上游 9aa1f67）：传输已经惩罚过枢纽。这里只做温和的残差投影折扣，
+            // 保留观测到的 query core 不动。
+            let hub_ratio = if artifact.max_inbound > 0.0 {
+                positive(artifact.inbound.get(id).copied().unwrap_or(0.0)) / artifact.max_inbound
+            } else {
+                0.0
+            };
+            let projection_gain = if river_ids.contains(id) {
+                1.0
+            } else {
+                1.0 / (1.0 + hub_ratio.sqrt())
+            };
             for (out, value) in outputs[field].iter_mut().zip(vector.iter()) {
-                *out += *value as f64 * mass;
+                *out += *value as f64 * mass * projection_gain;
             }
         }
         if projected_mass > 0.0 {
@@ -1409,23 +1772,34 @@ fn solve_dual_fields(
 
     for iteration in 1..=config.field_max_iterations.max(1) {
         iterations = iteration;
-        if !local_converged {
+        // P3（上游 9aa1f67）：两场独立；双场都在动时一趟 CSR 服务两场。
+        if !local_converged && !transfer_converged {
+            apply_transport_pair(
+                artifact,
+                &local,
+                &transfer,
+                &mut propagated_local,
+                &mut propagated_transfer,
+            );
+        } else if !local_converged {
             apply_transport(artifact, &local, &mut propagated_local);
-            for index in 0..source.len() {
-                next_local[index] =
-                    (1.0 - local_alpha) * source[index] + local_alpha * propagated_local[index];
-            }
-            local_residual = l1_distance(&next_local, &local);
+        } else if !transfer_converged {
+            apply_transport(artifact, &transfer, &mut propagated_transfer);
+        }
+        if !local_converged {
+            local_residual =
+                relax_field(&source, &propagated_local, local_alpha, &local, &mut next_local);
             local_converged = local_residual <= config.local_tolerance.max(1e-15);
             std::mem::swap(&mut local, &mut next_local);
         }
         if !transfer_converged {
-            apply_transport(artifact, &transfer, &mut propagated_transfer);
-            for index in 0..source.len() {
-                next_transfer[index] =
-                    (1.0 - transfer_alpha) * source[index] + transfer_alpha * propagated_transfer[index];
-            }
-            transfer_residual = l1_distance(&next_transfer, &transfer);
+            transfer_residual = relax_field(
+                &source,
+                &propagated_transfer,
+                transfer_alpha,
+                &transfer,
+                &mut next_transfer,
+            );
             transfer_converged = transfer_residual <= config.transfer_tolerance.max(1e-15);
             std::mem::swap(&mut transfer, &mut next_transfer);
         }
@@ -1513,6 +1887,9 @@ struct PipelineDiagnostics {
     fusion_ms: f64,
     total_ms: f64,
     seed_nodes: usize,
+    /// P3（上游 9aa1f67）：路由残差数与「尾部残差是否追加」。
+    routing_residual_count: usize,
+    routing_tail_appended: bool,
     observation_cached: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     observation_cache_error: Option<String>,
@@ -1557,6 +1934,10 @@ struct PipelineMetadataOutput {
     matched_tags: Vec<String>,
     core_tags_matched: Vec<String>,
     effective_tag_boost: f64,
+    // TODO(P3)：上游 9aa1f67 在这里还有 `propagation_parameters: SenseConfig`
+    // （= input.config.spike_routing 的回显）。我方 SenseConfig 尚无 Serialize
+    // derive（memo_sensing.rs 属 sensing 队友写域）——待其补 derive 后加这一行
+    // 字段即可；差分对账器不比对该键，数值验收无影响。
     diagnostics: PipelineDiagnostics,
 }
 
@@ -1629,12 +2010,31 @@ fn run_pipeline(
         dimensions,
         &input.config,
         &mut tag_vectors,
+        Some(&artifact.node_index),
     )?;
     let pyramid_ms = pyramid_started.elapsed().as_secs_f64() * 1000.0;
 
     let gating_started = Instant::now();
-    let (gated_tags, effective_tag_boost, dynamic_core_boost) =
-        gate_tags(&level_tags, &epa, &pyramid, &input.core_tags, &input.config);
+    // P3（上游 9aa1f67）：显式 Core/硬幽灵先对 SQL 原件解析成图内种子。
+    let explicit_cores = resolve_core_seeds(
+        &connection,
+        &input.core_tags,
+        &input.ghost_tags,
+        &artifact.node_index,
+        &mut tag_vectors,
+        dimensions,
+    )?;
+    let (gated_tags, effective_tag_boost, dynamic_core_boost) = gate_tags_for_graph(
+        &level_tags,
+        &epa,
+        &pyramid,
+        &input.core_tags,
+        &input.config,
+        &input.query_text,
+        Some(&artifact.node_index),
+        &explicit_cores,
+    );
+    // 空 Pyramid 也能点燃合法的显式 Core。图外/未知 Core 与幽灵保留 fusion-only 回退。
     let seeds: Vec<SenseSeed> = gated_tags
         .iter()
         .map(|tag| SenseSeed {
@@ -1642,6 +2042,8 @@ fn run_pipeline(
             energy: tag.weight,
             source_type: if tag.is_core {
                 "core".to_string()
+            } else if tag.lexical {
+                "lexical_seed".to_string()
             } else {
                 "seed".to_string()
             },
@@ -1658,6 +2060,9 @@ fn run_pipeline(
             seed_levels.entry(tag.id).or_insert(level);
         }
     }
+    // P3（上游 9aa1f67）：路由残差账——层数之外的即尾部追加了那条。
+    let routing_residual_count = residuals.len();
+    let routing_tail_appended = residuals.len() > level_tags.len();
     let mut wormholes =
         DynamicWormholeContext::new(&connection, &mut tag_vectors, residuals, seed_levels);
     for (layer, tags) in level_tags.iter().enumerate() {
@@ -1781,6 +2186,8 @@ fn run_pipeline(
             fusion_ms,
             total_ms: total_started.elapsed().as_secs_f64() * 1000.0,
             seed_nodes,
+            routing_residual_count,
+            routing_tail_appended,
             observation_cached: true,
             observation_cache_error: None,
             dual_field: dual_field_diagnostics,
@@ -2090,12 +2497,13 @@ mod similarity_mode_tests {
     use super::*;
 
     #[test]
-    fn similarity_mode_config_defaults_to_legacy_and_rejects_unknown() {
+    fn similarity_mode_config_defaults_to_cosine_and_rejects_unknown() {
+        // P3 起缺省翻为 cosine（对齐上游 2.0 无条件 cosine）；legacy 为显式兼容档。
         let default: PipelineConfig = serde_json::from_str("{}").unwrap();
         assert!(default.similarity_mode.is_none());
         assert_eq!(
             resolve_similarity_mode(default.similarity_mode),
-            SimilarityMode::Legacy
+            SimilarityMode::Cosine
         );
         let cosine: PipelineConfig =
             serde_json::from_value(serde_json::json!({ "similarityMode": "cosine" })).unwrap();
@@ -2150,5 +2558,591 @@ mod similarity_mode_tests {
             pyramid_similarity(SimilarityMode::Cosine, Some(2.0), &residual, &[1.0f32]),
             0.0
         );
+    }
+}
+
+#[cfg(test)]
+mod stoploss_gate_tests {
+    use super::*;
+
+    fn epa() -> EpaOutput {
+        EpaOutput {
+            logic_depth: 0.5,
+            entropy: 0.5,
+            resonance: 0.0,
+            dominant_axes: vec![],
+            bridges: vec![],
+            basis_count: 0,
+            cache_available: false,
+        }
+    }
+
+    #[test]
+    fn contribution_tails_are_removed_and_residual_focus_keeps_weight() {
+        let make = |id, contribution, similarity| PyramidTagWork {
+            id,
+            name: format!("标签{id}"),
+            vector: if id == 2 || id == 4 {
+                vec![0.0_f32, 1.0]
+            } else {
+                vec![1.0_f32, 0.0]
+            },
+            similarity,
+            contribution,
+            handshake_magnitude: 0.0,
+        };
+        let levels = vec![
+            vec![make(1, 0.66, 0.66), make(2, 0.02, 0.6)],
+            vec![
+                make(3, 0.2, 0.32),
+                make(4, 0.01, 0.1),
+                make(5, 0.1, -0.1),
+            ],
+        ];
+        let pyramid = PyramidOutput {
+            levels: vec![],
+            total_explained_energy: 0.68,
+            features: PyramidFeatures::default(),
+        };
+        let (gated, _, _) = gate_tags(
+            &levels,
+            &epa(),
+            &pyramid,
+            &[],
+            &PipelineConfig::default(),
+            "",
+        );
+        assert_eq!(gated.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 3]);
+        assert!((gated[1].weight - 0.2).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod lexical_patch_tests {
+    use super::*;
+
+    fn epa() -> EpaOutput {
+        EpaOutput {
+            logic_depth: 0.5,
+            entropy: 0.5,
+            resonance: 0.0,
+            dominant_axes: vec![],
+            bridges: vec![],
+            basis_count: 0,
+            cache_available: false,
+        }
+    }
+
+    #[test]
+    fn lexical_grounding_respects_ascii_boundaries_and_mixed_names() {
+        let query = "小冰，还记得那个 Lunarium 星之旅吗？";
+        for name in ["Lunarium星之旅", "Lunarium", "星之旅"] {
+            assert_eq!(lexical_grounding(query, name), 1.0);
+        }
+        assert_eq!(lexical_grounding(query, "AI自编自演Galgame"), 0.0);
+        assert_eq!(lexical_grounding("chair", "AI"), 0.0);
+        assert_eq!(lexical_grounding("", "Lunarium"), 0.0);
+        assert_eq!(lexical_grounding("测试", ""), 0.0);
+    }
+
+    #[test]
+    fn grounded_residual_and_short_alias_survive_and_ignite_without_lowering_threshold() {
+        let make = |id, name: &str, contribution, similarity, vector: Vec<f32>| PyramidTagWork {
+            id,
+            name: name.into(),
+            contribution,
+            similarity,
+            vector,
+            handshake_magnitude: 0.0,
+        };
+        // 现实的层归一化系数；短别名在 Gram-Schmidt 下失去独立分量但保留身份。
+        let levels = vec![
+            vec![make(1, "AI自编自演Galgame", 0.6604, 0.66, vec![1.0, 0.0])],
+            vec![
+                make(2, "Lunarium星之旅", 0.2109 / 0.6648, 0.32, vec![0.0, 1.0]),
+                make(3, "Lunarium", 0.0288 / 0.6648, 0.23, vec![0.0, 1.0]),
+            ],
+        ];
+        let pyramid = PyramidOutput {
+            levels: vec![],
+            total_explained_energy: 0.68,
+            features: PyramidFeatures::default(),
+        };
+        let (gated, _, _) = gate_tags(
+            &levels,
+            &epa(),
+            &pyramid,
+            &[],
+            &PipelineConfig::default(),
+            "Lunarium 星之旅有问题",
+        );
+        let focus = gated.iter().find(|t| t.id == 2).unwrap();
+        let alias = gated.iter().find(|t| t.id == 3).unwrap();
+        let implicit = gated.iter().find(|t| t.id == 1).unwrap();
+        assert!(focus.lexical && alias.lexical);
+        assert!(focus.weight > 0.5);
+        assert!(alias.weight > 0.3); // ASCII 语言罚不得压低字面名
+        assert!(implicit.weight <= focus.weight * 0.35);
+        let graph = crate::rivermemo_topology_v3::NativeArtifact {
+            node_ids: vec![1, 2, 3, 4],
+            node_index: [(1, 0), (2, 1), (3, 2), (4, 3)].into_iter().collect(),
+            row_offsets: vec![0, 0, 1, 1, 1],
+            targets: vec![3],
+            weights: vec![0.1],
+            ..crate::rivermemo_topology_v3::NativeArtifact::default()
+        }
+        .prepared();
+        let output = sense_typed(
+            &graph,
+            "lexical-test",
+            SenseInput {
+                query_id: None,
+                seeds: gated
+                    .iter()
+                    .map(|t| SenseSeed {
+                        id: t.id,
+                        energy: t.weight,
+                        source_type: if t.lexical { "lexical_seed" } else { "seed" }.into(),
+                    })
+                    .collect(),
+                config: SenseConfig::default(),
+            },
+        )
+        .unwrap();
+        assert!(output.edges.iter().any(|e| e.source_id == 2 && e.target_id == 4));
+        assert_eq!(
+            output.nodes.iter().find(|n| n.id == 2).unwrap().source_type,
+            "lexical_seed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod v21_seed_tests {
+    use super::*;
+
+    fn tag(id: i64, weight: f64, lexical: bool) -> GatedTag {
+        GatedTag {
+            id,
+            name: id.to_string(),
+            weight,
+            lexical,
+            is_core: false,
+        }
+    }
+
+    fn epa() -> EpaOutput {
+        EpaOutput {
+            logic_depth: 0.5,
+            entropy: 0.5,
+            resonance: 0.0,
+            dominant_axes: vec![],
+            bridges: vec![],
+            basis_count: 0,
+            cache_available: false,
+        }
+    }
+
+    #[test]
+    fn proportional_scaling_preserves_ratios_and_ignores_missing_explicit_node() {
+        let original = vec![tag(1, 0.4, true), tag(2, 0.8, false), tag(3, 0.4, false)];
+        let mut accepted = original.clone();
+        scale_implicit_seeds(&mut accepted, Some(&HashMap::from([(1, 0)])));
+        assert!((accepted[1].weight - 0.14).abs() < 1e-12);
+        assert!((accepted[1].weight / accepted[2].weight - 2.0).abs() < 1e-12);
+        let mut missing = original.clone();
+        scale_implicit_seeds(&mut missing, Some(&HashMap::from([(2, 0), (3, 1)])));
+        assert_eq!(
+            missing.iter().map(|t| t.weight).collect::<Vec<_>>(),
+            vec![0.4, 0.8, 0.4]
+        );
+    }
+
+    #[test]
+    fn sponsorship_has_gradient_and_collapsed_rescue_is_bounded_without_rewriting_energy() {
+        let make = |id, similarity, contribution| PyramidTagWork {
+            id,
+            name: format!("标签{id}"),
+            similarity,
+            contribution,
+            vector: vec![1.0, 0.0],
+            handshake_magnitude: 0.0,
+        };
+        let pyramid = PyramidOutput {
+            levels: vec![],
+            total_explained_energy: 1.0,
+            features: PyramidFeatures::default(),
+        };
+        let config = PipelineConfig::default();
+        let levels = vec![vec![
+            make(1, 0.8, 0.8),
+            make(2, 0.7, 0.01),
+            make(3, 0.4, 0.01),
+        ]];
+        let (gated, _, _) = gate_tags(&levels, &epa(), &pyramid, &[], &config, "");
+        assert!(gated[1].weight > gated[2].weight);
+        assert!((gated[1].weight / gated[2].weight - 1.75).abs() < 1e-12);
+        let levels = vec![vec![
+            make(1, 0.96, 0.96),
+            make(2, 0.90, 1e-9),
+            make(3, 0.80, 1e-10),
+            make(4, 0.76, 1e-11),
+        ]];
+        let (gated, _, _) = gate_tags(&levels, &epa(), &pyramid, &[], &config, "");
+        assert_eq!(gated.len(), 3);
+        assert!(gated[1].weight > gated[2].weight);
+        assert!(gated[1..].iter().map(|t| t.weight).sum::<f64>() <= 0.3 * 0.96);
+        assert!(gated.iter().all(|t| !t.lexical && !t.is_core));
+        assert_eq!(levels[0][1].contribution, 1e-9);
+        assert_eq!(pyramid.total_explained_energy, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod v22_residual_tests {
+    use super::*;
+    use crate::rivermemo_topology_v3::NativeArtifact;
+
+    fn test_index(dimensions: usize, capacity: usize) -> Index {
+        let index = Index::new(&usearch::IndexOptions {
+            dimensions,
+            metric: usearch::MetricKind::L2sq,
+            quantization: usearch::ScalarKind::F32,
+            connectivity: 16,
+            expansion_add: 128,
+            expansion_search: 64,
+            multi: false,
+        })
+        .unwrap();
+        index.reserve(capacity).unwrap();
+        index
+    }
+
+    fn fixture() -> (Connection, Index) {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY,name TEXT,vector BLOB);")
+            .unwrap();
+        let index = test_index(3, 16);
+        for (id, v) in [
+            (1, [1.0_f32, 0.0, 0.0]),
+            (2, [0.0, 1.0, 0.0]),
+            (3, [0.0, 0.0, 1.0]),
+            (99, [3.0, 2.0, 1.0]),
+        ] {
+            let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+            db.execute(
+                "INSERT INTO tags VALUES (?1,?2,?3)",
+                rusqlite::params![id, format!("tag{id}"), bytes],
+            )
+            .unwrap();
+            if id != 3 {
+                index.add(id as u64, &v).unwrap();
+            }
+        }
+        db.execute_batch("BEGIN").unwrap();
+        (db, index)
+    }
+
+    #[test]
+    fn graph_external_tag_is_filtered_before_projection_but_isolated_member_survives() {
+        let (db, index) = fixture();
+        // 我方缺省 dynamic_wormholes=false（上游 true），显式开闸对齐上游测试前提。
+        let config = PipelineConfig {
+            max_levels: 1,
+            pyramid_top_k: 3,
+            spike_routing: SenseConfig {
+                dynamic_wormholes: true,
+                ..SenseConfig::default()
+            },
+            ..PipelineConfig::default()
+        };
+        let eligible = HashMap::from([(1, 0)]);
+        let (p, tags, residuals) = analyze_pyramid(
+            &index,
+            &db,
+            &[3.0, 2.0, 1.0],
+            3,
+            &config,
+            &mut TagVectorPool::new(),
+            Some(&eligible),
+        )
+        .unwrap();
+        assert_eq!(tags[0].iter().map(|t| t.id).collect::<Vec<_>>(), vec![1]);
+        assert!((p.total_explained_energy - 9.0 / 14.0).abs() < 1e-6);
+        assert_eq!(residuals.len(), 2);
+        assert_eq!(residuals[1], vec![0.0, 2.0, 1.0]);
+        let empty = HashMap::new();
+        let (p, tags, residuals) = analyze_pyramid(
+            &index,
+            &db,
+            &[3.0, 2.0, 1.0],
+            3,
+            &config,
+            &mut TagVectorPool::new(),
+            Some(&empty),
+        )
+        .unwrap();
+        assert!(p.levels.is_empty() && tags.is_empty() && residuals.is_empty());
+    }
+
+    #[test]
+    fn final_tail_routes_single_and_last_accepted_layer_without_extra_seeds() {
+        let (db, _index) = fixture();
+        // 把图外 top 命中从索引移除做单命中层测试。SQL 仍是向量权威；
+        // 独立索引只含两条种子轴。
+        let axes = test_index(3, 16);
+        axes.add(1, &[1.0, 0.0, 0.0]).unwrap();
+        axes.add(2, &[0.0, 1.0, 0.0]).unwrap();
+        let graph = NativeArtifact {
+            node_ids: vec![1, 2, 3],
+            node_index: HashMap::from([(1, 0), (2, 1), (3, 2)]),
+            row_offsets: vec![0, 1, 2, 2],
+            targets: vec![2, 2],
+            weights: vec![0.2, 0.2],
+            ..NativeArtifact::default()
+        }
+        .prepared();
+        for depth in [1, 2] {
+            let config = PipelineConfig {
+                max_levels: depth,
+                pyramid_top_k: 1,
+                spike_routing: SenseConfig {
+                    dynamic_wormholes: true,
+                    ..SenseConfig::default()
+                },
+                ..PipelineConfig::default()
+            };
+            let mut pool = TagVectorPool::new();
+            let (p, tags, residuals) = analyze_pyramid(
+                &axes,
+                &db,
+                &[3.0, 2.0, 1.0],
+                3,
+                &config,
+                &mut pool,
+                Some(&graph.node_index),
+            )
+            .unwrap();
+            assert_eq!(p.levels.len(), depth);
+            assert_eq!(tags.len(), depth);
+            assert_eq!(residuals.len(), depth + 1);
+            let last = tags.last().unwrap()[0].id;
+            let mut ctx =
+                DynamicWormholeContext::new(&db, &mut pool, residuals, HashMap::from([(last, depth - 1)]));
+            let output = sense_with_context(
+                &graph,
+                "tail-test",
+                SenseInput {
+                    query_id: None,
+                    seeds: vec![SenseSeed {
+                        id: last,
+                        energy: 1.0,
+                        source_type: "seed".into(),
+                    }],
+                    config: SenseConfig {
+                        max_safe_hops: 1,
+                        dynamic_wormholes: true,
+                        ..SenseConfig::default()
+                    },
+                },
+                Some(&mut ctx),
+            )
+            .unwrap();
+            assert_eq!(output.diagnostics.accepted_seed_nodes, 1);
+            assert!(output.diagnostics.dynamic_wormhole_candidates > 0);
+            assert_eq!(output.diagnostics.dynamic_wormhole_edges_fired, 1);
+            assert!(output
+                .edges
+                .iter()
+                .all(|e| e.source_id == last && e.target_id == 3));
+        }
+    }
+
+    #[test]
+    fn disabled_tiny_exhausted_and_unaccepted_tails_are_not_appended() {
+        let (db, index) = fixture();
+        let eligible = HashMap::from([(1, 0)]);
+        for (enabled, query, minimum, expected_layers, expected_residuals) in [
+            (false, [3.0, 2.0, 1.0], 0.03, 1, 0),
+            (true, [10.0, 1.0, 0.0], 0.03, 1, 1),
+            (true, [1.0, 0.0, 0.0], 0.03, 1, 1),
+            (true, [3.0, 2.0, 1.0], 0.99, 0, 0),
+        ] {
+            let config = PipelineConfig {
+                max_levels: 1,
+                pyramid_top_k: 3,
+                min_layer_explained_energy: minimum,
+                spike_routing: SenseConfig {
+                    dynamic_wormholes: enabled,
+                    ..SenseConfig::default()
+                },
+                ..PipelineConfig::default()
+            };
+            let (p, _, residuals) = analyze_pyramid(
+                &index,
+                &db,
+                &query,
+                3,
+                &config,
+                &mut TagVectorPool::new(),
+                Some(&eligible),
+            )
+            .unwrap();
+            assert_eq!(p.levels.len(), expected_layers);
+            assert_eq!(residuals.len(), expected_residuals);
+        }
+    }
+}
+
+#[cfg(test)]
+mod explicit_core_seed_tests {
+    use super::*;
+
+    fn epa() -> EpaOutput {
+        EpaOutput {
+            logic_depth: 0.0,
+            entropy: 1.0,
+            resonance: 0.0,
+            dominant_axes: vec![],
+            bridges: vec![],
+            basis_count: 0,
+            cache_available: false,
+        }
+    }
+
+    #[test]
+    fn sql_cores_and_hard_anchors_ignite_without_pyramid_but_soft_ghosts_do_not() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY,name TEXT,vector BLOB);")
+            .unwrap();
+        for (id, name, vector) in [
+            (1, "尊界", [1.0_f32, 0.0]),
+            (2, "问界", [0.0, 1.0]),
+            (3, "软标签", [1.0, 1.0]),
+            (4, "图外", [1.0, 0.0]),
+            (5, "坏向量", [0.0, 0.0]),
+        ] {
+            let bytes: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+            db.execute(
+                "INSERT INTO tags VALUES (?1,?2,?3)",
+                rusqlite::params![id, name, bytes],
+            )
+            .unwrap();
+        }
+        let ghost =
+            |name: &str, is_core| GhostTagInput {
+                name: name.into(),
+                vector: vec![1.0, 0.0],
+                is_core,
+            };
+        let ghosts = vec![ghost("问界", true), ghost("软标签", false), ghost("不存在", true)];
+        let cores = vec![" 尊界 ".into(), "尊界".into(), "图外".into(), "坏向量".into()];
+        let graph = crate::rivermemo_topology_v3::NativeArtifact {
+            node_ids: vec![1, 2, 3, 5],
+            node_index: HashMap::from([(1, 0), (2, 1), (3, 2), (5, 3)]),
+            row_offsets: vec![0, 1, 1, 1, 1],
+            targets: vec![2],
+            weights: vec![0.5],
+            ..crate::rivermemo_topology_v3::NativeArtifact::default()
+        }
+        .prepared();
+        let resolved = resolve_core_seeds(
+            &db,
+            &cores,
+            &ghosts,
+            &graph.node_index,
+            &mut TagVectorPool::new(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(resolved, vec![(1, "尊界".into()), (2, "问界".into())]);
+        let pyramid = PyramidOutput {
+            levels: vec![],
+            total_explained_energy: 0.0,
+            features: PyramidFeatures::default(),
+        };
+        let (gated, _, boost) = gate_tags_for_graph(
+            &[],
+            &epa(),
+            &pyramid,
+            &cores,
+            &PipelineConfig::default(),
+            "",
+            Some(&graph.node_index),
+            &resolved,
+        );
+        assert_eq!(gated.len(), 2);
+        assert!(gated.iter().all(|t| t.is_core && t.weight == boost));
+        let observation = sense_typed(
+            &graph,
+            "explicit-core",
+            SenseInput {
+                query_id: None,
+                config: SenseConfig::default(),
+                seeds: gated
+                    .iter()
+                    .map(|t| SenseSeed {
+                        id: t.id,
+                        energy: t.weight,
+                        source_type: "core".into(),
+                    })
+                    .collect(),
+            },
+        )
+        .unwrap();
+        assert_eq!(observation.diagnostics.accepted_seed_nodes, 2);
+        for id in [1, 2] {
+            let node = observation.nodes.iter().find(|n| n.id == id).unwrap();
+            assert_eq!(node.hop, 0);
+            assert_eq!(node.source_type, "core");
+        }
+        assert!(!observation.edges.is_empty());
+        let index = Index::new(&usearch::IndexOptions {
+            dimensions: 2,
+            metric: usearch::MetricKind::L2sq,
+            quantization: usearch::ScalarKind::F32,
+            connectivity: 16,
+            expansion_add: 128,
+            expansion_search: 64,
+            multi: false,
+        })
+        .unwrap();
+        let (_, fusion, _) = fuse_observation(
+            &index,
+            &db,
+            &mut TagVectorPool::new(),
+            &[1.0, 0.0],
+            &observation,
+            &gated,
+            &[],
+            &ghosts[..1],
+            boost,
+            2,
+            0.2,
+            &PipelineConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(fusion.ghost_count, 0);
+
+        let levels = vec![vec![PyramidTagWork {
+            id: 1,
+            name: "尊界".into(),
+            vector: vec![1.0, 0.0],
+            similarity: 0.2,
+            contribution: 0.01,
+            handshake_magnitude: 0.0,
+        }]];
+        let (promoted, _, boost) = gate_tags_for_graph(
+            &levels,
+            &epa(),
+            &pyramid,
+            &cores,
+            &PipelineConfig::default(),
+            "",
+            Some(&graph.node_index),
+            &resolved,
+        );
+        assert_eq!(promoted.len(), 2);
+        assert!(promoted.iter().all(|t| t.is_core && t.weight >= boost));
     }
 }
