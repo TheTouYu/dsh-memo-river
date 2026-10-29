@@ -10,9 +10,8 @@
 //! - wormhole = dynamic || edge_is_wormhole[cursor] || conductance·node_anchor_gain[target] >= 阈值；
 //! - 诊断 6 计数 + DynamicWormholeDiagnostics 工作账。
 //!
-//! ⚠️ 我方缺省 `dynamic_wormholes = false`（上游 true）——生产正在跑本内核，
-//! v9.2 五腿零漂移是硬判据：关 = context 强制 None = 完全旧路径（含边界选择逻辑逐字不变）。
-//! 测试里显式开。
+//! P3.4 起（2026-10-29）缺省 `dynamic_wormholes = true` 对齐上游 174a5e1/9aa1f67
+//! （此前 v9.2 暗上线已随 P3 切真 oracle 基线退役）；生产验收改走 conservative v2.5 差分。
 
 use crate::memo_vector_pool::{ensure_tag_vectors_loaded, TagVectorPool};
 use crate::rivermemo_topology_v3::NativeArtifact;
@@ -62,7 +61,7 @@ pub(crate) struct SenseSeed {
     pub(crate) source_type: String,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct SenseConfig {
     pub(crate) max_safe_hops: usize,
@@ -107,7 +106,7 @@ impl Default for SenseConfig {
             max_output_nodes: 0,
             max_output_edges: 0,
             max_transition_records: 0,
-            dynamic_wormholes: false, // 上游 true；我方暗上线（见模块头）
+            dynamic_wormholes: true, // 对齐上游（P3.4 起，见模块头）
             dynamic_wormhole_threshold: 0.2,
             dynamic_wormhole_slots: 2,
             dynamic_wormhole_max_targets: 4096,
@@ -197,6 +196,15 @@ pub(crate) struct ObservationEdge {
 pub(crate) struct SenseDiagnostics {
     pub(crate) backend: String,
     pub(crate) seed_nodes: usize,
+    // —— 上游 9aa1f67 种子分诊（P3.4 移植）：输入/接收/缺失/无效/重复/最终零跳是六个口径。
+    pub(crate) accepted_seed_nodes: usize,
+    pub(crate) missing_seed_nodes: usize,
+    pub(crate) invalid_seed_nodes: usize,
+    pub(crate) duplicate_seed_nodes: usize,
+    pub(crate) observed_seed_nodes: usize,
+    pub(crate) missing_seed_ids: Vec<i64>,
+    pub(crate) missing_explicit_seed_ids: Vec<i64>,
+    pub(crate) missing_seed_ids_truncated: bool,
     pub(crate) reached_nodes: usize,
     pub(crate) active_edges: usize,
     pub(crate) maximum_node_energy: f64,
@@ -462,14 +470,34 @@ pub(crate) fn sense_with_context(
     let mut edge_flows: HashMap<(usize, usize), EdgeFlow> = HashMap::new();
     let mut parents: HashMap<usize, Parent> = HashMap::new();
 
+    // —— 种子分诊（上游 9aa1f67：missing 与 invalid 分开计，显式缺失单列 64 截断）。
+    let mut missing_seed_nodes = 0usize;
+    let mut duplicate_seed_nodes = 0usize;
+    let mut missing_seed_ids: Vec<i64> = Vec::new();
+    let mut missing_explicit_seed_ids: Vec<i64> = Vec::new();
+    let invalid_seed_nodes = input
+        .seeds
+        .iter()
+        .filter(|s| s.id <= 0 || !s.energy.is_finite() || s.energy <= 0.0)
+        .count();
     for seed in input
         .seeds
         .iter()
-        .filter(|seed| seed.id > 0 && seed.energy > 0.0)
+        .filter(|seed| seed.id > 0 && seed.energy.is_finite() && seed.energy > 0.0)
     {
         let Some(&node_index) = artifact.node_index.get(&seed.id) else {
+            missing_seed_nodes += 1;
+            if missing_seed_ids.len() < 64 {
+                missing_seed_ids.push(seed.id);
+            }
+            if matches!(seed.source_type.as_str(), "core" | "lexical_seed")
+                && missing_explicit_seed_ids.len() < 64
+            {
+                missing_explicit_seed_ids.push(seed.id);
+            }
             continue;
         };
+        duplicate_seed_nodes += usize::from(active.contains_key(&(None, node_index)));
         let energy = positive(seed.energy);
         let source_type = if seed.source_type.is_empty() {
             "seed".to_string()
@@ -500,6 +528,8 @@ pub(crate) fn sense_with_context(
             seed_id: Some(seed.id),
         });
     }
+
+    let accepted_seed_nodes = active.len();
 
     // 空种子是合法的请求级观测：仍允许传播后补入字符串 Core/幽灵节点参与最终融合
     let mut return_flow_suppressed_mass = 0.0;
@@ -907,6 +937,14 @@ pub(crate) fn sense_with_context(
         diagnostics: SenseDiagnostics {
             backend: "rust-shared-memo-runtime".to_string(),
             seed_nodes: input.seeds.len(),
+            accepted_seed_nodes,
+            missing_seed_nodes,
+            invalid_seed_nodes,
+            duplicate_seed_nodes,
+            observed_seed_nodes: nodes.iter().filter(|n| n.hop == 0).count(),
+            missing_seed_ids_truncated: missing_seed_nodes > missing_seed_ids.len(),
+            missing_seed_ids,
+            missing_explicit_seed_ids,
             reached_nodes: nodes.len(),
             active_edges: edges.len(),
             maximum_node_energy,

@@ -241,7 +241,14 @@ impl VexusIndex {
         db_path: String,
         input_json: String,
     ) -> AsyncTask<memo_artifact_builder::NativeMemoArtifactBuildTask> {
-        memo_artifact_builder::rebuild_with_runtime(self.memo_runtime.clone(), db_path, input_json)
+        // dimension 随 Task 传（上游 9aa1f67 同形状）：UnitVectorWorkspace 的
+        // 向量宽度 = 运行时维度，与 tags.vector 字节宽校验。
+        memo_artifact_builder::rebuild_with_runtime(
+            self.memo_runtime.clone(),
+            db_path,
+            input_json,
+            self.dimensions as usize,
+        )
     }
 
     /// 统一 Memo 查询管线（票 08：EPA/金字塔/门控/Spike/融合/双场）。

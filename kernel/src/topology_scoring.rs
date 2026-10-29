@@ -1,26 +1,41 @@
-//! topology_scoring —— 票 09：RiverMemo Topology V3 判分心脏复刻。
-//! 上游位于 rivermemo_topology_v3.rs 的判分段（:69-2857）；此处独立成模块便于
-//! 增量演进，规格来源 = kernel/docs/reverse-topology-v3.md（v1）+ 上游源码逐行对照。
+//! topology_scoring —— P3.5/P3.6：RiverMemo 读出心脏，对齐上游 9aa1f67
+//! conservative-topology-v2.5-confidence-rrf（评分方程换代 + 虫洞 RRF）。
 //!
-//! 刻意差异（均 ULP 级、输出集合等价）：alignments 用 BTreeMap、matched_tags 用
-//! BTreeSet——上游 HashMap/HashSet 迭代序连自身跨进程都不稳定。
+//! 规格来源 = kernel/docs/reverse-conservative-v2.5.md（396 行契约）+
+//! 上游 rust-vexus-lite/src/rivermemo_topology_v3.rs（9aa1f67，3891 行）逐段对照。
+//! 方程：S = clip[0,1](B + P + G + A) 四项独立记账——
+//!   B = 基础分（query 余弦）+ 场共振封顶增益（≤0.03，先 min 后乘 support）；
+//!   P = 路径证据（不乘 Ω），G = 图证据（乘 Ω^γ），P+G ≤ C_T=0.08 共享预算；
+//!   A = 锚绝对激活奖励（smoothstep，上限 C_A=0.10），与同伴无关。
+//! 批级同伴创新奖励取消（retiredControls 11 项回执）。
+//! 虫洞：严格全局准入（双标签双文件 + 第三标签桥 + 异校验和）→
+//! explanation-weighted RRF 融合（K=60），无正贡献时基线位级不动。
+//!
+//! 与上游的刻意差异（均不进判据面）：
+//! - 不移植 CosineCache（位级等价的纯缓存，直接调 cosine）；
+//! - observation 恢复不预填 TagVectorPool、无 database_generation 陈旧检查
+//!   （壳 MemoQueryObservation 无这两个字段；池向量与 DB 同源，数值等价）。
 
+use crate::memo_vector_pool::{ensure_tag_vectors_loaded, TagVectorPool};
 use crate::rivermemo_topology_v3::{
     clamp01, load_artifact_from_runtime, positive, MemoRuntime, NativeArtifact,
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use rayon::prelude::*;
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use rusqlite::{Connection, OpenFlags};
+
+#[path = "rivermemo_wormhole.rs"]
+mod wormhole;
 
 const RESULT_SCHEMA: &str = "rivermemo-topology-v3-native-result-v1";
-const ALGORITHM_VERSION: &str = "rivermemo.topology-v3.1-rust";
+const ALGORITHM_VERSION: &str = "rivermemo.conservative-topology-v2.5-confidence-rrf";
 
 fn open_readonly(path: &str) -> std::result::Result<Connection, String> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -34,24 +49,40 @@ fn open_readonly(path: &str) -> std::result::Result<Connection, String> {
     Ok(connection)
 }
 
-fn cosine_f32(left: &[f32], right: &[f32]) -> f64 {
+fn cosine(left: &[f32], right: &[f32]) -> f64 {
     if left.len() != right.len() || left.is_empty() {
         return 0.0;
     }
-    let mut dot = 0.0f64;
-    let mut na = 0.0f64;
-    let mut nb = 0.0f64;
+    let mut dot = 0.0;
+    let mut left_norm = 0.0;
+    let mut right_norm = 0.0;
     for index in 0..left.len() {
-        dot += left[index] as f64 * right[index] as f64;
-        na += left[index] as f64 * left[index] as f64;
-        nb += right[index] as f64 * right[index] as f64;
+        let a = left[index] as f64;
+        let b = right[index] as f64;
+        dot += a * b;
+        left_norm += a * a;
+        right_norm += b * b;
     }
-    let denominator = na.sqrt() * nb.sqrt();
-    if denominator > 1e-12 {
-        dot / denominator
+    cosine_from_parts(dot, left_norm, right_norm)
+}
+
+fn cosine_from_parts(dot: f64, left_norm: f64, right_norm: f64) -> f64 {
+    if left_norm > 1e-15 && right_norm > 1e-15 {
+        dot / (left_norm.sqrt() * right_norm.sqrt())
     } else {
         0.0
     }
+}
+
+/// The three accumulators in `cosine` are independent, so computing each one
+/// separately in the same index order yields the same bits.
+fn squared_norm(vector: &[f32]) -> f64 {
+    let mut total = 0.0;
+    for value in vector {
+        let value = *value as f64;
+        total += value * value;
+    }
+    total
 }
 
 fn decode_vector(bytes: &[u8], dimension: usize) -> Option<Vec<f32>> {
@@ -100,7 +131,7 @@ struct NativeInput {
     candidates: Vec<CandidateInput>,
     query_state: QueryStateInput,
     #[serde(default)]
-    allowed_file_ids: Vec<i64>,
+    allowed_file_ids: Option<Vec<i64>>,
     #[serde(default)]
     config: NativeConfig,
 }
@@ -178,6 +209,10 @@ struct RiverEdge {
     flow: f64,
     #[serde(default)]
     normalized_flow: f64,
+    #[serde(default)]
+    wormhole: bool,
+    #[serde(default)]
+    immediate_return: bool,
 }
 
 #[derive(Deserialize)]
@@ -190,7 +225,7 @@ struct SourceProvenance {
     source_type: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 struct NativeConfig {
     query_k: usize,
@@ -268,15 +303,15 @@ impl Default for NativeConfig {
             omega_epsilon: 0.02,
             collapsed_threshold: 0.12,
             sparse_threshold: 0.45,
-            semantic_anchor_threshold: 0.8,
+            semantic_anchor_threshold: 0.88,
             semantic_anchor_discount: 0.7,
             specificity_floor: 0.35,
             rarity_floor: 0.15,
             reliability_seed_saturation: 2.0,
             fallback_reliability_cap: 0.5,
-            pure_query_weight: 0.25,
+            pure_query_weight: 0.7,
             pure_local_weight: 0.2,
-            pure_transfer_weight: 0.15,
+            pure_transfer_weight: 0.1,
             topology_bonus_cap: 0.08,
             topology_path_saturation: 0.15,
             conditional_bandwidth: 0.04,
@@ -303,7 +338,8 @@ struct TagData {
     id: i64,
     name: String,
     position: i64,
-    vector: Vec<f32>,
+    /// 同一 Tag 在所有候选曲线间共享同一份解码向量，只做引用计数克隆。
+    vector: Arc<[f32]>,
     chunk_cosine: f64,
 }
 
@@ -312,7 +348,7 @@ struct Curve {
     id: i64,
     file_id: i64,
     tags: Vec<TagData>,
-    chunk_vector: Vec<f32>,
+    chunk_vector: Arc<[f32]>,
     query_score: f64,
     denoised_score: f64,
     local_score: f64,
@@ -325,30 +361,58 @@ struct Curve {
     sources: Vec<String>,
 }
 
+/// Tag rows of one file in position order: (Tag ID, position, name).
+type FileTagRows = HashMap<i64, Vec<(i64, i64, String)>>;
+
 struct CurveLoadOutput {
+    /// Candidate curves without Tags; `attach_tags` adds them after selection.
     curves: Vec<Curve>,
+    relations: FileTagRows,
     chunk_sql_batches: usize,
     file_tag_sql_batches: usize,
 }
 
+/// Attaches each curve's Tags in position order, keeping only Tags whose vector
+/// is in the pool: missing or invalid vector rows are never loaded, so they are
+/// dropped exactly as before.
+fn attach_tags(curves: &mut [Curve], relations: &FileTagRows, tag_vectors: &TagVectorPool) {
+    for curve in curves {
+        let chunk_vector = curve.chunk_vector.clone();
+        curve.tags = relations
+            .get(&curve.file_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, position, name)| {
+                let vector = tag_vectors.get(id)?;
+                Some(TagData {
+                    id: *id,
+                    position: *position,
+                    name: name.clone(),
+                    vector: vector.clone(),
+                    chunk_cosine: clamp01(cosine(vector, &chunk_vector)),
+                })
+            })
+            .collect();
+    }
+}
+
 fn load_curves(
-    db_path: &str,
+    connection: &Connection,
     candidates: &[CandidateInput],
     dimension: usize,
 ) -> std::result::Result<CurveLoadOutput, String> {
     const SQLITE_BATCH_SIZE: usize = 500;
-
-    let connection = open_readonly(db_path)?;
     let candidate_ids: Vec<i64> = candidates
         .iter()
         .map(|candidate| candidate.id)
         .filter(|id| *id > 0)
         .collect();
-    let mut chunks_by_id: HashMap<i64, (i64, Vec<f32>)> =
+    let mut chunks_by_id: HashMap<i64, (i64, Arc<[f32]>)> =
         HashMap::with_capacity(candidate_ids.len());
     let mut unique_file_ids = HashSet::new();
 
     let mut chunk_sql_batches = 0usize;
+    // Chunk 向量按 ID 分块读取；候选池不再产生逐候选 SQL。
     for batch in candidate_ids.chunks(SQLITE_BATCH_SIZE) {
         if batch.is_empty() {
             continue;
@@ -367,14 +431,13 @@ fn load_curves(
             .map_err(|error| format!("prepare batched chunk projection failed: {}", error))?;
         let rows = statement
             .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
+                let bytes: Vec<u8> = row.get(2)?;
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, bytes))
             })
             .map_err(|error| format!("query batched chunk projection failed: {}", error))?;
         for row in rows {
+            // 与旧逐候选实现保持行级故障隔离：单条脏记录不能拖垮
+            // 整个候选批次；prepare/query 级数据库错误仍在上方显式返回。
             let Ok((id, file_id, bytes)) = row else {
                 continue;
             };
@@ -382,13 +445,14 @@ fn load_curves(
                 continue;
             };
             unique_file_ids.insert(file_id);
-            chunks_by_id.insert(id, (file_id, vector));
+            chunks_by_id.insert(id, (file_id, Arc::from(vector)));
         }
     }
 
+    // 同一文件的 Tag 关系只读取一次，供该文件的全部候选 Chunk 复用；
+    // Tag 向量在候选筛选之后才读取（见 attach_tags）。
     let file_ids: Vec<i64> = unique_file_ids.into_iter().collect();
-    let mut tags_by_file: HashMap<i64, Vec<(i64, i64, String, Vec<f32>)>> =
-        HashMap::with_capacity(file_ids.len());
+    let mut relations: FileTagRows = HashMap::with_capacity(file_ids.len());
     let mut file_tag_sql_batches = 0usize;
     for batch in file_ids.chunks(SQLITE_BATCH_SIZE) {
         if batch.is_empty() {
@@ -400,7 +464,7 @@ fn load_curves(
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT ft.file_id, ft.tag_id, COALESCE(ft.position, 0), t.name, t.vector \
+            "SELECT ft.file_id, ft.tag_id, COALESCE(ft.position, 0), t.name \
              FROM file_tags ft JOIN tags t ON t.id = ft.tag_id \
              WHERE ft.file_id IN ({}) \
              ORDER BY ft.file_id, ft.position, ft.tag_id",
@@ -416,45 +480,27 @@ fn load_curves(
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
                 ))
             })
             .map_err(|error| format!("query batched tag curve projection failed: {}", error))?;
         for row in rows {
-            let Ok((file_id, tag_id, position, name, bytes)) = row else {
-                continue;
-            };
-            if let Some(vector) = decode_vector(&bytes, dimension) {
-                tags_by_file
-                    .entry(file_id)
-                    .or_default()
-                    .push((tag_id, position, name, vector));
-            }
+            // 旧实现通过 rows.flatten() 跳过单条 Tag 行解码错误。
+            // 批量化后保留同一容错边界，避免一条脏 Tag 污染整次查询。
+            let Ok((file_id, tag_id, position, name)) = row else { continue };
+            relations.entry(file_id).or_default().push((tag_id, position, name));
         }
     }
 
+    // 恢复原始候选顺序；稳定排序与旧实现完全一致。
     let mut curves = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let Some((file_id, chunk_vector)) = chunks_by_id.get(&candidate.id) else {
             continue;
         };
-        let tags = tags_by_file
-            .get(file_id)
-            .into_iter()
-            .flatten()
-            .map(|(id, position, name, vector)| TagData {
-                id: *id,
-                position: *position,
-                name: name.clone(),
-                vector: vector.clone(),
-                chunk_cosine: clamp01(cosine_f32(vector, chunk_vector)),
-            })
-            .collect();
-
         curves.push(Curve {
             id: candidate.id,
             file_id: *file_id,
-            tags,
+            tags: Vec::new(),
             chunk_vector: chunk_vector.clone(),
             query_score: 0.0,
             denoised_score: 0.0,
@@ -470,83 +516,20 @@ fn load_curves(
     }
     Ok(CurveLoadOutput {
         curves,
+        relations,
         chunk_sql_batches,
         file_tag_sql_batches,
     })
 }
 
-fn load_tag_vectors_by_ids(
-    connection: &Connection,
-    ids: &[i64],
-    dimension: usize,
-) -> std::result::Result<(HashMap<i64, Vec<f32>>, usize), String> {
-    const SQLITE_BATCH_SIZE: usize = 500;
-
-    let mut unique_ids: Vec<i64> = ids
-        .iter()
-        .copied()
-        .filter(|id| *id > 0)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    unique_ids.sort_unstable();
-
-    let mut vectors = HashMap::with_capacity(unique_ids.len());
-    let mut sql_batches = 0usize;
-    for batch in unique_ids.chunks(SQLITE_BATCH_SIZE) {
-        if batch.is_empty() {
-            continue;
-        }
-        sql_batches += 1;
-        let placeholders = std::iter::repeat("?")
-            .take(batch.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!("SELECT id, vector FROM tags WHERE id IN ({})", placeholders);
-        let mut statement = connection
-            .prepare(&sql)
-            .map_err(|error| format!("prepare batched Tag vector read failed: {}", error))?;
-        let rows = statement
-            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(|error| format!("query batched Tag vectors failed: {}", error))?;
-        for row in rows {
-            let Ok((id, bytes)) = row else {
-                continue;
-            };
-            if let Some(vector) = decode_vector(&bytes, dimension) {
-                vectors.insert(id, vector);
-            }
-        }
-    }
-    Ok((vectors, sql_batches))
-}
-
-fn compute_anchor_scores(curves: &mut [Curve], local_domain: &HashSet<i64>) {
-    if local_domain.is_empty() {
-        return;
-    }
-    let max_hits = curves
-        .iter()
-        .map(|curve| {
-            curve
-                .tags
-                .iter()
-                .filter(|tag| local_domain.contains(&tag.id))
-                .count()
-        })
-        .max()
-        .unwrap_or(0);
+/// `hits(curve)`: the curve's Tags with a vector that lie in the local domain.
+fn compute_anchor_scores(curves: &mut [Curve], hits: impl Fn(&Curve) -> usize) {
+    let max_hits = curves.iter().map(&hits).max().unwrap_or(0);
     if max_hits == 0 {
         return;
     }
     for curve in curves {
-        let hits = curve
-            .tags
-            .iter()
-            .filter(|tag| local_domain.contains(&tag.id))
-            .count();
+        let hits = hits(curve);
         curve.anchor_score = curve.anchor_score.max(hits as f64 / max_hits as f64);
     }
 }
@@ -588,7 +571,11 @@ fn select_superset(curves: Vec<Curve>, config: &NativeConfig) -> Vec<Curve> {
         ),
         (
             "transfer_field_knn",
-            source_top(&curves, |curve| curve.transfer_score, config.transfer_field_k),
+            source_top(
+                &curves,
+                |curve| curve.transfer_score,
+                config.transfer_field_k,
+            ),
         ),
         (
             "bm25",
@@ -676,6 +663,7 @@ struct FieldWorkspace {
     local_domain: HashSet<i64>,
     transfer_domain: HashSet<i64>,
     source_ids: HashSet<i64>,
+    active_edges: HashMap<(i64, i64), f64>,
 }
 
 fn normalize_field(entries: &[(i64, f64)]) -> HashMap<i64, f64> {
@@ -713,6 +701,8 @@ struct GeometryOutput {
     segment_count: usize,
     supported_segments: usize,
     transfer_segments: usize,
+    active_segments: usize,
+    skip_segments: usize,
     mean_direction: f64,
     mean_continuity: f64,
     mean_local_potential: f64,
@@ -727,62 +717,113 @@ fn evaluate_path(
 ) -> GeometryOutput {
     let mut output = GeometryOutput::default();
     let mut quality_mass = 0.0;
-    for pair in curve.tags.windows(2) {
-        let current = &pair[0];
-        let next = &pair[1];
-        let local_potential = (workspace.local.get(&current.id).copied().unwrap_or(0.0)
-            * workspace.local.get(&next.id).copied().unwrap_or(0.0))
-        .sqrt();
-        let transfer_potential = (workspace.transfer.get(&current.id).copied().unwrap_or(0.0)
-            * workspace.transfer.get(&next.id).copied().unwrap_or(0.0))
-        .sqrt();
-        let forward = artifact.edge_weight(current.id, next.id);
-        let reverse = artifact.edge_weight(next.id, current.id);
-        let direction = if forward + reverse > 0.0 {
-            clamp01(forward / (forward + reverse))
-        } else {
-            clamp01(config.direction_floor)
-        };
-        let semantic_continuity = clamp01((cosine_f32(&current.vector, &next.vector) + 1.0) / 2.0);
-        let field_continuity = (local_potential.max(transfer_potential)
-            * workspace
-                .local
-                .get(&next.id)
+    let mut used_relations = HashSet::new();
+    for start in 0..curve.tags.len().saturating_sub(1) {
+        let mut best = GeometryOutput::default();
+        let mut best_quality = 0.0;
+        let mut best_relation = None;
+        for span in 1..=2 {
+            let Some(next) = curve.tags.get(start + span) else { continue; };
+            let current = &curve.tags[start];
+            let relation = (current.id.min(next.id), current.id.max(next.id));
+            if current.id == next.id || used_relations.contains(&relation) {
+                continue;
+            }
+            let local_potential = (workspace.local.get(&current.id).copied().unwrap_or(0.0)
+                * workspace.local.get(&next.id).copied().unwrap_or(0.0))
+            .sqrt();
+            let transfer_potential = (workspace.transfer.get(&current.id).copied().unwrap_or(0.0)
+                * workspace.transfer.get(&next.id).copied().unwrap_or(0.0))
+            .sqrt();
+            let forward = artifact.edge_weight(current.id, next.id);
+            let reverse = artifact.edge_weight(next.id, current.id);
+            let direction = if forward + reverse > 0.0 {
+                clamp01(forward / (forward + reverse))
+            } else {
+                clamp01(config.direction_floor)
+            };
+            let semantic_continuity = clamp01((cosine(&current.vector, &next.vector) + 1.0) / 2.0);
+            let field_continuity = (local_potential.max(transfer_potential)
+                * workspace
+                    .local
+                    .get(&next.id)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .max(workspace.transfer.get(&next.id).copied().unwrap_or(0.0)))
+            .sqrt();
+            let continuity = clamp01(0.5 * semantic_continuity + 0.5 * field_continuity);
+            let local_supported = workspace.local_domain.contains(&current.id)
+                && workspace.local_domain.contains(&next.id);
+            let transfer_supported = workspace.transfer_domain.contains(&current.id)
+                && workspace.transfer_domain.contains(&next.id);
+            let supported = (local_supported || transfer_supported)
+                && (forward > 0.0 || reverse > 0.0);
+            let weight_total = (config.local_weight + config.transfer_weight).max(1e-12);
+            let potential = (config.local_weight * local_potential
+                + config.transfer_weight * transfer_potential)
+                / weight_total;
+            let active_forward = workspace
+                .active_edges
+                .get(&(current.id, next.id))
                 .copied()
-                .unwrap_or(0.0)
-                .max(workspace.transfer.get(&next.id).copied().unwrap_or(0.0)))
-        .sqrt();
-        let continuity = clamp01(0.5 * semantic_continuity + 0.5 * field_continuity);
-        let local_supported = workspace.local_domain.contains(&current.id)
-            && workspace.local_domain.contains(&next.id);
-        let transfer_supported = workspace.transfer_domain.contains(&current.id)
-            && workspace.transfer_domain.contains(&next.id);
-        let supported = (local_supported || transfer_supported) && (forward > 0.0 || reverse > 0.0);
-        let weight_total = (config.local_weight + config.transfer_weight).max(1e-12);
-        let potential = (config.local_weight * local_potential
-            + config.transfer_weight * transfer_potential)
-            / weight_total;
-        let quality = if supported {
-            clamp01(
-                potential
-                    * direction.max(config.direction_floor).sqrt()
-                    * continuity.max(0.0).sqrt(),
-            )
-        } else {
-            0.0
-        };
+                .unwrap_or(0.0);
+            let active_reverse = workspace
+                .active_edges
+                .get(&(next.id, current.id))
+                .copied()
+                .unwrap_or(0.0);
+            let active = active_forward.max(active_reverse);
+            // Global-only support remains a weak fallback. Active flow is evidence,
+            // not an independent additive reward for the same relation.
+            let activity_gain = 0.5 + 0.5 * active.sqrt();
+            let span_gain = if span == 2 { 0.7 } else { 1.0 };
+            let quality = if supported {
+                clamp01(
+                    potential
+                        * (if active > 0.0 {
+                            clamp01(active_forward / (active_forward + active_reverse).max(1e-12))
+                        } else {
+                            direction
+                        })
+                        .max(config.direction_floor)
+                        .sqrt()
+                        * continuity.max(0.0).sqrt()
+                        * activity_gain
+                        * span_gain,
+                )
+            } else {
+                0.0
+            };
+            if quality > best_quality {
+                best_quality = quality;
+                best_relation = Some(relation);
+                best.supported_segments = usize::from(supported);
+                best.active_segments = usize::from(active > 0.0);
+                best.skip_segments = usize::from(span == 2);
+                best.transfer_segments = usize::from(
+                    supported
+                        && transfer_supported
+                        && (!local_supported || transfer_potential > local_potential),
+                );
+                best.mean_direction = direction;
+                best.mean_continuity = continuity;
+                best.mean_local_potential = local_potential;
+                best.mean_transfer_potential = transfer_potential;
+            }
+        }
+        if let Some(relation) = best_relation {
+            used_relations.insert(relation);
+        }
         output.segment_count += 1;
-        output.supported_segments += usize::from(supported);
-        output.transfer_segments += usize::from(
-            supported
-                && transfer_supported
-                && (!local_supported || transfer_potential > local_potential),
-        );
-        output.mean_direction += direction;
-        output.mean_continuity += continuity;
-        output.mean_local_potential += local_potential;
-        output.mean_transfer_potential += transfer_potential;
-        quality_mass += quality;
+        output.supported_segments += best.supported_segments;
+        output.active_segments += best.active_segments;
+        output.skip_segments += best.skip_segments;
+        output.transfer_segments += best.transfer_segments;
+        output.mean_direction += best.mean_direction;
+        output.mean_continuity += best.mean_continuity;
+        output.mean_local_potential += best.mean_local_potential;
+        output.mean_transfer_potential += best.mean_transfer_potential;
+        quality_mass += best_quality;
     }
 
     if output.segment_count > 0 {
@@ -842,6 +883,10 @@ struct TopologyOutput {
     matched_node_coverage: f64,
     matched_edge_coverage: f64,
     mean_closure: f64,
+    candidate_support_density: f64,
+    strongest_node_match_quality: f64,
+    exact_matched_nodes: usize,
+    semantic_matched_nodes: usize,
     matched_nodes: usize,
     matched_edges: usize,
     query_nodes: usize,
@@ -856,21 +901,90 @@ struct Alignment {
     closure: f64,
 }
 
+fn support_density(supported: f64, total: usize) -> f64 {
+    // Penalize unsupported opportunities, not richly supported annotation.
+    let unsupported = positive(total as f64 - supported);
+    1.0 / (1.0 + positive(unsupported - 6.0) / 16.0)
+}
+
+/// Saturate at a single supported tributary, not coverage of the whole river.
+/// Raw coverage remains available separately in the topology diagnostics.
+fn branch_coverage(topology: &TopologyOutput, mode: &str) -> f64 {
+    let nodes = clamp01(topology.matched_node_coverage / 0.35);
+    let edges = clamp01(topology.matched_edge_coverage / 0.20);
+    if mode == "atomic" {
+        nodes
+    } else if topology.matched_edges == 0 {
+        0.35 * nodes
+    } else {
+        0.70 * edges + 0.30 * nodes
+    }
+}
+
+fn precision_grounding(topology: &TopologyOutput) -> f64 {
+    if topology.exact_matched_nodes == 0 && topology.strongest_node_match_quality < 0.65 {
+        0.65
+    } else {
+        1.0
+    }
+}
+
+/// Coverage, closure and alignment enter confidence once. The legacy
+/// reliability still describes raw full-river coverage but is not multiplied in.
+fn branch_confidence(topology: &TopologyOutput, mode: &str) -> f64 {
+    clamp01(
+        branch_coverage(topology, mode)
+            * clamp01(topology.mean_closure)
+            * clamp01(topology.node_alignment_score),
+    )
+    .sqrt()
+}
+
+/// Query cosine is the floor; fields only contribute bounded positive surplus.
+fn field_resonance(curve: &Curve, input: &NativeInput, support: f64) -> (f64, f64, f64) {
+    let local = if input.local_vector.iter().all(|v| v.is_finite())
+        && squared_norm(&input.local_vector) > 1e-12 {
+        positive(input.config.pure_local_weight)
+    } else {
+        0.0
+    };
+    let transfer = if input.transfer_vector.iter().all(|v| v.is_finite())
+        && squared_norm(&input.transfer_vector) > 1e-12 {
+        positive(input.config.pure_transfer_weight)
+    } else {
+        0.0
+    };
+    let total = local + transfer;
+    let query = clamp01(curve.query_score);
+    let field = if total > 1e-12 {
+        clamp01((local * clamp01(curve.local_score) + transfer * clamp01(curve.transfer_score)) / total)
+    } else {
+        query
+    };
+    let lambda = clamp01(total / (positive(input.config.pure_query_weight) + total).max(1e-12));
+    let gain = ((lambda * positive(field - query)).min(0.03) * clamp01(support))
+        .min(1.0 - query);
+    (query + gain, field, gain)
+}
+
 fn evaluate_topology(
     curve: &Curve,
     input: &NativeInput,
     artifact: &NativeArtifact,
-    query_tag_vectors: &HashMap<i64, Vec<f32>>,
+    query_tag_vectors: &TagVectorPool,
 ) -> TopologyOutput {
     let mut output = TopologyOutput {
         query_nodes: input.query_state.river_nodes.len(),
         ..TopologyOutput::default()
     };
-    let mut alignments: BTreeMap<i64, Alignment> = BTreeMap::new();
+    // Ordered by Tag ID so that `mean_closure` does not sum in hash order.
+    let mut alignments = BTreeMap::new();
     let mut total_node_weight = 0.0;
     let mut matched_node_weight = 0.0;
     let mut node_quality_mass = 0.0;
 
+    let mut bindings = Vec::new();
+    let mut node_weights = BTreeMap::new();
     for node in &input.query_state.river_nodes {
         let weight = positive(if node.normalized_energy != 0.0 {
             node.normalized_energy
@@ -878,56 +992,79 @@ fn evaluate_topology(
             node.energy
         })
         .max(1e-9);
+        if node_weights.insert(node.id, weight).is_some() {
+            continue;
+        }
         total_node_weight += weight;
-        let exact = curve
-            .tags
-            .iter()
-            .enumerate()
-            .find(|item| item.1.id == node.id);
-        let alignment = if let Some((index, tag)) = exact {
-            Some(Alignment {
-                candidate_index: index,
-                candidate_position: tag.position,
-                quality: tag.chunk_cosine.sqrt(),
-                closure: tag.chunk_cosine,
-            })
-        } else {
-            let query_vector = query_tag_vectors.get(&node.id);
-            curve
-                .tags
-                .iter()
-                .enumerate()
-                .filter_map(|(index, tag)| {
-                    let similarity = query_vector
-                        .map(|vector| clamp01(cosine_f32(vector, &tag.vector)))
-                        .unwrap_or(0.0);
-                    if similarity < input.config.semantic_node_threshold {
-                        return None;
-                    }
-                    let normalized = clamp01(
-                        (similarity - input.config.semantic_node_threshold)
-                            / (1.0 - input.config.semantic_node_threshold).max(1e-9),
-                    );
-                    Some(Alignment {
-                        candidate_index: index,
-                        candidate_position: tag.position,
-                        quality: (normalized * tag.chunk_cosine).sqrt(),
-                        closure: tag.chunk_cosine,
-                    })
-                })
-                .max_by(|left, right| {
-                    left.quality
-                        .partial_cmp(&right.quality)
-                        .unwrap_or(Ordering::Equal)
-                        .then_with(|| right.candidate_index.cmp(&left.candidate_index))
-                })
-        };
-        if let Some(alignment) = alignment {
-            matched_node_weight += weight;
-            node_quality_mass += weight * alignment.quality;
-            alignments.insert(node.id, alignment);
+        for (index, tag) in curve.tags.iter().enumerate() {
+            let exact = node.id == tag.id;
+            let similarity = if exact {
+                1.0
+            } else {
+                query_tag_vectors
+                    .get(&node.id)
+                    .map(|v| clamp01(cosine(v, &tag.vector)))
+                    .unwrap_or(0.0)
+            };
+            if !exact && similarity <= input.config.semantic_node_threshold {
+                continue;
+            }
+            let normalized = if exact {
+                1.0
+            } else {
+                clamp01(
+                    (similarity - input.config.semantic_node_threshold)
+                        / (1.0 - input.config.semantic_node_threshold).max(1e-9),
+                )
+            };
+            let weak_gain = if !exact && similarity < 0.65 {
+                (similarity / 0.65).powi(2)
+            } else {
+                1.0
+            };
+            let quality = (normalized * tag.chunk_cosine).sqrt() * weak_gain;
+            bindings.push((
+                exact,
+                node.id,
+                tag.id,
+                weight,
+                Alignment {
+                    candidate_index: index,
+                    candidate_position: tag.position,
+                    quality,
+                    closure: tag.chunk_cosine,
+                },
+            ));
         }
     }
+    bindings.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| (b.3 * b.4.quality).total_cmp(&(a.3 * a.4.quality)))
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.4.candidate_index.cmp(&b.4.candidate_index))
+    });
+    let mut used_tags = HashSet::new();
+    for (exact, node_id, tag_id, weight, alignment) in bindings {
+        if alignments.contains_key(&node_id) || used_tags.contains(&tag_id) {
+            continue;
+        }
+        used_tags.insert(tag_id);
+        output.exact_matched_nodes += usize::from(exact);
+        output.semantic_matched_nodes += usize::from(!exact);
+        output.strongest_node_match_quality =
+            output.strongest_node_match_quality.max(alignment.quality);
+        matched_node_weight += weight * alignment.quality;
+        node_quality_mass += weight * alignment.quality * alignment.quality;
+        alignments.insert(node_id, alignment);
+    }
+    let density = support_density(
+        alignments.values().map(|a| a.quality).sum(),
+        curve.tags.len(),
+    );
+    output.candidate_support_density = density;
+    matched_node_weight *= density;
+    node_quality_mass *= density;
 
     output.matched_nodes = alignments.len();
     output.matched_node_coverage = if total_node_weight > 0.0 {
@@ -1029,10 +1166,10 @@ fn evaluate_topology(
         let endpoint = (source.quality * target.quality).sqrt();
         let edge_quality =
             clamp01(endpoint * distance_similarity * direction_similarity * independent);
-        matched_edge_weight += edge_weight;
-        distance_mass += edge_weight * distance_similarity;
-        direction_mass += edge_weight * direction_similarity;
-        topology_mass += edge_weight * edge_quality;
+        matched_edge_weight += edge_weight * endpoint;
+        distance_mass += edge_weight * endpoint * distance_similarity;
+        direction_mass += edge_weight * endpoint * direction_similarity;
+        topology_mass += edge_weight * endpoint * edge_quality;
         output.matched_edges += 1;
     }
 
@@ -1088,6 +1225,16 @@ struct ObservableOutput {
     local_potential: f64,
     transfer_potential: f64,
     tail_only_ratio: f64,
+    field_support: f64,
+}
+
+fn scalar_field_support(coverage: f64, potential: f64) -> f64 {
+    let potential = positive(potential);
+    let covered = clamp01(coverage / 0.5);
+    let saturated = clamp01(potential / 0.02);
+    let domain = (covered * saturated).sqrt();
+    let tail = 0.1 * (potential / (potential + 0.02)).sqrt();
+    clamp01(domain.max(tail))
 }
 
 fn evaluate_observables(
@@ -1097,7 +1244,9 @@ fn evaluate_observables(
     workspace: &FieldWorkspace,
     visible: bool,
 ) -> ObservableOutput {
-    let chain_size = curve.tags.len().max(1) as f64;
+    let mut seen_ids = HashSet::new();
+    let tags: Vec<&TagData> = curve.tags.iter().filter(|t| seen_ids.insert(t.id)).collect();
+    let chain_size = tags.len().max(1) as f64;
     let mut exact_seed_hits = 0usize;
     let mut local_contacts = 0usize;
     let mut transfer_contacts = 0usize;
@@ -1106,7 +1255,7 @@ fn evaluate_observables(
     let mut tail_only = 0usize;
     let mut boundary: f64 = 0.0;
 
-    for tag in &curve.tags {
+    for tag in &tags {
         let local = workspace.local.get(&tag.id).copied().unwrap_or(0.0);
         let transfer = workspace.transfer.get(&tag.id).copied().unwrap_or(0.0);
         exact_seed_hits += usize::from(workspace.source_ids.contains(&tag.id));
@@ -1120,7 +1269,7 @@ fn evaluate_observables(
                 && !workspace.transfer_domain.contains(&tag.id),
         );
         boundary = boundary
-            .max((clamp01(cosine_f32(&input.query.vector, &tag.vector)) * tag.chunk_cosine).sqrt());
+            .max((clamp01(cosine(&input.query.vector, &tag.vector)) * tag.chunk_cosine).sqrt());
     }
 
     let local_coverage = local_contacts as f64 / chain_size;
@@ -1136,7 +1285,7 @@ fn evaluate_observables(
             + 0.15 * clamp01(transfer_mean)
             + 0.2 * dual_agreement,
     ) * (1.0 - 0.5 * clamp01(tail_ratio));
-    let query_chunk = clamp01(cosine_f32(&input.query.vector, &curve.chunk_vector));
+    let query_chunk = clamp01(cosine(&input.query.vector, &curve.chunk_vector));
     let direct_contact = clamp01(exact_seed_hits as f64 / workspace.source_ids.len().max(1) as f64);
     let semantic_boundary_score = if boundary >= 0.55 { boundary } else { 0.0 };
     let direct = if visible {
@@ -1157,6 +1306,8 @@ fn evaluate_observables(
         local_potential: local_mean,
         transfer_potential: transfer_mean,
         tail_only_ratio: tail_ratio,
+        field_support: scalar_field_support(local_coverage, local_mean)
+            .max(scalar_field_support(transfer_coverage, transfer_mean)),
     }
 }
 
@@ -1168,32 +1319,55 @@ struct AnchorOutput {
     contacted_seeds: usize,
     exact_contacts: usize,
     semantic_contacts: usize,
+    explicit_exact_contacts: usize,
+    explicit_semantic_contacts: usize,
+    has_explicit_focus: bool,
     mean_closure: f64,
+    implicit_only: bool,
 }
 
 fn anchor_contacts(
     curve: &Curve,
     seeds: &[(i64, f64)],
-    seed_vectors: &HashMap<i64, Vec<f32>>,
+    seed_vectors: &TagVectorPool,
     config: &NativeConfig,
 ) -> Vec<(i64, i64, bool, f64, f64, f64)> {
-    let mut contacts = Vec::new();
+    // Enumerate edges before assignment: exact contacts reserve both endpoints.
+    let mut edges = Vec::new();
     for (seed_id, mass) in seeds {
-        if let Some(tag) = curve.tags.iter().find(|tag| tag.id == *seed_id) {
-            contacts.push((*seed_id, tag.id, true, 1.0, *mass, tag.chunk_cosine));
+        for tag in &curve.tags {
+            let exact = tag.id == *seed_id;
+            let similarity = if exact {
+                1.0
+            } else {
+                seed_vectors
+                    .get(seed_id)
+                    .map(|vector| cosine(vector, &tag.vector))
+                    .unwrap_or(0.0)
+            };
+            if exact || similarity >= config.semantic_anchor_threshold.max(0.88) {
+                edges.push((*seed_id, tag.id, exact, similarity, *mass, tag.chunk_cosine));
+            }
+        }
+    }
+    edges.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then_with(|| (b.3 * b.4 * b.5).total_cmp(&(a.3 * a.4 * a.5)))
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    let mut used_seeds = HashSet::new();
+    let mut used_tags = HashSet::new();
+    let mut contacts = Vec::new();
+    for edge in edges {
+        if used_seeds.contains(&edge.0) || used_tags.contains(&edge.1) {
             continue;
         }
-        let Some(seed_vector) = seed_vectors.get(seed_id) else {
-            continue;
-        };
-        if let Some((tag, similarity)) = curve
-            .tags
-            .iter()
-            .map(|tag| (tag, cosine_f32(seed_vector, &tag.vector)))
-            .filter(|item| item.1 >= config.semantic_anchor_threshold)
-            .max_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal))
-        {
-            contacts.push((*seed_id, tag.id, false, similarity, *mass, tag.chunk_cosine));
+        used_seeds.insert(edge.0);
+        used_tags.insert(edge.1);
+        contacts.push(edge);
+        if contacts.len() == 3 {
+            break;
         }
     }
     contacts
@@ -1202,31 +1376,34 @@ fn anchor_contacts(
 fn compute_anchors(
     curves: &[Curve],
     seeds: &[(i64, f64)],
-    seed_vectors: &HashMap<i64, Vec<f32>>,
+    seed_vectors: &TagVectorPool,
     artifact: &NativeArtifact,
     config: &NativeConfig,
     fallback: bool,
+    explicit_ids: &HashSet<i64>,
 ) -> Vec<AnchorOutput> {
     let contacts: Vec<Vec<(i64, i64, bool, f64, f64, f64)>> = curves
         .par_iter()
         .map(|curve| anchor_contacts(curve, seeds, seed_vectors, config))
         .collect();
-    let mut pool_counts: HashMap<i64, usize> = seeds.iter().map(|seed| (seed.0, 0)).collect();
-    for candidate_contacts in &contacts {
-        for contact in candidate_contacts {
-            *pool_counts.entry(contact.0).or_default() += 1;
-        }
-    }
-    let max_seed_mass = seeds
+    let explicit_max = seeds
         .iter()
-        .map(|seed| positive(seed.1))
+        .filter(|s| explicit_ids.contains(&s.0))
+        .map(|s| positive(s.1))
         .fold(0.0, f64::max);
+    let max_seed_mass = if explicit_max > 0.0 {
+        explicit_max
+    } else {
+        seeds.iter().map(|seed| positive(seed.1)).fold(0.0, f64::max)
+    };
     contacts
         .into_par_iter()
         .map(|candidate_contacts| {
             let mut no_contact_probability = 1.0;
             let mut closure_sum = 0.0;
             let mut exact = 0usize;
+            let implicit_only = !candidate_contacts.is_empty()
+                && !candidate_contacts.iter().any(|c| explicit_ids.contains(&c.0));
             for contact in &candidate_contacts {
                 let inbound = artifact.inbound.get(&contact.1).copied().unwrap_or(0.0);
                 let specificity = if artifact.max_inbound > 0.0 {
@@ -1236,10 +1413,8 @@ fn compute_anchors(
                 } else {
                     1.0
                 };
-                let rarity = config.rarity_floor.max(
-                    1.0 - pool_counts.get(&contact.0).copied().unwrap_or(0) as f64
-                        / curves.len().max(1) as f64,
-                );
+                // Global specificity, not the accidental composition of this pool.
+                let rarity = config.rarity_floor.max(specificity);
                 let normalized_mass = if max_seed_mass > 0.0 {
                     clamp01(contact.4 / max_seed_mass)
                 } else {
@@ -1250,9 +1425,24 @@ fn compute_anchors(
                     1.0
                 } else {
                     config.semantic_anchor_discount
+                        * clamp01(
+                            (contact.3 - config.semantic_anchor_threshold.max(0.88))
+                                / (1.0 - config.semantic_anchor_threshold.max(0.88)).max(1e-9),
+                        )
                 };
-                let contribution =
-                    clamp01(normalized_mass * specificity * contact.5 * rarity * match_weight);
+                let grounding_gain = if !explicit_ids.contains(&contact.0) {
+                    0.35
+                } else {
+                    1.0
+                };
+                let contribution = clamp01(
+                    normalized_mass
+                        * specificity
+                        * contact.5
+                        * rarity
+                        * match_weight
+                        * grounding_gain,
+                );
                 no_contact_probability *= 1.0 - contribution;
                 closure_sum += contact.5;
             }
@@ -1263,18 +1453,34 @@ fn compute_anchors(
                 0.0
             };
             let score = clamp01(1.0 - no_contact_probability);
-            let mut reliability = clamp01(
-                (mean_closure
-                    * (contacted as f64 / config.reliability_seed_saturation.max(1.0)).min(1.0))
-                .sqrt(),
-            );
+            // A single exact focus is sufficient identity evidence. Quantity is
+            // never a substitute for closure; semantic-only contacts stay discounted.
+            let mut reliability = clamp01(mean_closure).sqrt()
+                * if exact > 0 { 1.0 } else { config.semantic_anchor_discount };
             if fallback {
                 reliability = reliability.min(config.fallback_reliability_cap);
+            }
+            if implicit_only {
+                reliability = reliability.min(0.35);
             }
             AnchorOutput {
                 score,
                 reliability,
-                strength: clamp01(score * reliability),
+                strength: if implicit_only {
+                    clamp01(score * reliability).min(0.035)
+                } else {
+                    clamp01(score * reliability)
+                },
+                implicit_only,
+                explicit_exact_contacts: candidate_contacts
+                    .iter()
+                    .filter(|c| c.2 && explicit_ids.contains(&c.0))
+                    .count(),
+                explicit_semantic_contacts: candidate_contacts
+                    .iter()
+                    .filter(|c| !c.2 && explicit_ids.contains(&c.0))
+                    .count(),
+                has_explicit_focus: explicit_max > 0.0,
                 contacted_seeds: contacted,
                 exact_contacts: exact,
                 semantic_contacts: contacted.saturating_sub(exact),
@@ -1291,12 +1497,15 @@ struct ScoredWork {
     topology: TopologyOutput,
     observables: ObservableOutput,
     pure_score: f64,
+    field_score: f64,
+    field_resonance_bonus: f64,
     graph_score: f64,
     direct_evidence: f64,
     role: String,
     anchor: AnchorOutput,
     v2_bonus: f64,
     gated_bonus: f64,
+    path_bonus: f64,
     anchor_bonus: f64,
     final_score: f64,
 }
@@ -1637,16 +1846,14 @@ fn assign_v3_scores(
     omega: &OmegaOutput,
     config: &NativeConfig,
 ) {
-    let maximum_pure = work.iter().map(|item| item.pure_score).fold(0.0, f64::max);
     for item in work.iter_mut() {
-        let near_frontier = item.pure_score >= maximum_pure - 0.03;
         let direct_answer = mode != "atomic"
             && item.observables.closure >= 0.55
-            && (item.direct_evidence >= 0.55 || (near_frontier && item.curve.query_score >= 0.55));
+            && item.anchor.explicit_exact_contacts > 0;
         let structural = (item.topology.matched_edge_coverage
             * item.topology.reliability
             * item.observables.closure)
-            .cbrt();
+        .cbrt();
         item.role = if mode == "atomic" {
             "atomic_concept"
         } else if direct_answer {
@@ -1659,150 +1866,28 @@ fn assign_v3_scores(
         .to_string();
     }
 
-    let direct_frontier = work
-        .iter()
-        .filter(|item| item.role == "direct_answer")
-        .map(|item| item.pure_score)
-        .fold(0.0, f64::max);
-
-    for index in 0..work.len() {
-        let mut peers: Vec<(usize, f64)> = (0..work.len())
-            .filter(|peer| *peer != index)
-            .map(|peer| {
-                let pure_delta = (work[peer].pure_score - work[index].pure_score)
-                    / config.conditional_bandwidth.max(1e-4);
-                let closure_delta = (work[peer].observables.closure
-                    - work[index].observables.closure)
-                    / config.conditional_closure_bandwidth.max(1e-4);
-                let direct_delta = (work[peer].direct_evidence - work[index].direct_evidence)
-                    / config.conditional_direct_bandwidth.max(1e-4);
-                let role_weight = if work[peer].role == work[index].role {
-                    1.0
-                } else {
-                    0.35
-                };
-                (
-                    peer,
-                    role_weight
-                        * (-0.5
-                            * (pure_delta * pure_delta
-                                + closure_delta * closure_delta
-                                + direct_delta * direct_delta))
-                            .exp(),
-                )
-            })
-            .collect();
-        peers.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
-        peers.retain(|entry| entry.1 >= 1e-4);
-        if peers.len() < config.minimum_peers {
-            let existing: HashSet<usize> = peers.iter().map(|entry| entry.0).collect();
-            let mut fallback: Vec<(usize, f64)> = (0..work.len())
-                .filter(|peer| *peer != index && !existing.contains(peer))
-                .map(|peer| (peer, 1e-4))
-                .take(config.minimum_peers.saturating_sub(peers.len()))
-                .collect();
-            peers.append(&mut fallback);
-        }
-        let total_weight: f64 = peers.iter().map(|entry| entry.1).sum();
-        let squared_weight: f64 = peers.iter().map(|entry| entry.1 * entry.1).sum();
-        let expected = if total_weight > 1e-12 {
-            peers
-                .iter()
-                .map(|entry| entry.1 * work[entry.0].graph_score)
-                .sum::<f64>()
-                / total_weight
+    for item in work.iter_mut() {
+        // Candidate-self evidence, not exceptionalness among its peers. Roles
+        // explain evidence and never allocate ranking privilege.
+        let confidence = branch_confidence(&item.topology, mode);
+        let direction = if item.topology.matched_edges > 0 {
+            0.25 + 0.75 * item.topology.direction_score
         } else {
-            work[index].graph_score
+            0.25
         };
-        let variance = if total_weight > 1e-12 {
-            peers
-                .iter()
-                .map(|entry| entry.1 * (work[entry.0].graph_score - expected).powi(2))
-                .sum::<f64>()
-                / total_weight
-        } else {
-            0.0
-        };
-        let effective_peers = if squared_weight > 1e-12 {
-            total_weight * total_weight / squared_weight
-        } else {
-            0.0
-        };
-        let uncertainty = (variance * (1.0 + 1.0 / effective_peers.max(1.0))).sqrt();
-        let innovation = positive(
-            work[index].graph_score - expected - config.innovation_confidence_z * uncertainty,
-        );
-        let candidate_confidence = if mode == "atomic" {
-            (work[index].observables.closure
-                * clamp01(
-                    0.55 * work[index].topology.matched_node_coverage
-                        + 0.45 * work[index].topology.node_alignment_score,
-                ))
-            .sqrt()
-        } else {
-            (work[index].observables.closure
-                * clamp01(
-                    0.75 * work[index].topology.matched_edge_coverage
-                        + 0.25 * work[index].topology.matched_node_coverage,
-                )
-                * clamp01(
-                    0.7 * work[index].topology.reliability
-                        + 0.3 * work[index].topology.node_alignment_score,
-                ))
-            .cbrt()
-        };
-        let statistical = clamp01(effective_peers / config.minimum_effective_peers);
-        let combined_confidence = clamp01(candidate_confidence * statistical);
-        let (role_cap, multiplier) = match work[index].role.as_str() {
-            "atomic_concept" => (config.topology_bonus_cap, 1.0),
-            "direct_answer" => (0.02, 0.35),
-            "structural_explanation" => (0.045, 0.7),
-            _ => (0.008, 0.15),
-        };
-        let requested = innovation * combined_confidence * config.innovation_scale * multiplier;
-        let mut bonus = requested.min(role_cap).min(config.topology_bonus_cap);
-        if direct_frontier > 0.0 && work[index].role != "direct_answer" && mode != "atomic" {
-            bonus = bonus.min(positive(direct_frontier - 0.005 - work[index].pure_score));
-        }
-        work[index].v2_bonus = clamp01(bonus);
+        let requested = positive(config.topology_bonus_cap)
+            * item.graph_score
+            * confidence
+            * direction
+            * precision_grounding(&item.topology);
+        item.v2_bonus = clamp01(requested.min(positive(config.topology_bonus_cap)));
     }
 
-    let anchor_mean = if work.is_empty() {
-        0.0
-    } else {
-        work.iter().map(|item| item.anchor.strength).sum::<f64>() / work.len() as f64
-    };
-    let anchor_variance = if work.is_empty() {
-        0.0
-    } else {
-        work.iter()
-            .map(|item| (item.anchor.strength - anchor_mean).powi(2))
-            .sum::<f64>()
-            / work.len() as f64
-    };
-    let anchor_std = anchor_variance.sqrt();
-    let threshold = clamp01(
-        config
-            .anchor_activation_floor
-            .max(anchor_mean + config.anchor_activation_z * anchor_std),
-    );
-    let mut ranked_anchors: Vec<(usize, f64)> = work
-        .iter()
-        .enumerate()
-        .map(|(index, item)| (index, item.anchor.strength))
-        .collect();
-    ranked_anchors.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(Ordering::Equal));
-    let strongest = ranked_anchors.first().copied();
-    let second = ranked_anchors.get(1).map(|item| item.1).unwrap_or(0.0);
-    let promote = strongest
-        .map(|item| {
-            item.1 >= config.anchor_frontier_abs_floor
-                && item.1 >= config.anchor_frontier_contrast * second
-        })
-        .unwrap_or(false);
+    // Absolute activation: unrelated candidates cannot change eligibility.
+    let threshold = clamp01(config.anchor_activation_floor);
     let graph_gate = omega.omega.powf(config.omega_gamma.max(0.0));
 
-    for (index, item) in work.iter_mut().enumerate() {
+    for item in work.iter_mut() {
         let activation = if item.anchor.strength <= threshold {
             0.0
         } else if config.anchor_saturation - threshold > 1e-12 {
@@ -1814,15 +1899,13 @@ fn assign_v3_scores(
             1.0
         };
         item.anchor_bonus = config.anchor_bonus_cap * activation;
-        if promote && strongest.map(|entry| entry.0) == Some(index) {
-            item.role = "direct_answer".to_string();
-        } else if omega.omega < config.struct_role_min_omega
-            && item.role == "structural_explanation"
-        {
+        if omega.omega < config.struct_role_min_omega && item.role == "structural_explanation" {
             item.role = "thematic_neighbor".to_string();
         }
-        item.gated_bonus = item.v2_bonus * graph_gate;
-        item.final_score = clamp01(item.pure_score + item.gated_bonus + item.anchor_bonus);
+        item.gated_bonus = (item.v2_bonus * graph_gate)
+            .min(positive(config.topology_bonus_cap - item.path_bonus));
+        item.final_score =
+            clamp01(item.pure_score + item.path_bonus + item.gated_bonus + item.anchor_bonus);
     }
 }
 
@@ -1834,8 +1917,13 @@ struct NativeResultItem {
     rank: usize,
     score: f64,
     base_score: f64,
+    field_score: f64,
+    field_resonance_bonus: f64,
     topology_bonus: f64,
     anchor_bonus: f64,
+    path_bonus: f64,
+    graph_bonus: f64,
+    score_clipping: f64,
     role: String,
     omega: f64,
     river_regime: String,
@@ -1844,7 +1932,7 @@ struct NativeResultItem {
     candidate_sources: Vec<String>,
     original_score: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    topology_v3: Option<serde_json::Value>,
+    topology_v3: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     relative_topology: Option<TopologyOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1871,6 +1959,8 @@ struct NativeDiagnostics {
     chunk_sql_batches: usize,
     file_tag_sql_batches: usize,
     query_tag_sql_batches: usize,
+    candidate_tag_vector_sql_batches: usize,
+    candidate_tag_vector_fetched_nodes: usize,
 }
 
 #[derive(Serialize)]
@@ -1883,8 +1973,9 @@ struct NativeOutput {
     omega: OmegaOutput,
     query_mode: String,
     query_morphology: QueryMorphology,
-    diagnostics: NativeDiagnostics,
     results: Vec<NativeResultItem>,
+    diagnostics: NativeDiagnostics,
+    parameters: Value,
 }
 
 pub(crate) fn run_native(
@@ -1927,6 +2018,8 @@ pub(crate) fn run_native(
                 target_id: edge.target_id,
                 flow: edge.flow,
                 normalized_flow: edge.normalized_flow,
+                wormhole: edge.wormhole,
+                immediate_return: edge.immediate_return,
             })
             .collect();
         input.query_state.field_provenance = cached
@@ -1957,9 +2050,19 @@ pub(crate) fn run_native(
     }
 
     let load_started = Instant::now();
+    let connection = open_readonly(db_path)?;
     let artifact = load_artifact_from_runtime(runtime, db_path, artifact_sig)?;
-    let curve_load = load_curves(db_path, &input.candidates, dimension)?;
+    let mut tag_vectors = TagVectorPool::new();
+    let curve_load = load_curves(&connection, &input.candidates, dimension)?;
     let mut curves = curve_load.curves;
+    // 显式空集合也意味着无权限；必须在候选归一化和统计前移除越权项。
+    let allowed: Option<HashSet<i64>> = input
+        .allowed_file_ids
+        .as_ref()
+        .map(|ids| ids.iter().copied().collect());
+    if let Some(scope) = &allowed {
+        curves.retain(|curve| scope.contains(&curve.file_id));
+    }
     let original_score_by_id: HashMap<i64, f64> = input
         .candidates
         .iter()
@@ -1977,15 +2080,42 @@ pub(crate) fn run_native(
         })
         .collect();
     let local_domain: HashSet<i64> = input.query_state.local_domain_ids.iter().copied().collect();
-    compute_anchor_scores(&mut curves, &local_domain);
+    // Anchor hits count only Tags with a loadable vector, as when every candidate
+    // Tag was loaded up front, so the local-domain Tags are checked now; the
+    // other Tags are read only for the curves that survive selection.
+    let file_tags =
+        |curve: &Curve| curve_load.relations.get(&curve.file_id).into_iter().flatten();
+    let domain_tag_ids: Vec<i64> = curves
+        .iter()
+        .flat_map(file_tags)
+        .map(|relation| relation.0)
+        .filter(|id| local_domain.contains(id))
+        .collect();
+    let domain_stats =
+        ensure_tag_vectors_loaded(&connection, &mut tag_vectors, &domain_tag_ids, dimension)?;
+    compute_anchor_scores(&mut curves, |curve| {
+        file_tags(curve)
+            .filter(|relation| {
+                local_domain.contains(&relation.0) && tag_vectors.contains_key(&relation.0)
+            })
+            .count()
+    });
     curves.par_iter_mut().for_each(|curve| {
-        curve.query_score = cosine_f32(&input.query.vector, &curve.chunk_vector);
-        curve.denoised_score = cosine_f32(&input.denoised_vector, &curve.chunk_vector);
-        curve.local_score = cosine_f32(&input.local_vector, &curve.chunk_vector);
-        curve.transfer_score = cosine_f32(&input.transfer_vector, &curve.chunk_vector);
+        curve.query_score = cosine(&input.query.vector, &curve.chunk_vector);
+        curve.denoised_score = cosine(&input.denoised_vector, &curve.chunk_vector);
+        curve.local_score = cosine(&input.local_vector, &curve.chunk_vector);
+        curve.transfer_score = cosine(&input.transfer_vector, &curve.chunk_vector);
     });
     let projected_count = curves.len();
-    let curves = select_superset(curves, &input.config);
+    let mut curves = select_superset(curves, &input.config);
+    let selected_tag_ids: Vec<i64> = curves
+        .iter()
+        .flat_map(file_tags)
+        .map(|relation| relation.0)
+        .collect();
+    let selected_stats =
+        ensure_tag_vectors_loaded(&connection, &mut tag_vectors, &selected_tag_ids, dimension)?;
+    attach_tags(&mut curves, &curve_load.relations, &tag_vectors);
     let selected_count = curves.len();
 
     let workspace = FieldWorkspace {
@@ -2004,13 +2134,30 @@ pub(crate) fn run_native(
             .iter()
             .map(|entry| entry.0)
             .collect(),
+        active_edges: input
+            .query_state
+            .river_edges
+            .iter()
+            .filter_map(|edge| {
+                // Query support is conditioned on an observed, real transport edge.
+                let flow = clamp01(if edge.normalized_flow != 0.0 {
+                    edge.normalized_flow
+                } else {
+                    edge.flow
+                });
+                (flow >= input.config.minimum_river_edge_flow
+                    && artifact.edge_weight(edge.source_id, edge.target_id) > 0.0)
+                    .then_some(((edge.source_id, edge.target_id), flow))
+            })
+            .collect(),
     };
     let direct_ids: Vec<i64> = input
         .query_state
         .field_provenance
         .iter()
         .filter(|entry| {
-            entry.hop == 0 && (entry.source_type == "core" || entry.source_type == "seed")
+            entry.hop == 0
+                && matches!(entry.source_type.as_str(), "core" | "lexical_seed" | "seed")
         })
         .map(|entry| entry.id)
         .collect();
@@ -2025,7 +2172,7 @@ pub(crate) fn run_native(
     } else {
         direct_ids.into_iter().collect()
     };
-    let seeds: Vec<(i64, f64)> = input
+    let mut seeds: Vec<(i64, f64)> = input
         .query_state
         .source_field
         .iter()
@@ -2033,6 +2180,18 @@ pub(crate) fn run_native(
         .copied()
         .collect();
 
+    let maximum_seed = seeds.iter().map(|s| s.1).fold(0.0, f64::max);
+    let core_ids: HashSet<i64> = input
+        .query_state
+        .field_provenance
+        .iter()
+        .filter(|p| p.hop == 0 && matches!(p.source_type.as_str(), "core" | "lexical_seed"))
+        .map(|p| p.id)
+        .collect();
+    seeds.retain(|s| s.1 >= maximum_seed * 0.2 || core_ids.contains(&s.0));
+
+    // Query River 节点和 Direct Anchor/Seed 共享一次分块 Tag 向量读取。
+    // 同一 ID 同时属于河网和锚点时只读取、解码并存储一次。
     let mut requested_tag_ids: Vec<i64> = input
         .query_state
         .river_nodes
@@ -2040,17 +2199,27 @@ pub(crate) fn run_native(
         .map(|node| node.id)
         .collect();
     requested_tag_ids.extend(seeds.iter().map(|seed| seed.0));
-    let connection = open_readonly(db_path)?;
-    let (query_and_seed_tag_vectors, query_tag_sql_batches) =
-        load_tag_vectors_by_ids(&connection, &requested_tag_ids, dimension)?;
-    drop(connection);
+    requested_tag_ids.extend(
+        input
+            .query_state
+            .river_edges
+            .iter()
+            .filter(|edge| edge.wormhole)
+            .map(|edge| edge.target_id),
+    );
+    let query_stats =
+        ensure_tag_vectors_loaded(&connection, &mut tag_vectors, &requested_tag_ids, dimension)?;
+    let query_tag_sql_batches = query_stats.sql_batches;
+    let query_and_seed_tag_vectors = tag_vectors;
+    let mut wormhole_model = wormhole::build(&input, &query_and_seed_tag_vectors, &artifact);
+    let mut wormhole_gate = wormhole::gate(&mut wormhole_model, &connection)?;
+    wormhole::refine(&mut wormhole_model, &mut wormhole_gate, &connection, &input)?;
     let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
 
     let compute_started = Instant::now();
     let morphology = compute_query_morphology(&input);
-    let allowed: HashSet<i64> = input.allowed_file_ids.iter().copied().collect();
-    let explicit_scope = !allowed.is_empty();
 
+    // Indexed parallel results preserve curve order; rewards do not depend on peers.
     let anchor_results = compute_anchors(
         &curves,
         &seeds,
@@ -2058,6 +2227,7 @@ pub(crate) fn run_native(
         &artifact,
         &input.config,
         fallback_anchor,
+        &core_ids,
     );
     let core_tag_names: HashSet<String> = input
         .query_state
@@ -2078,24 +2248,12 @@ pub(crate) fn run_native(
         .zip(anchor_results.into_par_iter())
         .map(|(curve, anchor)| {
             let geometry = evaluate_path(&curve, &workspace, &artifact, &input.config);
-            let topology = evaluate_topology(
-                &curve,
-                &input,
-                &artifact,
-                &query_and_seed_tag_vectors,
-            );
-            let visible = !explicit_scope || allowed.contains(&curve.file_id);
-            let observables = evaluate_observables(&curve, &geometry, &input, &workspace, visible);
-            let semantic_total = (input.config.pure_query_weight
-                + input.config.pure_local_weight
-                + input.config.pure_transfer_weight)
-            .max(1e-12);
-            let semantic_base = clamp01(
-                (input.config.pure_query_weight * clamp01(curve.query_score)
-                    + input.config.pure_local_weight * clamp01(curve.local_score)
-                    + input.config.pure_transfer_weight * clamp01(curve.transfer_score))
-                    / semantic_total,
-            );
+            let topology = evaluate_topology(&curve, &input, &artifact, &query_and_seed_tag_vectors);
+            let visible = true; // 越权候选已在进入候选池前删除。
+            let observables =
+                evaluate_observables(&curve, &geometry, &input, &workspace, visible);
+            let (semantic_base, field_score, field_resonance_bonus) =
+                field_resonance(&curve, &input, observables.field_support);
             let topology_raw = clamp01(
                 0.625 * geometry.path_quality
                     + 0.375
@@ -2111,8 +2269,8 @@ pub(crate) fn run_native(
             let topology_reliability = (path_reliability * observables.query_chunk_score).sqrt();
             let topology_bonus =
                 input.config.topology_bonus_cap * topology_raw * topology_reliability;
-            let pure_score =
-                clamp01(semantic_base + topology_bonus.min(input.config.topology_bonus_cap));
+            let pure_score = semantic_base;
+            let path_bonus = topology_bonus.min(input.config.topology_bonus_cap);
             let atomic_score = 0.75 * topology.node_graph_score + 0.25 * topology.edge_graph_score;
             let propositional_score =
                 0.25 * topology.node_graph_score + 0.75 * topology.edge_graph_score;
@@ -2130,11 +2288,14 @@ pub(crate) fn run_native(
                 direct_evidence: observables.semantic_boundary_score.max(observables.direct),
                 observables,
                 pure_score,
+                field_score,
+                field_resonance_bonus,
                 graph_score,
                 role: String::new(),
                 anchor,
                 v2_bonus: 0.0,
                 gated_bonus: 0.0,
+                path_bonus,
                 anchor_bonus: 0.0,
                 final_score: 0.0,
             }
@@ -2158,6 +2319,9 @@ pub(crate) fn run_native(
             })
             .then_with(|| left.curve.union_rank.cmp(&right.curve.union_rank))
     });
+    let wormhole_traces = wormhole::fuse_rrf(&mut work, &wormhole_model, &input, &omega);
+    // Stable sort retains the complete baseline comparator for equal fusion scores.
+    work.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
     let ranked_count = work.len();
 
     let results: Vec<NativeResultItem> = work
@@ -2165,13 +2329,14 @@ pub(crate) fn run_native(
         .take(input.top_k.max(1))
         .enumerate()
         .map(|(index, item)| {
+            // Same set as before, listed in curve order instead of hash order.
+            let mut seen_names = HashSet::new();
             let matched_tags: Vec<String> = item
                 .curve
                 .tags
                 .iter()
+                .filter(|tag| seen_names.insert(tag.name.as_str()))
                 .map(|tag| tag.name.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
                 .collect();
             let core_tags_matched = matched_tags
                 .iter()
@@ -2180,7 +2345,19 @@ pub(crate) fn run_native(
                 .collect();
             let topology_v3 = if input.include_trace {
                 Some(json!({
-                    "mode": "river_observability_gated_v2_with_direct_anchor",
+                    "mode": "conservative_candidate_self_topology_v2.2",
+                    "branchNodeCoverage": clamp01(item.topology.matched_node_coverage / 0.35),
+                    "branchEdgeCoverage": clamp01(item.topology.matched_edge_coverage / 0.20),
+                    "branchCoverage": branch_coverage(&item.topology, mode),
+                    "branchConfidence": branch_confidence(&item.topology, mode),
+                    "strongestNodeMatchQuality": item.topology.strongest_node_match_quality,
+                    "precisionGrounding": precision_grounding(&item.topology),
+                    "fieldSupport": item.observables.field_support,
+                    "fieldResonanceBeforeSupport": field_resonance(&item.curve, &input, 1.0).2,
+                    "queryScore": clamp01(item.curve.query_score),
+                    "fieldScore": item.field_score,
+                    "fieldResonanceBonus": item.field_resonance_bonus,
+                    "directEvidence": item.direct_evidence,
                     "omega": omega.omega,
                     "regime": omega.regime,
                     "omegaEdge": omega.omega_edge,
@@ -2193,6 +2370,10 @@ pub(crate) fn run_native(
                     "anchorScore": item.anchor.score,
                     "anchorReliability": item.anchor.reliability,
                     "anchorStrength": item.anchor.strength,
+                    "implicitOnlyAnchor": item.anchor.implicit_only,
+                    "explicitExactContacts": item.anchor.explicit_exact_contacts,
+                    "explicitSemanticContacts": item.anchor.explicit_semantic_contacts,
+                    "hasExplicitFocus": item.anchor.has_explicit_focus,
                     "anchorBonus": item.anchor_bonus,
                     "contactedSeeds": item.anchor.contacted_seeds,
                     "exactContacts": item.anchor.exact_contacts,
@@ -2200,9 +2381,18 @@ pub(crate) fn run_native(
                     "meanClosure": item.anchor.mean_closure,
                     "role": item.role,
                     "pureScore": item.pure_score,
+                    "pathBonus": item.path_bonus,
+                    "graphBonus": item.gated_bonus,
+                    "requestedGraphBonus": item.v2_bonus * omega.omega.powf(input.config.omega_gamma.max(0.0)),
                     "finalScore": item.final_score,
                     "nativeBackend": "rust-rayon"
-                }))
+                })).map(|mut trace| {
+                    trace["wormholeRrf"] = wormhole_traces
+                        .get(&item.curve.id)
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    trace
+                })
             } else {
                 None
             };
@@ -2212,8 +2402,19 @@ pub(crate) fn run_native(
                 rank: index + 1,
                 score: item.final_score,
                 base_score: item.pure_score,
-                topology_bonus: item.gated_bonus,
+                field_score: item.field_score,
+                field_resonance_bonus: item.field_resonance_bonus,
+                topology_bonus: item.path_bonus + item.gated_bonus,
                 anchor_bonus: item.anchor_bonus,
+                path_bonus: item.path_bonus,
+                graph_bonus: item.gated_bonus,
+                score_clipping: positive(
+                    item.pure_score + item.path_bonus + item.gated_bonus + item.anchor_bonus
+                        - wormhole_traces
+                            .get(&item.curve.id)
+                            .and_then(|v| v["baselineScore"].as_f64())
+                            .unwrap_or(item.final_score),
+                ),
                 role: item.role,
                 omega: omega.omega,
                 river_regime: omega.regime.clone(),
@@ -2257,8 +2458,48 @@ pub(crate) fn run_native(
             chunk_sql_batches: curve_load.chunk_sql_batches,
             file_tag_sql_batches: curve_load.file_tag_sql_batches,
             query_tag_sql_batches,
+            candidate_tag_vector_sql_batches: domain_stats.sql_batches + selected_stats.sql_batches,
+            candidate_tag_vector_fetched_nodes: domain_stats.fetched_nodes
+                + selected_stats.fetched_nodes,
         },
         results,
+        parameters: json!({
+            "parsedConfig": input.config,
+            "wormholeGateMode": "global-two-joint-files-distinct-checksums-third-tag-explicit-focus",
+            "wormholeEvidenceScope": "global-file-tag-graph; independent-of-candidate-and-retrieval-scope",
+            "wormholeGate": wormhole_gate,
+            "wormholeEligibleRoutes": wormhole_model.eligible_routes,
+            "wormholeAcceptedRoutes": wormhole_model.routes.len(),
+            "wormholeScoring": "strict-global-gate; explanation-weighted-RRF; untouched-baseline-channel",
+            "wormholeRrfK": 60,
+            "wormholeStrongFlowRatio": 0.5,
+            "wormholeWeightReference": "maximum observed non-return ordinary edge flow; observation maximum if absent",
+            "baselineAlgorithm": "rivermemo.conservative-topology-v2.2",
+            "fieldResonanceCap": 0.03,
+            "fieldSupportPotentialSaturation": 0.02,
+            "fieldSupportCoverageSaturation": 0.5,
+            "fieldSupportTailCap": 0.1,
+            "implicitContactDiscount": 0.35,
+            "implicitStrengthCap": 0.035,
+            "weakSemanticPivot": 0.65,
+            "span2Discount": 0.7,
+            "globalOnlyPathGain": 0.5,
+            "unsupportedTagAllowance": 6,
+            "unsupportedTagScale": 16,
+            "branchNodeSaturation": 0.35,
+            "branchEdgeSaturation": 0.20,
+            "branchEdgeWeight": 0.70,
+            "branchNodeWeight": 0.30,
+            "branchNodeOnlyWeight": 0.35,
+            "softMatchQualityThreshold": 0.65,
+            "softMatchDiscount": 0.65,
+            "graphConfidence": "sqrt(branchCoverage*meanClosure*nodeAlignmentScore)",
+            "graphReward": "candidate-self-no-role-multiplier",
+            "retiredControls": ["conditionalBandwidth", "conditionalClosureBandwidth",
+                "conditionalDirectBandwidth", "minimumPeers", "minimumEffectivePeers",
+                "innovationConfidenceZ", "innovationScale", "anchorActivationZ",
+                "anchorFrontierContrast", "anchorFrontierAbsFloor", "reliabilitySeedSaturation"]
+        }),
     };
     serde_json::to_string(&output)
         .map_err(|error| format!("encode RiverMemo native output failed: {}", error))
