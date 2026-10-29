@@ -774,9 +774,9 @@ hr('#8 读出链端到端名次快照（教室语料 × 3 查询；基准 v2 = 2
    * 换嵌入模型/端点后名次会变：`MEMO_ACC_RERECORD_SNAPSHOT=1 node scripts/acceptance.mjs`
    * 重录 → 人工核对 acceptance-snapshot-classroom.generated.json → 贴回本常量；不许静默自愈。 */
   const SNAPSHOT = {
-    A: { knn: [2, 3, 8, 11, 1, 6, 9, 4, 7, 5, 10], readout: [2, 8, 3, 11, 9, 1, 4, 6, 7, 10, 5] },
-    B: { knn: [5, 4, 6, 2, 3, 7, 8, 1, 11, 9, 10], readout: [4, 5, 2, 8, 3, 6, 1, 7, 11, 9, 10] },
-    C: { knn: [11, 9, 10, 8, 2, 3, 1, 7, 6, 5, 4], readout: [9, 11, 10, 8, 1, 7, 2, 3, 6, 4, 5] },
+    A: { knn: [2, 3, 8, 11, 1, 6, 9, 4, 7, 5, 10], readout: [2, 8, 3, 11, 1, 9, 4, 6, 7, 10, 5] },
+    B: { knn: [5, 4, 6, 2, 3, 7, 8, 1, 11, 9, 10], readout: [5, 4, 2, 6, 3, 8, 7, 1, 11, 9, 10] },
+    C: { knn: [11, 9, 10, 8, 2, 3, 1, 7, 6, 5, 4], readout: [11, 9, 10, 8, 2, 1, 3, 7, 6, 5, 4] },
   }
   const rerecord = process.env.MEMO_ACC_RERECORD_SNAPSHOT === '1'
   const qvecs = await ws.embed.embed(Object.values(QS))
@@ -1067,7 +1067,12 @@ hr('#15–#18 自主态节律注入：cadence / 压缩联动 / 步维刷新 / �
     for (let s = 1; s <= 7; s++) {
       const d = await runPreStep(h17, agent17, 1, [], s)
       if ([1, 3, 5, 7].includes(s)) at[s] = blocksOf(d)
-      agent17.log.push(textMsg('assistant', `第 ${s} 步。`))
+      // P3 内核（conservative v2.5）分数分布比 v9.2/174a5e1 更聚集：查询场文本的步进微变
+      // （「第 N 步」）→ 嵌入微漂 → 边缘席（第 3/k 名）翻转 → 同集合去重按设计失配重注，
+      // 遮蔽节律判定对象。与 1046-1050 钉 adaptiveK/选择权重同理：固定每步文本冻结第三种
+      // 抖动源，让本判据回到「dedupeRefreshTurns 步维刷新」本身（2026-10-29 旧内核负对照
+      // 定谳：bddfcfe 构建件上本用例 PASS，红是行为面变化非回归）。
+      agent17.log.push(textMsg('assistant', '推进。'))
     }
     const st17 = peekSession('sess-autonomous-17')
     check(

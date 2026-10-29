@@ -155,27 +155,21 @@ export function pipelineConfig(kbm: Record<string, unknown>): Record<string, unk
     langPenaltyUnknown: num(lang.penaltyUnknown, 0.05),
     langPenaltyCrossDomain: num(lang.penaltyCrossDomain, 0.1),
     deduplicationThreshold: num(kbm.deduplicationThreshold, 0.88),
-    // ── VCP 2.0 四闸中的三闸（P3.1 接线；四闸缺省全暗 = 生产零变化）─────────────
-    // 键名/取值域照抄 2.0 原生管线的唯一权威构造点
-    // /home/h/app/VCPToolBox-2.0/KnowledgeBaseManager.js:2137-2315；转发写法同
-    // kernel/tools/track-driver.mjs:103-115（B 的定罪通道，键名已与 Rust 对齐）。
-    // 三键都**显式写缺省值**（可审计：一眼看出跑的是哪一档，不靠"没传"推断）；
-    // 显式缺省 ≡ Rust 缺省，故五腿/验收零漂移：
-    //   · factMatrixMode: KBM 顶层。'pairwise' ≡ 不传（memo_artifact_builder.rs:263-270
-    //     的 read_fact_matrix_mode 缺省即 Pairwise；'vectors' 需 tags.vector，缺则硬报错）。
-    //   · similarityMode: 'legacy' ≡ None（memo_pipeline.rs:109 resolve_similarity_mode
-    //     把 None 折成 Legacy）；'cosine' = 上游 memo_pipeline.rs:648 口径。
-    //   · maxProjectionNodes: 0 ≡ 全支撑投影（memo_pipeline.rs:1472/:1700 的
-    //     `>0` 才进 projection::grow）；取值域 [0,∞) 整数。
-    factMatrixMode: kbm.factMatrixMode ?? 'pairwise',
-    similarityMode: rm.similarityMode ?? 'legacy',
-    maxProjectionNodes: Math.max(0, Math.floor(num(support.maxProjectionNodes, 0))),
-    // 第四闸（2026-10-22 用户令「开闸」）：dynamicWormholes 转发。闭环验证档位 =
-    // vectors+cosine+maxProj=0+wormholes=true（P2 收官 1.11e-16/名次翻 0 的四开形态）。
-    // 部分转发安全：serde(default) 其余字段走 SenseConfig 缺省（与今日生产一致），
-    // 唯一变量 = dynamic_wormholes。rag_params 源：KBM.spikeRouting.dynamicWormholes。
+    // ── VCP 2.0 四闸缺省翻转（P3 收官批，对齐 conservative-topology-v2.5）─────
+    // P3 前的缺省（pairwise/legacy/0/false）是「四闸全暗 = 生产零变化」的 P3.1 决策；
+    // P3 内核已对齐上游 9aa1f67，生产转发缺省同步翻转（与内核 install 同批部署）：
+    //   · factMatrixMode: 上游唯一路径 vectors（pairwise 表已被 migrate_geometry_assets
+    //     DROP，'pairwise' 兼容档仅在显式要求时使用——吃空表会退化为 low_fallback）。
+    //   · similarityMode: 上游硬编码 cosine（上游 memo_pipeline.rs:699 口径）；
+    //     'legacy' 保留为显式档。
+    //   · maxProjectionNodes: 上游 KBM 缺省 256（effectiveSupport.maxProjectionNodes
+    //     ?? 256）；0 仍表示全支撑投影（显式档）。
+    //   · dynamicWormholes: 上游缺省 true；显式 false 才关。
+    factMatrixMode: kbm.factMatrixMode ?? 'vectors',
+    similarityMode: rm.similarityMode ?? 'cosine',
+    maxProjectionNodes: Math.max(0, Math.floor(num(support.maxProjectionNodes, 256))),
     spikeRouting: {
-      dynamicWormholes: bag(kbm.spikeRouting).dynamicWormholes === true,
+      dynamicWormholes: bag(kbm.spikeRouting).dynamicWormholes !== false,
     },
   }
 }
