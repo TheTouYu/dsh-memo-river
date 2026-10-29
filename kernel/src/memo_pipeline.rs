@@ -1934,10 +1934,8 @@ struct PipelineMetadataOutput {
     matched_tags: Vec<String>,
     core_tags_matched: Vec<String>,
     effective_tag_boost: f64,
-    // TODO(P3)：上游 9aa1f67 在这里还有 `propagation_parameters: SenseConfig`
-    // （= input.config.spike_routing 的回显）。我方 SenseConfig 尚无 Serialize
-    // derive（memo_sensing.rs 属 sensing 队友写域）——待其补 derive 后加这一行
-    // 字段即可；差分对账器不比对该键，数值验收无影响。
+    // 上游 9aa1f67 同位：input.config.spike_routing 的回显（SenseConfig 已带 Serialize）。
+    propagation_parameters: SenseConfig,
     diagnostics: PipelineDiagnostics,
 }
 
@@ -2176,6 +2174,7 @@ fn run_pipeline(
         matched_tags,
         core_tags_matched,
         effective_tag_boost,
+        propagation_parameters: input.config.spike_routing.clone(),
         diagnostics: PipelineDiagnostics {
             backend: "rust-unified-memo-pipeline".to_string(),
             runtime_ownership: "vexus-index-instance".to_string(),
