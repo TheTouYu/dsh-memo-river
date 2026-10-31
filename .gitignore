@@ -32,3 +32,9 @@ kernel/tools/diff-report/
 scripts/acceptance-snapshot-classroom.generated.json
 # 本地嵌入服务的 Python 字节码缓存
 __pycache__/
+
+# bili-dsh-mem-bench 是 4GB 跑分工作区（音频/tar/源码树/uv 缓存），只白名单文本三件套
+research/bili-dsh-mem-bench/*
+!research/bili-dsh-mem-bench/HIVE-REPORT.md
+!research/bili-dsh-mem-bench/gold.json
+!research/bili-dsh-mem-bench/bucket-map.json

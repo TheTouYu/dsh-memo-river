@@ -1,0 +1,418 @@
+[
+ {
+  "bvid": "BV1RkFAznESD",
+  "title": "Agent Skills 做知识库检索，能比传统 RAG 效果更好吗？",
+  "duration": 816,
+  "author": "code秘密花园",
+  "pubdate": 1770027600,
+  "fav_time": 1770121229,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1RkFAznESD",
+  "_score": 4,
+  "_hits": [
+   "Agent",
+   "RAG",
+   "知识库",
+   "检索"
+  ]
+ },
+ {
+  "bvid": "BV1AmSSBMErT",
+  "title": "放弃RAG吧 ！LLM知识库新范式 | Karpathy的新思路",
+  "duration": 436,
+  "author": "为什么叫QQ",
+  "pubdate": 1775399712,
+  "fav_time": 1775651647,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1AmSSBMErT",
+  "_score": 3,
+  "_hits": [
+   "LLM",
+   "RAG",
+   "知识库"
+  ]
+ },
+ {
+  "bvid": "BV1n6gNzoECH",
+  "title": "可以吞并所有MCP和智能体—娜迦3.0正式版：物联网，流式TTS，人类记忆模式",
+  "duration": 343,
+  "author": "柏斯阔落",
+  "pubdate": 1752744939,
+  "fav_time": 1758897582,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1n6gNzoECH",
+  "_score": 2,
+  "_hits": [
+   "记忆",
+   "智能体"
+  ]
+ },
+ {
+  "bvid": "BV1JkwgzHEDs",
+  "title": "把大模型塞进输入法：一个 LLM 输入法的实现",
+  "duration": 359,
+  "author": "劉殻齊",
+  "pubdate": 1773628200,
+  "fav_time": 1773638388,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1JkwgzHEDs",
+  "_score": 2,
+  "_hits": [
+   "大模型",
+   "LLM"
+  ]
+ },
+ {
+  "bvid": "BV1qAMR6MEA4",
+  "title": "20w token足矣！主动上下文压缩插件opencode-acp和 billion-context-pi  codex Claude zcode",
+  "duration": 1820,
+  "author": "裘香莲",
+  "pubdate": 1785772773,
+  "fav_time": 1788760044,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1qAMR6MEA4",
+  "_score": 2,
+  "_hits": [
+   "context",
+   "上下文"
+  ]
+ },
+ {
+  "bvid": "BV14seb6EEVP",
+  "title": "20岁辍学生做出 AI 记忆基准第一:Supermemory 怎么解决 AI 失忆？",
+  "duration": 698,
+  "author": "为什么叫QQ",
+  "pubdate": 1789992900,
+  "fav_time": 1790050481,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV14seb6EEVP",
+  "_score": 2,
+  "_hits": [
+   "记忆",
+   "memory"
+  ]
+ },
+ {
+  "bvid": "BV1gya667EV6",
+  "title": "大模型越聊越笨的解药来了！CLM 上下文语言模型，FLOPs 大幅下降，效果反超 SOTA",
+  "duration": 159,
+  "author": "每日Arxiv",
+  "pubdate": 1790858931,
+  "fav_time": 1792132221,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1gya667EV6",
+  "_score": 2,
+  "_hits": [
+   "大模型",
+   "上下文"
+  ]
+ },
+ {
+  "bvid": "BV1s8411Q7oa",
+  "title": "天呐！我的AI派蒙桌宠诞生了长期记忆！",
+  "duration": 900,
+  "author": "东风篱影",
+  "pubdate": 1692670969,
+  "fav_time": 1692859165,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1s8411Q7oa",
+  "_score": 1,
+  "_hits": [
+   "记忆"
+  ]
+ },
+ {
+  "bvid": "BV1g5zTBeEze",
+  "title": "所有人的AI学习一定要用Lenny的Skill库 #人工智能 #大模型 #AI工具 #AI人工智能 #播客",
+  "duration": 91,
+  "author": "清华姜学长",
+  "pubdate": 1769176710,
+  "fav_time": 1770210495,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1g5zTBeEze",
+  "_score": 1,
+  "_hits": [
+   "大模型"
+  ]
+ },
+ {
+  "bvid": "BV1es4NzREvi",
+  "title": "【VCP 5.0】我完成了地球上第一个AI-AGI文明系统范式。",
+  "duration": 1205,
+  "author": "红莲の狮子",
+  "pubdate": 1760201196,
+  "fav_time": 1770213320,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1es4NzREvi",
+  "_score": 1,
+  "_hits": [
+   "AGI"
+  ]
+ },
+ {
+  "bvid": "BV1EhwVz4Eas",
+  "title": "12MB 的 AI Agent 框架，用 Unix 哲学干翻臃肿巨头｜Axe 实测",
+  "duration": 69,
+  "author": "锋芒AI",
+  "pubdate": 1773752400,
+  "fav_time": 1773835542,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1EhwVz4Eas",
+  "_score": 1,
+  "_hits": [
+   "Agent"
+  ]
+ },
+ {
+  "bvid": "BV1z49NBmEtj",
+  "title": "AI写代码太费Token？让大模型1秒看懂整个项目的开源神器来了！",
+  "duration": 534,
+  "author": "沐冰茶",
+  "pubdate": 1775347200,
+  "fav_time": 1775563272,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1z49NBmEtj",
+  "_score": 1,
+  "_hits": [
+   "大模型"
+  ]
+ },
+ {
+  "bvid": "BV1SzPJzwEnN",
+  "title": "最丝滑的开源通用 Agent 产品 Proma 更新了 0.6.0 版本啦，支持了 Agent Teams 和众多功能",
+  "duration": 1047,
+  "author": "ErlichLiu",
+  "pubdate": 1772478361,
+  "fav_time": 1777377482,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1SzPJzwEnN",
+  "_score": 1,
+  "_hits": [
+   "Agent"
+  ]
+ },
+ {
+  "bvid": "BV1SZ5U6ZEsN",
+  "title": "[VCP]VCP上下文引力场—让上下文引导系统航行。",
+  "duration": 756,
+  "author": "红莲の狮子",
+  "pubdate": 1778696792,
+  "fav_time": 1778722113,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1SZ5U6ZEsN",
+  "_score": 1,
+  "_hits": [
+   "上下文"
+  ]
+ },
+ {
+  "bvid": "BV1m2LG6WEdH",
+  "title": "如何修复Claude Code给第三方大模型用户挖的坑",
+  "duration": 443,
+  "author": "张司机在路上",
+  "pubdate": 1778927183,
+  "fav_time": 1778948136,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1m2LG6WEdH",
+  "_score": 1,
+  "_hits": [
+   "大模型"
+  ]
+ },
+ {
+  "bvid": "BV1Z7RNBmENU",
+  "title": "3300行代码干掉53万行，这个Agent凭什么？",
+  "duration": 329,
+  "author": "老汤的碳基突围",
+  "pubdate": 1777846090,
+  "fav_time": 1779451184,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1Z7RNBmENU",
+  "_score": 1,
+  "_hits": [
+   "Agent"
+  ]
+ },
+ {
+  "bvid": "BV1fSDJB7Emi",
+  "title": "【千星奇域】知识库问答Skill，配合WorkBuddy提升开发效率",
+  "duration": 141,
+  "author": "神奇嘟嘟可",
+  "pubdate": 1775705400,
+  "fav_time": 1779536012,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1fSDJB7Emi",
+  "_score": 1,
+  "_hits": [
+   "知识库"
+  ]
+ },
+ {
+  "bvid": "BV1UgVi6EE5Z",
+  "title": "（Agent Harness）我给AI装了个大脑，然后整个系统开挂了",
+  "duration": 100,
+  "author": "doiito",
+  "pubdate": 1780355306,
+  "fav_time": 1781889571,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1UgVi6EE5Z",
+  "_score": 1,
+  "_hits": [
+   "Agent"
+  ]
+ },
+ {
+  "bvid": "BV1pYNm69EPm",
+  "title": "Windows跑AI Agent，WSL才是终极答案，别羡慕Mac了，  WSL保姆级全攻略，海量实战教程，一期视频精通",
+  "duration": 1892,
+  "author": "技术爬爬虾",
+  "pubdate": 1783942995,
+  "fav_time": 1784910210,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1pYNm69EPm",
+  "_score": 1,
+  "_hits": [
+   "Agent"
+  ]
+ },
+ {
+  "bvid": "BV1wA3w6uEuH",
+  "title": "基于GitHub近8万stars的Pi构建——Triple-pi  手把手教你学会agent loop和工程实践！不是为了跑 Demo，是为了写进大厂简历",
+  "duration": 309,
+  "author": "不是小菠萝",
+  "pubdate": 1785163530,
+  "fav_time": 1785230405,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1wA3w6uEuH",
+  "_score": 1,
+  "_hits": [
+   "Agent"
+  ]
+ },
+ {
+  "bvid": "BV1Xg7v6PEDK",
+  "title": "代码搜索省92% Token？拆解 Headroom 的上下文优化真相",
+  "duration": 813,
+  "author": "为什么叫QQ",
+  "pubdate": 1782400875,
+  "fav_time": 1785402119,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1Xg7v6PEDK",
+  "_score": 1,
+  "_hits": [
+   "上下文"
+  ]
+ },
+ {
+  "bvid": "BV1PCjx6oEeJ",
+  "title": "Agent版Next.js来了？文件系统即Agent！拆解 eve",
+  "duration": 666,
+  "author": "为什么叫QQ",
+  "pubdate": 1782044100,
+  "fav_time": 1785402515,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1PCjx6oEeJ",
+  "_score": 1,
+  "_hits": [
+   "Agent"
+  ]
+ },
+ {
+  "bvid": "BV1mqbL6PEZz",
+  "title": "让 Deepseek Harnesss 成为上下文思维地图｜ThoughtDAG 开发者实操",
+  "duration": 481,
+  "author": "Chatchan",
+  "pubdate": 1788619507,
+  "fav_time": 1788885812,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1mqbL6PEZz",
+  "_score": 1,
+  "_hits": [
+   "上下文"
+  ]
+ },
+ {
+  "bvid": "BV1rxhf6EEHb",
+  "title": "【千星沙箱模拟器】AI直接试玩lua奇域 + 知识库系统更新说明",
+  "duration": 131,
+  "author": "神奇嘟嘟可",
+  "pubdate": 1790185395,
+  "fav_time": 1790210308,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1rxhf6EEHb",
+  "_score": 1,
+  "_hits": [
+   "知识库"
+  ]
+ },
+ {
+  "bvid": "BV1rmpM6QEeb",
+  "title": "我训练了一个会写字的AI，它能模仿你的笔迹！",
+  "duration": 191,
+  "author": "Yperm",
+  "pubdate": 1791363607,
+  "fav_time": 1791417701,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1rmpM6QEeb",
+  "_score": 1,
+  "_hits": [
+   "训练"
+  ]
+ },
+ {
+  "bvid": "BV18uHv6zEvH",
+  "title": "Karpathy：LLM四层输出阶梯，400万加浏览 5.7万加，收藏的方法",
+  "duration": 589,
+  "author": "为什么叫QQ",
+  "pubdate": 1791202500,
+  "fav_time": 1791869220,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV18uHv6zEvH",
+  "_score": 1,
+  "_hits": [
+   "LLM"
+  ]
+ },
+ {
+  "bvid": "BV1pBHE61EnN",
+  "title": "虚幻引擎AI天梯：12家大模型做同一个游戏，最贵的竟然翻车",
+  "duration": 2322,
+  "author": "盒子姬",
+  "pubdate": 1791144477,
+  "fav_time": 1791986305,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1pBHE61EnN",
+  "_score": 1,
+  "_hits": [
+   "大模型"
+  ]
+ },
+ {
+  "bvid": "BV1NmJU6PEYK",
+  "title": "685 tokens/s！大模型出字干到光速｜GitHub Trending TokenSpeed 深度拆解 EP.04",
+  "duration": 345,
+  "author": "DamoX001",
+  "pubdate": 1792111823,
+  "fav_time": 1792130701,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1NmJU6PEYK",
+  "_score": 1,
+  "_hits": [
+   "大模型"
+  ]
+ },
+ {
+  "bvid": "BV1BU5E6pEBL",
+  "title": "[基于skill的Agent进化] 阿里Qwen新论文-Trace2skill-分层整合从不同轨迹中得到的修改建议",
+  "duration": 740,
+  "author": "Agent智能体深度研究院",
+  "pubdate": 1778630400,
+  "fav_time": 1792381811,
+  "folder": "默认收藏夹",
+  "link": "https://www.bilibili.com/video/BV1BU5E6pEBL",
+  "_score": 1,
+  "_hits": [
+   "Agent"
+  ]
+ }
+]
