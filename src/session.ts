@@ -148,6 +148,13 @@ export interface SessionState {
   lastRecallNoticeKey: string | null
   /** 自最近一次成功注入以来，连续的基础设施失败次数（通知文案用它给模型量级）。 */
   recallFailureStreak: number
+  /**
+   * 时间线兜底节流（2026-10-29 P0-1）：最近一次兜底注入的 turn 与时刻。
+   * 同 turn 至多一次（pre-step 每步重入）；跨 turn 学 recallFailureNotice 节律——
+   * 回合首发必发（那正是空洞轮），间隔内不重发（故障期长任务不刷屏）。
+   */
+  lastTimelineFallbackTurn: number
+  lastTimelineFallbackAt: number
   /** 最近观测到的工具输出长度环形样本（≤20 条；增量锚截尾均值的量尺，票05）。 */
   toolLens: number[]
   /** 最近一条 ≥150 字助手正文的首行摘要（票05：digest 触发时现取，不走 turn-stopping 存货）。 */
@@ -224,6 +231,8 @@ export function getSession(sessionId: string, cwd: string | null): SessionState 
     lastRecallNoticeReason: null,
     lastRecallNoticeKey: null,
     recallFailureStreak: 0,
+    lastTimelineFallbackTurn: -1,
+    lastTimelineFallbackAt: 0,
     toolLens: [],
     lastAssistantDigest: '',
     activeMs: 0,

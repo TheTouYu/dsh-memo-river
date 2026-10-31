@@ -36,7 +36,7 @@ import { join } from 'node:path'
 import type { Config } from './config.js'
 import { recordHurt, recordOmega, recordUsage, readUsageLedger, type UsageEntry } from './health.js'
 import { hurtTargets } from './hurt.js'
-import { BLOCK_CLOSE, continuationTail, DelegationExtras, renderInjection, renderRecallNotice, renderSkipNotice, renderWriteNudge } from './render.js'
+import { BLOCK_CLOSE, continuationTail, DelegationExtras, excerpt, renderInjection, renderRecallNotice, renderSkipNotice, renderTimelineFallback, renderWriteNudge, TIMELINE_FALLBACK_MAX_ITEMS, type TimelineEntry } from './render.js'
 import { embedHealth, formatEmbedEvent } from './embed-health.js'
 import { coldTagSuggest, sameAxisHit, scanTagAxis } from './nudge-guide.js'
 import { buildQueryField, candidateKey, type RecallCandidate, type RecallOptions, type RecallOutcome } from './recall.js'
@@ -624,6 +624,47 @@ export function recallFailureNotice(
 }
 
 /**
+ * 时间线兜底取材（2026-10-29 P0-1）：按 updated_at 倒序取本桶最近 N 篇。
+ * 只在故障轮跑（本地 sqlite 全量 files/chunks 拼一遍，283 篇毫秒级）；标题从
+ * chunk 首行 `# ` 取（files 表无 title 列——hive 跑分时同款口径）。
+ */
+export async function buildTimelineEntries(
+  workspace: { store: { files(diary?: string): unknown[]; chunks(diary?: string): unknown[] }; paths: { bucket: string } },
+  now = Date.now(),
+): Promise<TimelineEntry[]> {
+  type F = { id: number; path: string; updated_at: number | null }
+  type C = { file_id: number; content: string }
+  const files = (workspace.store.files(workspace.paths.bucket) as F[])
+    .filter((f) => typeof f.updated_at === 'number')
+    .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0))
+    .slice(0, TIMELINE_FALLBACK_MAX_ITEMS)
+  const chunks = workspace.store.chunks(workspace.paths.bucket) as C[]
+  const entries: TimelineEntry[] = []
+  for (const f of files) {
+    const ch = chunks.find((c) => c.file_id === f.id)
+    if (!ch) continue
+    const title = (ch.content.match(/^#\s+(.+)$/m)?.[1] ?? '').trim() || f.path
+    entries.push({
+      id: Number(f.id),
+      title,
+      excerptText: excerpt(ch.content, 160),
+      ageHours: (now - (f.updated_at ?? now)) / 3_600_000,
+    })
+  }
+  return entries
+}
+
+/**
+ * 时间线兜底节流判定（P0-1）：同 turn 至多一次；跨 turn 学 recallFailureNotice——
+ * 回合首发必发（那正是空洞轮），间隔内不重发（故障期长任务不刷屏）。
+ */
+export function timelineFallbackDue(state: SessionState, turn: number, isTurnStart: boolean, now = Date.now()): boolean {
+  if (state.lastTimelineFallbackTurn === turn) return false
+  if (isTurnStart) return true
+  return now - state.lastTimelineFallbackAt >= RECALL_NOTICE_MIN_SPACING_MS
+}
+
+/**
  * 产出一段尾注入文本；返回 `null` 表示**不注入**（门控不过 / 无候选 / 失败降级）。
  * 本函数永不抛——调用方（pre-step）另有 try/catch 兜底。
  *
@@ -986,6 +1027,8 @@ export function recallFailureNotice(
         timeoutMs: deps.config.inject.decisionTimeoutMs,
         logger,
         fallback: decisionFallback,
+        bucket: workspace.paths.bucket,
+        session: sessionId,
       }
       if (decisionMode === 'shadow') {
         // fire-and-forget：失败已由客户端记 decision-error，这里不 await、绝不抛。
@@ -1040,6 +1083,28 @@ export function recallFailureNotice(
     noteRecallFailure(state, reason)
     state.skippedCount += 1
     logger.info(`${renderSkipNotice({ ...finalOutcome, fallbackReason: reason }, workspace.paths.bucket)} session=${sessionId}`)
+
+    /* P0-1 时间线兜底（2026-10-29，hive 测后；对照灵枢 timeline auto-recall）：
+     * 基础设施失败时「宁可给时间线也不给空」——生产实锤（D208/D214）端点劣化期
+     * skip 率 45-58%，用户看到「桶里有却不生效」。兜底块自带降级声明（模型可见），
+     * 故 pre-step 的「召回未生效」通知在本路径自动压掉（text 非 null 即不发）。
+     * 空库 entries=[] → renderTimelineFallback 返回 null → 维持原 skip 语义（#27 空桶留痕不变）。 */
+    if (isRecallInfrastructureFailure(reason) && timelineFallbackDue(state, turn, isTurnStart)) {
+      const entries = await buildTimelineEntries(workspace)
+      const fallbackText = renderTimelineFallback(entries, workspace.paths.bucket, reason ?? 'unknown', state.recallFailureStreak)
+      if (fallbackText) {
+        state.lastTimelineFallbackTurn = turn
+        state.lastTimelineFallbackAt = Date.now()
+        /* lastInjectionText 供 memo_write 回注与回归测试取用；lastInjectTurn/lastSelectionKey
+         * 是语义检索注入的账（identical-selection 判据），兜底不占——语义通道恢复后的
+         * 正常注入不受兜底去重闸影响。 */
+        state.lastInjectionText = fallbackText
+        logger.info(
+          `inject-fallback-timeline bucket=${workspace.paths.bucket} n=${entries.length} reason=${reason} turn=${turn} session=${sessionId}`,
+        )
+        return fallbackText
+      }
+    }
     return null
   }
 
