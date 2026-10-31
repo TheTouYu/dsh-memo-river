@@ -138,7 +138,7 @@ export function toolRecallOptions(config, k, mode, rerank) {
 /**
  * 主动补证（memo_recall 语义）。返回 { text, outcome }；无桶返回 { text, missing }。
  */
-export async function recall({ cwd, folder, query, k, mode, rerank = true, fullBody = false, timeRange }) {
+export async function recall({ cwd, folder, query, k, mode, rerank = true, fullBody = false, debug = false, timeRange }) {
     const config = sharedConfig();
     const target = openTarget({ cwd, folder }, config);
     if (!target.ok)
@@ -165,7 +165,7 @@ export async function recall({ cwd, folder, query, k, mode, rerank = true, fullB
         if (outcome.selected.length > 0)
             recordUsage(workspace.store, outcome.selected.map((c) => c.fileId), 'active');
     } catch { /* 台账失败静默：观测不能伤害补证 */ }
-    const text = formatRecallResult(workspace, outcome, String(query ?? ''), fullBody === true);
+    const text = formatRecallResult(workspace, outcome, String(query ?? ''), fullBody === true, debug === true);
     return { text, outcome, workspace };
 }
 

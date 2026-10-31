@@ -36,7 +36,7 @@ const TOOLS = [
         description: '主动补证：在记忆河流（VCPToolBox TagMemo/RiverMemo）里定向检索历史日记。被动注入给线索，本工具给细节。' +
             '返回候选列表，每条两行：`· D<id>「<title>」 score= knn= role= anchor= topology= omega= regime= tags=[reward-suppressed]`，' +
             '下一行是其正文片段（默认 120 字；**显式** `truncate:false` 给全文，那是深挖的走法）。' +
-            '末尾附 `· 未注入：…` 明细行与 `diagnostics={…}`（含 fallbackReason、gateVector、readoutDiagnostics）。',
+            '末尾附 `· 未注入 N 条：k-limit×N · <其他原因>×N（D…）` 聚合行与一行诊断摘要；传 `debug:true` 取完整 diagnostics。',
         inputSchema: {
             type: 'object',
             properties: {
@@ -45,6 +45,7 @@ const TOOLS = [
                 mode: { type: 'string', enum: ['tagmemo', 'rivermemo', 'dtsc', 'topology_v3'], description: '读出模式：topology_v3（默认，Ω/role 在这条上）/ dtsc / rivermemo / tagmemo（纯向量）。' },
                 rerank: { type: 'boolean', description: '是否做原生重排（false = 只回 KNN 基线）。' },
                 truncate: { type: 'boolean', description: '正文是否截断为首句。' },
+                debug: { type: 'boolean', description: '附加完整 diagnostics（自检字段）。诊断/复盘时用。' },
                 timeRange: { type: 'string', description: '::Time 语义，如 2026-09-10~2026-09-11。' },
                 folder: { type: 'string', description: '真路由：桶名或 16 位工作区哈希 → 目标桶上执行检索（跨项目知识共享通道）。缺省 = 工作目录对应桶。' },
             },
@@ -108,6 +109,7 @@ async function callTool(name, args = {}) {
                 rerank: args.rerank,
                 /* 与 lib/tools.js memo_recall 同口径：只有**显式** truncate:false 才给全文 */
                 fullBody: args.truncate === false,
+                debug: args.debug === true,
                 timeRange: args.timeRange,
             });
             return r.text;
