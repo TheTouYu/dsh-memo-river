@@ -23,6 +23,8 @@
  * `decision-error` 记因，**绝不抛出**——调用方（injector 接缝）保原序注入。
  */
 
+import { appendOpenRouterUsage, formatOpenRouterUsageLine, isOpenRouterUrl } from './openrouter-ledger.js'
+
 /** ⑥ 主问法（run_gate2.py QUESTIONS['q_changes']，与 gate-results.jsonl 同文案保证可比）。 */
 export const DECISION_INSTRUCTION = '读了这条候选记忆之后，会改变当前任务接下来的做法吗？'
 /** 候选正文截断口径：build_tests.py BODY_CHARS 缺省 600（非空行 join(' ') 后取前 600 字）。 */
@@ -46,6 +48,10 @@ export interface DecisionClientOptions {
   logger?: DecisionLoggerLike
   /** 测试注入口；缺省全局 fetch。 */
   fetchImpl?: typeof fetch
+  /** 调用台账归属的工作区桶名（openrouter-usage.jsonl 用）。 */
+  bucket?: string
+  /** 调用台账归属的会话 id（可选，便于按会话归因）。 */
+  session?: string
   /**
    * **保底泳道**（2026-10-16 用户令，游戏模式停 8122 期间 shadow/on 不断流）：
    * 主端点任何失败（超时/拒连/5xx/坏 JSON/坏形状）后，走 System One 原生决策接口
@@ -215,8 +221,25 @@ async function systemOneFallbackScore(stateZh: string, opts: DecisionClientOptio
   const fb = opts.fallback!
   const fetchImpl = opts.fetchImpl ?? fetch
   const url = `${fb.apiUrl.replace(/\/+$/, '')}/v1/systemone`
+  const startedAt = Date.now()
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), fb.timeoutMs)
+  const logError = (error: string): void => {
+    if (!isOpenRouterUrl(fb.apiUrl)) return
+    const rec = {
+      ts: new Date().toISOString(),
+      api: 'systemone' as const,
+      lane: 'fallback' as const,
+      bucket: opts.bucket,
+      session: opts.session,
+      model: fb.model,
+      durationMs: Date.now() - startedAt,
+      status: 'error' as const,
+      error,
+    }
+    appendOpenRouterUsage(rec)
+    opts.logger?.info(formatOpenRouterUsageLine(rec))
+  }
   try {
     let res: Response
     try {
@@ -232,19 +255,57 @@ async function systemOneFallbackScore(stateZh: string, opts: DecisionClientOptio
       })
     } catch (e) {
       const kind = (e as Error)?.name === 'AbortError' ? 'timeout' : 'network'
+      const msg = `${kind}: ${String((e as Error)?.message ?? e)}`
+      logError(msg)
       opts.logger?.warn(`decision-fallback-error kind=${kind} model=${fb.model} msg=${String((e as Error)?.message ?? e)}`)
       return null
     }
     if (!res.ok) {
-      opts.logger?.warn(`decision-fallback-error kind=http-${res.status} model=${fb.model}`)
+      const msg = `http-${res.status}`
+      logError(msg)
+      opts.logger?.warn(`decision-fallback-error kind=${msg} model=${fb.model}`)
       return null
     }
     let data: unknown
     try {
       data = await res.json()
     } catch (e) {
+      const msg = `bad-json: ${String((e as Error)?.message ?? e)}`
+      logError(msg)
       opts.logger?.warn(`decision-fallback-error kind=bad-json model=${fb.model} msg=${String((e as Error)?.message ?? e)}`)
       return null
+    }
+    if (isOpenRouterUrl(fb.apiUrl)) {
+      const payload = data as {
+        model?: string
+        provider?: string
+        id?: string
+        usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number; cost?: number }
+      } | null
+      const usage = payload?.usage
+      const inputTokens = usage?.input_tokens
+      const outputTokens = usage?.output_tokens
+      const totalTokens =
+        usage?.total_tokens ??
+        (inputTokens != null || outputTokens != null ? (inputTokens ?? 0) + (outputTokens ?? 0) : undefined)
+      const rec = {
+        ts: new Date().toISOString(),
+        api: 'systemone' as const,
+        lane: 'fallback' as const,
+        bucket: opts.bucket,
+        session: opts.session,
+        model: payload?.model ?? fb.model,
+        provider: payload?.provider,
+        id: payload?.id,
+        inputTokens,
+        outputTokens,
+        totalTokens,
+        costUsd: usage?.cost,
+        durationMs: Date.now() - startedAt,
+        status: 'ok' as const,
+      }
+      appendOpenRouterUsage(rec)
+      opts.logger?.info(formatOpenRouterUsageLine(rec))
     }
     const answer = (data as { answers?: Record<string, { noul?: unknown }> } | null)?.answers?.changes
     const noul = answer?.noul

@@ -12,6 +12,7 @@
  */
 import { EmbCache } from './emb-cache.js'
 import { embedHealth } from './embed-health.js'
+import { appendOpenRouterUsage, formatOpenRouterUsageLine, isOpenRouterUrl } from './openrouter-ledger.js'
 import { estimateTokens } from './runtime.js'
 
 export interface EmbedClientOptions {
@@ -37,6 +38,8 @@ export interface EmbedClientOptions {
    */
   fallback?: EmbedEndpoint
   logger?: { warn(msg: string): void; info(msg: string): void }
+  /** 调用台账归属的工作区桶名（openrouter-usage.jsonl 用）。 */
+  bucket?: string
 }
 
 /** provider 优先序解析（'Parasail,DeepInfra' → {order:[...]}）；空 = 请求体不带 provider 字段。 */
@@ -463,6 +466,7 @@ export class EmbedClient {
 
   private async requestBatch(lane: Lane, batch: string[], timeoutMs?: number): Promise<Float32Array[]> {
     const url = `${lane.apiUrl}/v1/embeddings`
+    const startedAt = Date.now()
     const transport = await ensureTransport(this.options.logger)
     const init: Record<string, unknown> = {
       method: 'POST',
@@ -478,6 +482,21 @@ export class EmbedClient {
       signal: AbortSignal.timeout(timeoutMs ?? this.timeoutMs),
     }
     if (transport.agent) init.dispatcher = transport.agent
+    const logError = (error: string): void => {
+      if (!isOpenRouterUrl(lane.apiUrl)) return
+      const rec = {
+        ts: new Date().toISOString(),
+        api: 'embeddings' as const,
+        lane: lane.label === 'fallback' ? ('fallback' as const) : ('primary' as const),
+        bucket: this.options.bucket,
+        model: lane.model,
+        durationMs: Date.now() - startedAt,
+        status: 'error' as const,
+        error,
+      }
+      appendOpenRouterUsage(rec)
+      this.options.logger?.info(formatOpenRouterUsageLine(rec))
+    }
     let response: TransportResponse
     try {
       response = await transport.fetch(url, init)
@@ -492,13 +511,49 @@ export class EmbedClient {
       const msg = `${String(err?.message ?? e)}${causeMsg}`
       const timedOut = err?.name === 'TimeoutError' || /aborted due to timeout/i.test(msg)
       this.lastError = `${timedOut ? 'embed-timeout' : 'embed-request-failed'}: ${msg}`
+      logError(this.lastError)
       throw new Error(this.lastError)
     }
     if (!response.ok) {
       this.lastError = `embed-http-${response.status}`
-      throw new Error(`${this.lastError}: ${(await response.text().catch(() => '')).slice(0, 200)}`)
+      const bodyText = await response.text().catch(() => '')
+      logError(`${this.lastError}: ${bodyText.slice(0, 200)}`)
+      throw new Error(`${this.lastError}: ${bodyText.slice(0, 200)}`)
     }
-    const payload = (await response.json()) as { data?: Array<{ index?: number; embedding?: number[] }> }
+    let payload: {
+      data?: Array<{ index?: number; embedding?: number[] }>
+      usage?: { prompt_tokens?: number; total_tokens?: number; cost?: number }
+      model?: string
+      provider?: string
+      id?: string
+    }
+    try {
+      payload = (await response.json()) as typeof payload
+    } catch (e) {
+      const msg = `embed-bad-json: ${String((e as Error)?.message ?? e)}`
+      this.lastError = msg
+      logError(msg)
+      throw new Error(msg)
+    }
+    if (isOpenRouterUrl(lane.apiUrl)) {
+      const rec = {
+        ts: new Date().toISOString(),
+        api: 'embeddings' as const,
+        lane: lane.label === 'fallback' ? ('fallback' as const) : ('primary' as const),
+        bucket: this.options.bucket,
+        model: payload.model ?? lane.model,
+        provider: payload.provider,
+        id: payload.id,
+        inputTokens: payload.usage?.prompt_tokens,
+        outputTokens: 0,
+        totalTokens: payload.usage?.total_tokens,
+        costUsd: payload.usage?.cost,
+        durationMs: Date.now() - startedAt,
+        status: 'ok' as const,
+      }
+      appendOpenRouterUsage(rec)
+      this.options.logger?.info(formatOpenRouterUsageLine(rec))
+    }
     const rows = [...(payload.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
     if (rows.length !== batch.length) {
       this.lastError = `embed-count-mismatch ${rows.length}!=${batch.length}`

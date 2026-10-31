@@ -80,6 +80,8 @@ export class WorkspaceRuntime {
       ...(resolved.fallback ? { fallback: resolved.fallback } : {}),
       // 2026-10-15：emb-cache load() 的隔离/自愈告警此前因未接线而静默（BUG-1014 复盘发现的观测缺口）
       logger: this.logger,
+      // 2026-10-21：OpenRouter 调用台账按桶归因（openrouter-usage.jsonl）
+      bucket: paths.bucket,
     })
     this.engine = new MemoEngine({
       vcpRoot: config.native.vcpRoot,
