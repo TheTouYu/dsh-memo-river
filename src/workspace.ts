@@ -9,6 +9,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { basename, join } from 'node:path'
 import type { Config } from './config.js'
 import { closeEmbedTransport, EmbedClient, embedTransportIntent, type EmbedEndpoint } from './embed.js'
+import { autoRecoverIfCorrupt } from './integrity.js'
 import { MemoEngine, loadKnowledgeBaseManager } from './native.js'
 import {
   Logger,
@@ -158,12 +159,18 @@ export class WorkspaceRuntime {
     const paths = workspacePaths(cwd, config.bucket, config.logFile || undefined)
     ensureWorkspaceDirs(paths)
 
+    /* 2026-11-17 事故：打开前完整性检查 + 自动换新。此刻 registry 无实例 → 本进程内
+     * 该桶无 rusqlite 在飞，探测连接安全（跨进程写入者由 fcntl+shm 仲裁）。 */
+    const integrity = autoRecoverIfCorrupt(paths.dbPath)
     const resolved = resolveEmbed(config, paths)
     const store = new KnowledgeStore(paths.dbPath)
     const runtime = new WorkspaceRuntime(paths, store, resolved, config)
     runtime.logger.info(
       `workspace-open cwd=${cwd} hash=${paths.hash} bucket=${paths.bucket} db=${paths.dbPath} embed=${resolved.source} transport=${embedTransportIntent()}`,
     )
+    if (integrity.action !== 'ok') {
+      runtime.logger.warn(`integrity-auto-${integrity.action}: ${integrity.detail}`)
+    }
     return runtime
   }
 

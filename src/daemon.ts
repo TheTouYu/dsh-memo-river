@@ -8,12 +8,13 @@
  *     垃圾判定先于 Tag 判定；**绝不代批**——D10 机械批准污染教训）
  * ④ 节流与退避：默认 15 分钟一轮；连续失败指数退避；每轮耗时与结果写日志
  */
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Config } from './config.js'
 import { candidateReportPath, writeCandidateReport } from './consolidation.js'
 import { precheckDrafts, SECTION_RECALLED, SECTION_SUGGESTED, type PrecheckSummary } from './drafts.js'
 import { formatHealth, healthReport } from './health.js'
+import { integrityProblems } from './integrity.js'
 import { excerpt } from './render.js'
 import type { PendingDraft } from './session.js'
 import { acquireWorkspace } from './workspace.js'
@@ -174,6 +175,24 @@ export class WorkspaceDaemon {
         } catch { /* 静默 */ }
       }
       this.lastFilesCount = report.counts.files
+
+      /* ③c 完整性哨兵（2026-11-17 三桶损坏事故）：全量 integrity_check（quick_check
+         跳过索引↔表核对，恰好漏掉「row 3 missing from index」轻损签名）。只检出+留痕
+         +写 marker——换新动作在下次进程重启打开时自动做（WorkspaceRuntime.open →
+         autoRecoverIfCorrupt）；守护轮内不做破坏性动作（活连接在场，换件不安全）。
+         正文底账 dailynote/*.md 不受库损坏影响。 */
+      try {
+        const problems = integrityProblems(workspace.store.db)
+        const marker = join(workspace.paths.root, 'CORRUPT-NEEDS-RESTART')
+        if (problems.length > 0) {
+          log('error', `guardian-integrity: FAIL bucket=${workspace.paths.bucket} first="${problems[0]}" — 已写 marker，重启后打开时自动 .recover 换新（dailynote/*.md 底账无损）`)
+          try {
+            writeFileSync(marker, `${new Date(at).toISOString()} ${problems.join(' | ')}\n`)
+          } catch { /* 静默 */ }
+        } else if (existsSync(marker)) {
+          try { rmSync(marker) } catch { /* 静默 */ }
+        }
+      } catch { /* 哨兵自身绝不拖垮守护轮 */ }
 
       /* ③ 草稿落盘（等确认，不自动入库） */
       if (this.options.config.maintenance.drafts) {
