@@ -305,10 +305,16 @@ async function composeReinjection(
   lead: string[],
   bucket: string,
 ): Promise<string> {
-  /* SIGBUS 防护：本函数作为 preamble 在闸外并行在飞——store 读走 readSync 自旋
-   * （不排队，防循环等待死锁）；嵌入 await 天然在闸外（票 03 的并行墙钟优化保留）。 */
-  const freq = await workspace.readSync(() => workspace.store.tagFrequency())
-  const total = await workspace.readSync(() => workspace.store.files().length)
+  /* 崩溃放大器解耦（2026-11-17 22:10 事故）：本函数的 promise 作为 preamble 传入
+   * writeDiaryCore/写节律提醒——sqlite 异常（含瞬时 malformed）一旦上穿，宿主把它当
+   * fatal load failure 处理→整个 dsh-web 退出，桶级故障变全员中断（journalctl 实锤：
+   * composeReinjection→readSync→tagFrequency 抛 malformed→exit 1→systemd 拉起）。
+   * 这里整包降级：读不出就给最小提示，写路径继续走。 */
+  try {
+    /* SIGBUS 防护：本函数作为 preamble 在闸外并行在飞——store 读走 readSync 自旋
+     * （不排队，防循环等待死锁）；嵌入 await 天然在闸外（票 03 的并行墙钟优化保留）。 */
+    const freq = await workspace.readSync(() => workspace.store.tagFrequency())
+    const total = await workspace.readSync(() => workspace.store.files().length)
   const reinjectTop = freq.slice(0, 30).map((t) => `${t.name}×${t.count}`).join(', ') || '(空库)'
   const related = await relatedDiaries(workspace, content)
   const pre = await workspace.readSync(() => healthReport(workspace.store, bucket))
@@ -342,7 +348,16 @@ async function composeReinjection(
     /* N7c：实测唯一真写入重试的根因是 Tag 行写成 `Tags:`——一行成本防一次拒绝往返。 */
     '【写前回注】Tag 行格式 `Tag: 名词, 名词`（Tag 单数无 s）——写成 `Tags:` 会被格式闸门拒绝。',
     ...(mergeHint ? [mergeHint] : []),
-  ].join('\n')
+    ].join('\n')
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? e)
+    return [
+      ...lead,
+      `【写前回注】(降级) 词汇表/相关日记/体检读取失败：${msg.slice(0, 200)}`,
+      '【写前回注】质量四要素：写清——延续什么 / 转折什么 / 因果链 / 教训。',
+      '【写前回注】Tag 行格式 `Tag: 名词, 名词`（单数无 s）；涉教训末尾补「触发条件→动作」。',
+    ].join('\n')
+  }
 }
 
 /* ────────────── memo_recall ────────────── */
