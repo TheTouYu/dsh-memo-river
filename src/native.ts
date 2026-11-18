@@ -1,11 +1,14 @@
 /**
- * src/native.ts — 复用 `/home/h/app/VCPToolBox/rust-vexus-lite` 原生内核。
+ * src/native.ts — 复用上游 vexus-lite 原生内核（P4 起 = 整仓 vendor 的 V5，见 kernel/）。
  *
- * 生产链（与 `VCPToolBox/sandbox/classroom-flow/native.cjs` 逐调用对齐）：
+ * 生产链（与上游 KnowledgeBaseManager/TagMemoEngine 逐调用对齐）：
+ *   ⓪ ABI2 注册 openAndInitStore（V5 注册制：须在 recoverFromSqlite 之前）
  *   ① `rebuildMemoArtifact(dbPath, {modelSig, effectiveConfig})` → Rust 侧 CSR / 图资产
- *   ② `runMemoPipeline(dbPath, artifactSig, inputJson, qVec, ghostVec)`
- *        → EPA + 残差金字塔 + 门控 + Spike + 向量融合，一次 N-API 提交
- *   ③ `rerankMemoDtsc(...)` 或 `rerankRivermemoTopologyV3(...)` → 读出
+ *   ② `computeMemoGeometry(dbPath, modelSig, configJson)` → AGS 锥几何一件全包
+ *      （EPA 基底缓存 + 内生残差 + 锥诊断；P3 的四件派生资产调用已随上游退役）
+ *   ③ `runMemoPipeline(dbPath, artifactSig, inputJson, qVec, ghostVec)`
+ *        → 双曲候选 + 感知 + 融合，一次 N-API 提交
+ *   ④ `rerankRivermemoTopologyV3(...)` → 读出（dtsc 已随上游 V5 删除）
  *
  * 一切向量/图/读出计算都在 Rust；本模块只做索引装载与载荷组装。
  */
@@ -198,11 +201,9 @@ export interface ArtifactState {
   resident: boolean
   sourceElapsedMs?: number
   /**
-   * 除图资产外，生产链还依赖三类**派生资产**，rebuildMemoArtifact 本身不产出它们：
-   *   · EPA 基底    → computeEpaBasis + publishEpaBasisCache（kv_store.epa_basis_cache）
-   *   · 内生残差    → computeIntrinsicResiduals（tag_intrinsic_residuals / _status）
-   *   · Tag 成对距离 → computePairwiseSimilarities（tag_pair_similarity / _status）
-   * 实测（DESIGN 验收 #8）：缺这三类时读出仍能跑，但近似并列处会翻转名次。
+   * 派生资产台账（V5 起全部由 computeMemoGeometry 一件产出：EPA 基底缓存 +
+   * 内生残差 + 锥诊断；pairwise 档已退役，字段保留兼容健康面展示）。
+   * 实测（DESIGN 验收 #8）：缺几何资产时读出仍能跑，但近似并列处会翻转名次。
    */
   assets: {
     epaBasis: { ok: boolean; basisCount: number; error: string | null }
