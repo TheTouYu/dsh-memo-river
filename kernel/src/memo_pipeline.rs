@@ -1,46 +1,26 @@
-//! memo_pipeline —— 票 08 + VCP 2.0 复刻 P1.2：行为等价复刻上游 memo_pipeline.rs（2.0 HEAD 2460 行）。
-//! EPA 轴分析 → 残差金字塔（Gram-Schmidt）→ Handshake → 门控 → Spike 感知 → 融合 → 双场传播。
-//! 公式与系数逐字对齐上游；索引层为 usearch（同版本/同参数/同插入序 → 同 knn 结果）。
-//!
-//! P1.2：①金字塔按层收集**输入残差**（仅 dynamic_wormholes 开时，上游 696）；
-//! ②DynamicWormholeContext 接线（上游 1759-1780：seed_levels 由 level_tags 最小层号构建，
-//! 层相似度经 reuse_score 复用）；③请求级 TagVectorPool 跨金字塔/融合/双场三段共享
-//! （池优先、索引兜底，既有读数口径不变）。缺省 dynamic_wormholes=false → 残差为空、
-//! context 被 sensing 强制 None，行为逐字等于 v9.2（五腿零漂移硬判据）。
-//!
-//! P1.3（暗上线，P3 已退役）：双场投影增 basin 圈选分支——`maxProjectionNodes > 0` 时走
-//! memo_projection::{seed_basins, grow}（上游 1404/1412/1806），圈选并集一次性补池（:1431）。
-//! P3 二轮：对齐上游 9aa1f67 无条件语义——river_ids + seed_basins 每查询现算，
-//! 投影恒走 basin 圈选，预算 = `maxFieldProjectionNodes`（缺省 256）；v9.2 全支撑
-//! 投影（project_field）与闸键 `maxProjectionNodes` 同步退役（停止消费）。
-//!
-//! P3（上游 174a5e1→9aa1f67，conservative-topology-v2.2）：金字塔 safe-stoploss
-//! （边际解释能量 < minLayerExplainedEnergy=0.03 止损）、贡献门控（同层 max 贡献 10% 与
-//! 绝对 0.05 下限）、隐式种子等比例缩放（显式最大 0.35 倍）、路由残差尾部（尾残差能量
-//! 占比 ≥2% 追加、只供路由不当种子层）、图外 Tag 金字塔前置过滤（eligible=node_index）、
-//! lexical 锚定（ASCII 词 + CJK bigram，grounding≥0.5）、显式 Core 种子 SQL 解析促升、
-//! 双场单趟 pair 传播 + relax_field、basin 投影 hub 折扣。相似度缺省从 legacy 翻为 cosine
-//! （对齐上游无条件 cosine；legacy 保留为显式兼容档）。
-
-use crate::memo_sensing::{
-    sense_typed, sense_with_context, DynamicWormholeContext, SenseConfig, SenseDiagnostics,
-    SenseInput, SenseOutput, SenseSeed,
-};
-use crate::memo_vector_pool::{ensure_tag_vectors_loaded, TagVectorPool};
-use crate::rivermemo_topology_v3::{load_artifact_from_runtime, MemoRuntime, NativeArtifact};
+#[cfg(test)]
+use crate::memo_sensing::sense_typed;
+use crate::memo_sensing::{sense_with_context, DynamicWormholeContext,
+    SenseConfig, SenseDiagnostics, SenseInput, SenseOutput, SenseSeed};
+use crate::rivermemo_topology_v3::{load_artifact_with_connection, MemoRuntime};
+use crate::storage::with_registered_read_transaction;
 use base64::Engine;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
-use usearch::Index;
+#[cfg(test)]
+use std::collections::BinaryHeap;
+use std::sync::{Arc};
+use std::time::Instant;
+use crate::storage::{ensure_tag_vectors_loaded, TagVectorPool};
+#[cfg(test)]
+use crate::storage::load_vectors_by_ids;
 
 const PIPELINE_SCHEMA: &str = "vexus-unified-memo-pipeline-v1";
-const PIPELINE_ALGORITHM: &str = "memo.conservative-topology-v2.2";
+const PIPELINE_ALGORITHM: &str = "memo.nnls-cone-experiment-b-v1";
 
 fn positive(value: f64) -> f64 {
     if value.is_finite() {
@@ -85,43 +65,6 @@ fn cosine(left: &[f32], right: &[f32]) -> f64 {
     }
 }
 
-/// P2 交付1：金字塔相似度口径。
-/// - `legacy` = v9.2 逐字实现：`1/(1+d)`，其中 d 是 usearch 返回的**平方** L2
-///   （等价 1/(1+L2²)；实测口径见 research/vcp2.0/port/p2-divergence-2026-10-22.md §5）。
-/// - `cosine`（P3 起缺省）= 上游 2.0 `memo_pipeline.rs:648`：`cosine(residual, SQL 原件向量)`。
-///
-/// 这条通道的杀伤力在动态虫洞：相似度经 `reuse_score` 进 `known_scores` 后被当作
-/// 更深层共鸣值，再与 `dynamic_wormhole_threshold`(0.2) 二值化比较——近正交时
-/// legacy 给 1/3（恒过阈）、cosine 给 ≈0（恒不过阈）。闸关时 context=None，零漂移。
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq, Debug)]
-#[serde(rename_all = "camelCase")]
-enum SimilarityMode {
-    Legacy,
-    Cosine,
-}
-
-fn pyramid_similarity(
-    mode: SimilarityMode,
-    distance: Option<f32>,
-    residual: &[f32],
-    vector: &[f32],
-) -> f64 {
-    match mode {
-        SimilarityMode::Legacy => distance
-            .map(|distance| 1.0 / (1.0 + distance as f64))
-            .unwrap_or(0.0),
-        SimilarityMode::Cosine => cosine(residual, vector),
-    }
-}
-
-/// 配置键优先；缺省（None）= cosine（P3 起：对齐上游 2.0 无条件
-/// `cosine(residual, SQL 原件向量)`——上游 memo_pipeline.rs:648）。
-/// `legacy` 保留为显式兼容档（v9.2 的 1/(1+L2²)，五腿 vs 1.0 用）。
-/// 不做 env 后门（裁决②：kernel 只留一个配置面；B 的 driver 白名单已加转发）。
-fn resolve_similarity_mode(configured: Option<SimilarityMode>) -> SimilarityMode {
-    configured.unwrap_or(SimilarityMode::Cosine)
-}
-
 fn normalize(vector: &mut [f64]) -> bool {
     let norm = vector.iter().map(|value| value * value).sum::<f64>().sqrt();
     if norm <= 1e-12 {
@@ -131,18 +74,6 @@ fn normalize(vector: &mut [f64]) -> bool {
         *value /= norm;
     }
     true
-}
-
-fn open_readonly(path: &str) -> std::result::Result<Connection, String> {
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| format!("open Memo pipeline SQLite failed: {}", error))?;
-    connection
-        .busy_timeout(Duration::from_secs(30))
-        .map_err(|error| format!("configure Memo pipeline timeout failed: {}", error))?;
-    connection
-        .pragma_update(None, "query_only", "ON")
-        .map_err(|error| format!("configure Memo pipeline query_only failed: {}", error))?;
-    Ok(connection)
 }
 
 #[derive(Deserialize)]
@@ -184,30 +115,12 @@ struct PipelineConfig {
     transfer_tolerance: f64,
     local_mass_ratio: f64,
     transfer_mass_ratio: f64,
-    /// P3（上游 9aa1f67 memo_pipeline.rs:118）：双场投影的圈选预算
-    /// `maxFieldProjectionNodes`，缺省 256。上游语义为**无条件** basin 圈选
-    /// （river_ids + seed_basins 每查询现算，grow 预算 = 本值）。
-    /// 旧暗上线键 `maxProjectionNodes`（0 = v9.2 全支撑投影）停止消费：
-    /// 差分缺省臂会显式发送 0，若当别名会把 256 预算降级成无界。
-    #[serde(default = "default_max_field_projection_nodes")]
     max_field_projection_nodes: usize,
-    /// P2 交付1（暗上线）：金字塔相似度口径。缺省（None）= v9.2 的 1/(1+L2²)；
-    /// `"cosine"` = 上游 2.0 memo_pipeline.rs:648。
-    #[serde(default)]
-    similarity_mode: Option<SimilarityMode>,
-    /// 诊断档（P2 取证）：把请求级双场投影向量外露到 pipeline metadata 的
-    /// `diagnostics.dualFieldVectors`。**只写 pipeline metadata，绝不进 artifact payload**；
-    /// 缺省 false ⇒ 输出逐字节不变（五腿零漂移）。
-    #[serde(default)]
-    debug_dual_field_vectors: bool,
     max_levels: usize,
     pyramid_top_k: usize,
     min_energy_ratio: f64,
     layer_decay: f64,
-    /// P3（上游 9aa1f67）：safe-stoploss——层边际解释能量低于此值即止损（不再入层、
-    /// 不入 total_explained、不产残差）。容器级 serde default ⇒ 缺键取 Default 0.03。
     min_layer_explained_energy: f64,
-    /// P3：贡献门控阈值 = max(同层最大贡献×ratio, floor)。
     seed_contribution_ratio: f64,
     seed_contribution_floor: f64,
     activation_multiplier: Vec<f64>,
@@ -221,12 +134,16 @@ struct PipelineConfig {
     max_emergent_nodes: usize,
     tech_tag_threshold: f64,
     normal_tag_threshold: f64,
+    epa_gate_mode: String,
+    tag_routing_mode: String,
+    warped_preset: crate::warped_tag_field::Preset,
+    warped_radius_strategy: crate::warped_tag_field::RadiusStrategy,
+    warped_legacy_budget: bool,
+    warped_shell_directory: bool,
+    warped_reuse_beam: bool,
+    warped_seed_policy: u8,
     #[serde(default)]
     spike_routing: SenseConfig,
-}
-
-fn default_max_field_projection_nodes() -> usize {
-    256
 }
 
 impl Default for PipelineConfig {
@@ -241,14 +158,11 @@ impl Default for PipelineConfig {
             transfer_tolerance: 1e-9,
             local_mass_ratio: 0.8,
             transfer_mass_ratio: 0.9,
-            max_field_projection_nodes: default_max_field_projection_nodes(), // 上游缺省 256（无条件 basin 圈选）
-            similarity_mode: None,   // 暗上线：None = v9.2 的 1/(1+L2²)
-            debug_dual_field_vectors: false,
+            max_field_projection_nodes: 256,
             max_levels: 3,
             pyramid_top_k: 10,
             min_energy_ratio: 0.1,
             layer_decay: 0.7,
-            // P3（上游 9aa1f67 Default）：
             min_layer_explained_energy: 0.03,
             seed_contribution_ratio: 0.1,
             seed_contribution_floor: 0.05,
@@ -263,6 +177,14 @@ impl Default for PipelineConfig {
             max_emergent_nodes: 50,
             tech_tag_threshold: 0.08,
             normal_tag_threshold: 0.015,
+            epa_gate_mode: "backgroundRelative".into(),
+            tag_routing_mode: "cosine".into(),
+            warped_preset: Default::default(),
+            warped_radius_strategy: Default::default(),
+            warped_legacy_budget: false,
+            warped_shell_directory: true,
+            warped_reuse_beam: true,
+            warped_seed_policy: 1,
             spike_routing: SenseConfig::default(),
         }
     }
@@ -277,7 +199,13 @@ struct EpaCache {
     _energies: Vec<f64>,
     #[serde(default)]
     labels: Vec<String>,
+    #[serde(default = "default_k_sem")]
+    k_sem: usize,
+    #[serde(default)]
+    coverage: Vec<f64>,
 }
+
+fn default_k_sem() -> usize { 8 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -308,6 +236,11 @@ struct EpaOutput {
     bridges: Vec<EpaBridge>,
     basis_count: usize,
     cache_available: bool,
+    out_of_domain: f64,
+    semantic_explained_ratio: f64,
+    in_domain_gate: f64,
+    baseline_coverage: f64,
+    background_ratio: f64,
 }
 
 fn decode_f32_base64(encoded: &str, dimension: usize) -> Option<Vec<f32>> {
@@ -325,7 +258,76 @@ fn decode_f32_base64(encoded: &str, dimension: usize) -> Option<Vec<f32>> {
     )
 }
 
+#[cfg(test)]
 fn analyze_epa(connection: &Connection, query: &[f32], dimension: usize) -> EpaOutput {
+    analyze_epa_with_mode(connection, query, dimension, "absolute")
+}
+
+/// Background is the ratio of expected energies for an isotropic unit query after
+/// subtracting the same mean. It is a calibration reference, not an OOD probability.
+fn calibrated_gate(ratio: f64, baseline: f64, background: f64, mode: &str) -> f64 {
+    match mode {
+        "relativeLinear" => clamp01(ratio / baseline),
+        "relativeSqrt" => clamp01((ratio / baseline).max(0.0).sqrt()),
+        "backgroundRelative" => {
+            if baseline <= background + 1e-8 { 0.0 }
+            else { clamp01((ratio-background)/(baseline-background)) }
+        },
+        _ => clamp01(ratio),
+    }
+}
+
+/// Query-independent part of the EPA cache row: decoded basis and mean, and the
+/// values derived from them alone.
+struct EpaBasis {
+    raw: String,
+    digest: String,
+    dimension: usize,
+    k_sem: usize,
+    labels: Vec<String>,
+    mean: Vec<f32>,
+    bases: Vec<Vec<f32>>,
+    semantic_count: usize,
+    baseline_coverage: f64,
+    background_ratio: f64,
+}
+
+/// The most recently decoded EPA cache row. It is reused only when the stored
+/// JSON text and the dimension are identical, so any write to the row (in any
+/// database) decodes again; the per-query arithmetic is unchanged.
+static EPA_BASIS: std::sync::Mutex<Option<Arc<EpaBasis>>> = std::sync::Mutex::new(None);
+
+fn decode_epa_basis(raw: String, dimension: usize) -> Option<EpaBasis> {
+    let cache: EpaCache = serde_json::from_str(&raw).ok()?;
+    let mean = decode_f32_base64(&cache.mean, dimension)?;
+    let bases: Vec<Vec<f32>> = cache
+        .basis
+        .iter()
+        .filter_map(|encoded| decode_f32_base64(encoded, dimension))
+        .collect();
+    let semantic_count = cache.k_sem.max(1).min(bases.len());
+    let baseline_coverage=cache.coverage.get(semantic_count.saturating_sub(1)).copied()
+        .filter(|v|v.is_finite() && *v>0.0 && *v<=1.0)
+        .unwrap_or(semantic_count as f64/dimension.max(1) as f64).max(1e-4);
+    let mean_captured=bases.iter().take(semantic_count).map(|b|dot(&mean,b).powi(2)).sum::<f64>();
+    let background_ratio=clamp01((semantic_count as f64/dimension.max(1) as f64+mean_captured)
+        /(1.0+dot(&mean,&mean)));
+    use sha2::{Digest, Sha256};
+    let digest=format!("{:x}",Sha256::digest(raw.as_bytes()));
+    Some(EpaBasis {
+        raw, digest, dimension, k_sem: cache.k_sem, labels: cache.labels, mean, bases,
+        semantic_count, baseline_coverage, background_ratio,
+    })
+}
+
+#[cfg(test)]
+fn analyze_epa_with_mode(connection: &Connection, query: &[f32], dimension: usize, mode: &str) -> EpaOutput {
+    analyze_epa_with_digest(connection,query,dimension,mode,&mut None)
+}
+
+fn analyze_epa_with_digest(connection: &Connection, query: &[f32], dimension: usize,
+    mode: &str, digest:&mut Option<String>) -> EpaOutput {
+    *digest=None;
     let empty = || EpaOutput {
         logic_depth: 0.0,
         entropy: 1.0,
@@ -334,6 +336,11 @@ fn analyze_epa(connection: &Connection, query: &[f32], dimension: usize) -> EpaO
         bridges: Vec::new(),
         basis_count: 0,
         cache_available: false,
+        out_of_domain: 1.0,
+        semantic_explained_ratio: 0.0,
+        in_domain_gate: 0.0,
+        baseline_coverage: 0.0,
+        background_ratio: 0.0,
     };
     let raw = match connection.query_row(
         "SELECT value FROM kv_store WHERE key = 'epa_basis_cache'",
@@ -343,44 +350,58 @@ fn analyze_epa(connection: &Connection, query: &[f32], dimension: usize) -> EpaO
         Ok(value) => value,
         Err(_) => return empty(),
     };
-    let cache: EpaCache = match serde_json::from_str(&raw) {
-        Ok(value) => value,
-        Err(_) => return empty(),
+    let cached = EPA_BASIS.lock().ok().and_then(|slot| {
+        slot.as_ref().filter(|basis| basis.dimension == dimension && basis.raw == raw).cloned()
+    });
+    let basis = match cached {
+        Some(basis) => basis,
+        None => match decode_epa_basis(raw, dimension) {
+            Some(basis) => {
+                let basis = Arc::new(basis);
+                if let Ok(mut slot) = EPA_BASIS.lock() {
+                    *slot = Some(basis.clone());
+                }
+                basis
+            }
+            None => return empty(),
+        },
     };
-    let mean = match decode_f32_base64(&cache.mean, dimension) {
-        Some(value) => value,
-        None => return empty(),
-    };
-    let bases: Vec<Vec<f32>> = cache
-        .basis
-        .iter()
-        .filter_map(|encoded| decode_f32_base64(encoded, dimension))
-        .collect();
-    if bases.is_empty() {
-        return empty();
-    }
-
+    *digest=Some(basis.digest.clone());
+    let mean = &basis.mean;
+    let bases = &basis.bases;
     let centered: Vec<f32> = query
         .iter()
         .zip(mean.iter())
         .map(|(value, average)| value - average)
         .collect();
     let projections: Vec<f64> = bases.iter().map(|basis| dot(&centered, basis)).collect();
-    let total_energy = projections.iter().map(|value| value * value).sum::<f64>();
-    if total_energy <= 1e-12 {
-        return empty();
-    }
+    let centered_energy = dot(&centered, &centered);
+    let captured = projections.iter().map(|value| value * value).sum::<f64>();
+    let out_of_domain = if centered_energy > 1e-12 {
+        ((centered_energy - captured).max(0.0) / centered_energy).sqrt().clamp(0.0, 1.0)
+    } else { 0.0 };
+    let semantic_count = basis.semantic_count;
+    let total_energy = projections.iter().take(semantic_count).map(|value| value * value).sum::<f64>();
+    let semantic_explained_ratio = if centered_energy > 1e-12 {
+        clamp01(total_energy / centered_energy)
+    } else { 0.0 };
+    let baseline_coverage = basis.baseline_coverage;
+    let background_ratio = basis.background_ratio;
+    let in_domain_gate=if semantic_count==0 || centered_energy<=1e-12 {0.0}
+        else {calibrated_gate(semantic_explained_ratio,baseline_coverage,background_ratio,mode)};
     let probabilities: Vec<f64> = projections
-        .iter()
-        .map(|value| value * value / total_energy)
+        .iter().take(semantic_count)
+        .map(|value| if total_energy > 1e-12 { value * value / total_energy } else { 0.0 })
         .collect();
     let raw_entropy = probabilities
         .iter()
         .filter(|value| **value > 1e-9)
         .map(|value| -value * value.log2())
         .sum::<f64>();
-    let normalized_entropy = if probabilities.len() > 1 {
-        clamp01(raw_entropy / (probabilities.len() as f64).log2())
+    let normalized_entropy = if total_energy <= 1e-12 {
+        1.0
+    } else if basis.k_sem > 1 {
+        clamp01(raw_entropy / (basis.k_sem as f64).log2())
     } else {
         0.0
     };
@@ -390,7 +411,7 @@ fn analyze_epa(connection: &Connection, query: &[f32], dimension: usize) -> EpaO
         .filter(|(_, energy)| **energy > 0.05)
         .map(|(index, energy)| EpaAxis {
             index,
-            label: cache
+            label: basis
                 .labels
                 .get(index)
                 .cloned()
@@ -428,13 +449,18 @@ fn analyze_epa(connection: &Connection, query: &[f32], dimension: usize) -> EpaO
     let resonance = bridges.iter().map(|bridge| bridge.strength).sum();
 
     EpaOutput {
-        logic_depth: 1.0 - normalized_entropy,
+        logic_depth: (1.0 - normalized_entropy) * in_domain_gate,
         entropy: normalized_entropy,
         resonance,
         dominant_axes,
         bridges,
         basis_count: bases.len(),
         cache_available: true,
+        out_of_domain,
+        semantic_explained_ratio,
+        in_domain_gate,
+        baseline_coverage,
+        background_ratio,
     }
 }
 
@@ -442,7 +468,7 @@ fn analyze_epa(connection: &Connection, query: &[f32], dimension: usize) -> EpaO
 struct PyramidTagWork {
     id: i64,
     name: String,
-    vector: Vec<f32>,
+    vector: Arc<[f32]>,
     similarity: f64,
     contribution: f64,
     handshake_magnitude: f64,
@@ -477,6 +503,7 @@ struct PyramidLevelOutput {
     residual_energy_ratio: f64,
     energy_explained: f64,
     handshake_features: HandshakeFeatures,
+    nnls_diagnostics: crate::memo_nnls::Diagnostics,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -498,53 +525,133 @@ struct PyramidOutput {
     features: PyramidFeatures,
 }
 
+#[cfg(test)]
 fn orthogonal_projection(
     query: &[f32],
     tags: &[PyramidTagWork],
     dimension: usize,
 ) -> (Vec<f32>, Vec<f32>, Vec<f64>) {
+    // Directions below this relative scale remain unexplained residual,
+    // rather than being amplified into unit axes.
+    const RELATIVE_RANK_TOLERANCE: f64 = 1e-5;
     let mut basis: Vec<Vec<f64>> = Vec::with_capacity(tags.len());
     let mut coefficients = vec![0.0; tags.len()];
     for (index, tag) in tags.iter().enumerate() {
         let mut vector: Vec<f64> = tag.vector.iter().map(|value| *value as f64).collect();
-        for unit in &basis {
-            let projection = vector
-                .iter()
-                .zip(unit.iter())
-                .map(|(left, right)| left * right)
-                .sum::<f64>();
-            for offset in 0..dimension {
-                vector[offset] -= projection * unit[offset];
+        let original_norm = vector.iter().map(|value| value * value).sum::<f64>().sqrt();
+        if !original_norm.is_finite() || original_norm <= 1e-12 {
+            continue;
+        }
+        // Reorthogonalize before normalizing: near-collinear cancellation
+        // must not magnify first-pass leakage into an admitted basis axis.
+        for _ in 0..2 {
+            for unit in &basis {
+                let projection = vector.iter().zip(unit)
+                    .map(|(left, right)| left * right).sum::<f64>();
+                for offset in 0..dimension {
+                    vector[offset] -= projection * unit[offset];
+                }
             }
         }
-        if normalize(&mut vector) {
-            coefficients[index] = query
-                .iter()
-                .zip(vector.iter())
-                .map(|(left, right)| (*left as f64) * right)
-                .sum::<f64>()
-                .abs();
-            basis.push(vector);
+        let residual_norm = vector.iter().map(|value| value * value).sum::<f64>().sqrt();
+        if !residual_norm.is_finite()
+            || residual_norm <= RELATIVE_RANK_TOLERANCE * original_norm
+        {
+            continue;
+        }
+        for value in &mut vector {
+            *value /= residual_norm;
+        }
+        coefficients[index] = query.iter().zip(&vector)
+            .map(|(left, right)| (*left as f64) * right).sum::<f64>().abs();
+        basis.push(vector);
+    }
+
+    let mut projection = vec![0.0f64; dimension];
+    for unit in &basis {
+        let coefficient = query.iter().zip(unit)
+            .map(|(left, right)| (*left as f64) * right).sum::<f64>();
+        for offset in 0..dimension {
+            projection[offset] += coefficient * unit[offset];
+        }
+    }
+    // Round each output once; do not accumulate per-axis FP32 roundoff.
+    let residual = query.iter().zip(&projection)
+        .map(|(source, explained)| ((*source as f64) - explained) as f32)
+        .collect();
+    (projection.into_iter().map(|value| value as f32).collect(), residual, coefficients)
+}
+#[cfg(test)]
+mod orthogonal_projection_stability_tests {
+    use super::*;
+
+    fn tag(vector: Vec<f32>) -> PyramidTagWork {
+        PyramidTagWork {
+            id: 0, name: String::new(), vector: vector.into(),
+            similarity: 0.0, contribution: 0.0, handshake_magnitude: 0.0,
         }
     }
 
-    let mut projection = vec![0.0f32; dimension];
-    for unit in &basis {
-        let coefficient = query
-            .iter()
-            .zip(unit.iter())
-            .map(|(left, right)| (*left as f64) * right)
-            .sum::<f64>();
-        for offset in 0..dimension {
-            projection[offset] += (coefficient * unit[offset]) as f32;
+    fn check_closure(query: &[f32], projection: &[f32], residual: &[f32]) {
+        let energy = dot(query, query);
+        let scale = energy.max(1e-30);
+        assert!((energy - dot(projection, projection) - dot(residual, residual)).abs()
+            <= 1e-5 * scale, "energy closure");
+        assert!(dot(projection, residual).abs() <= 1e-5 * scale, "orthogonality");
+        for ((q, p), r) in query.iter().zip(projection).zip(residual) {
+            assert!(((*q as f64) - (*p as f64) - (*r as f64)).abs()
+                <= 2e-7 * energy.sqrt().max(1e-30), "reconstruction");
         }
     }
-    let residual = query
-        .iter()
-        .zip(projection.iter())
-        .map(|(source, explained)| source - explained)
-        .collect();
-    (projection, residual, coefficients)
+
+    #[test]
+    fn near_collinear_rank_cutoff_is_relative_and_preserves_tail() {
+        for scale in [1e-6_f32, 1.0, 1e6] {
+            for epsilon in [1e-7_f32, 1e-4] {
+                let tags = vec![
+                    tag(vec![0.6 * scale, 0.8 * scale, 0.0]),
+                    tag(vec![0.6 * scale, 0.8 * scale, epsilon * scale]),
+                ];
+                let query = [0.0, 0.0, 1.0];
+                let (projection, residual, coefficients) = orthogonal_projection(&query, &tags, 3);
+                assert_eq!(coefficients[0], 0.0);
+                if epsilon < 1e-5 {
+                    assert_eq!(coefficients[1], 0.0);
+                    assert_eq!(projection, vec![0.0; 3]);
+                    assert_eq!(residual, query);
+                } else {
+                    assert!((coefficients[1] - 1.0).abs() < 1e-12);
+                    // Direction recovery under cancellation scales as FP64 epsilon / epsilon;
+                    // it is distinct from mutual basis orthogonality.
+                    assert!(magnitude(&residual) < 1e-10,
+                        "scale={scale}, epsilon={epsilon}, residual={residual:?}, coefficients={coefficients:?}");
+                }
+                check_closure(&query, &projection, &residual);
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_axes_close_energy_and_keep_absolute_coefficient_slots() {
+        let tags = vec![
+            tag(vec![0.6, 0.8, 0.0, 0.0]),
+            tag(vec![0.6, 0.8, 0.0, 0.0]),
+            tag(vec![0.6, 0.8, 1e-4, 0.0]),
+            tag(vec![0.0; 4]),
+        ];
+        for query in [[0.3, -0.7, 0.2, 0.6], [-0.6, -0.8, 0.0, 0.0], [0.0; 4]] {
+            let (projection, residual, coefficients) = orthogonal_projection(&query, &tags, 4);
+            assert_eq!(coefficients.len(), tags.len());
+            assert_eq!(coefficients[1], 0.0);
+            assert_eq!(coefficients[3], 0.0);
+            assert!(coefficients.iter().all(|c| c.is_finite() && *c >= 0.0));
+            check_closure(&query, &projection, &residual);
+        }
+        let query = [0.3, -0.7, 0.2, 0.6];
+        let (projection, residual, _) = orthogonal_projection(&query, &[], 4);
+        assert_eq!(projection, vec![0.0; 4]);
+        assert_eq!(residual, query);
+    }
 }
 
 fn analyze_handshakes(
@@ -555,10 +662,10 @@ fn analyze_handshakes(
     if tags.is_empty() {
         return HandshakeFeatures::default();
     }
-    let mut directions = Vec::with_capacity(tags.len());
+    let mut directions = Vec::with_capacity(tags.len().min(5));
     let mut average = vec![0.0f64; dimension];
-    for tag in tags.iter_mut() {
-        let mut direction = vec![0.0f64; dimension];
+    let mut direction = vec![0.0f64; dimension];
+    for (index, tag) in tags.iter_mut().enumerate() {
         let mut magnitude_squared = 0.0;
         for offset in 0..dimension {
             let delta = (query[offset] - tag.vector[offset]) as f64;
@@ -573,7 +680,11 @@ fn analyze_handshakes(
                 average[offset] += direction[offset];
             }
         }
-        directions.push(direction);
+        // All Tags contribute to the average; only the first five are
+        // consumed by the pairwise diagnostic. Reuse scratch for the rest.
+        if index < 5 {
+            directions.push(direction.clone());
+        }
     }
     for value in &mut average {
         *value /= tags.len() as f64;
@@ -617,26 +728,55 @@ fn load_tag_names(
     ids: &[i64],
 ) -> std::result::Result<HashMap<i64, String>, String> {
     let mut names = HashMap::new();
-    let mut statement = connection
-        .prepare("SELECT name FROM tags WHERE id = ?1")
-        .map_err(|error| format!("prepare Memo pipeline Tag name query failed: {}", error))?;
-    for id in ids {
-        if let Ok(name) = statement.query_row(rusqlite::params![id], |row| row.get::<_, String>(0))
-        {
-            names.insert(*id, name);
+    let mut unique = ids.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    for batch in unique.chunks(128) {
+        let sql = format!("SELECT id, name FROM tags WHERE id IN ({})",
+            vec!["?"; batch.len()].join(","));
+        let mut statement = connection.prepare(&sql)
+            .map_err(|error| format!("prepare Memo Tag names failed: {error}"))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        }).map_err(|error| format!("query Memo Tag names failed: {error}"))?;
+        for row in rows {
+            if let Ok((id, name)) = row { names.insert(id, name); }
         }
     }
     Ok(names)
 }
 
+#[cfg(test)]
 fn analyze_pyramid(
-    index: &Index,
+    index: &Arc<crate::index_handle::IndexHandle>,
+    connection: &Connection,
+    query: &[f32],
+    dimension: usize,
+    config: &PipelineConfig,
+) -> std::result::Result<(PyramidOutput, Vec<Vec<PyramidTagWork>>), String> {
+    analyze_pyramid_with_pool(index, connection, query, dimension, config, &mut TagVectorPool::new(), None)
+        .map(|(output, tags, _)| (output, tags))
+}
+
+#[cfg(test)]
+fn analyze_pyramid_with_pool(
+    index: &Arc<crate::index_handle::IndexHandle>,
     connection: &Connection,
     query: &[f32],
     dimension: usize,
     config: &PipelineConfig,
     tag_vectors: &mut TagVectorPool,
     eligible: Option<&HashMap<i64, usize>>,
+) -> std::result::Result<(PyramidOutput, Vec<Vec<PyramidTagWork>>, Vec<Vec<f32>>), String> {
+    analyze_pyramid_routed(index, connection, query, dimension, config, tag_vectors, eligible, None, &mut Vec::new())
+}
+
+fn analyze_pyramid_routed(
+    index: &Arc<crate::index_handle::IndexHandle>,
+    connection: &Connection, query: &[f32], dimension: usize, config: &PipelineConfig,
+    tag_vectors: &mut TagVectorPool, eligible: Option<&HashMap<i64, usize>>,
+    warped: Option<(&crate::warped_tag_field::WarpedTagField, &EpaOutput)>,
+    routing: &mut Vec<serde_json::Value>,
 ) -> std::result::Result<(PyramidOutput, Vec<Vec<PyramidTagWork>>, Vec<Vec<f32>>), String> {
     let original_energy = magnitude(query).powi(2);
     if original_energy <= 1e-12 {
@@ -656,82 +796,93 @@ fn analyze_pyramid(
     }
 
     let mut residual = query.to_vec();
-    let similarity_mode = resolve_similarity_mode(config.similarity_mode);
     let mut levels_output = Vec::new();
     let mut levels_work = Vec::new();
-    let mut residuals: Vec<Vec<f32>> = Vec::new();
+    let mut residuals = Vec::new();
     let mut total_explained = 0.0;
+    let mut excluded = HashSet::new();
     for level in 0..config.max_levels.clamp(1, 8) {
-        let matches = index
-            .search(&residual, config.pyramid_top_k.clamp(1, 128))
-            .map_err(|error| format!("Memo pyramid usearch search failed: {:?}", error))?;
-        if matches.keys.is_empty() {
+        let matches = if let Some((field, epa)) = warped {
+            let residual_ratio = magnitude(&residual).powi(2) / original_energy;
+            let radius = crate::warped_tag_field::residual_query_radius(
+                config.warped_radius_strategy, level, config.max_levels.clamp(1,8),
+                epa.in_domain_gate, epa.logic_depth, epa.entropy, epa.cache_available,
+                residual_ratio);
+            let (ids, stats, sql_reads, cache_hits) = field.search_policy(connection, &residual, radius,
+                config.pyramid_top_k.clamp(1,64), &excluded, tag_vectors, config.warped_legacy_budget,
+                config.warped_shell_directory, config.warped_reuse_beam,config.warped_seed_policy)?;
+            routing.push(serde_json::json!({
+                "level":level,"radius":radius,"ids":ids,"excluded":excluded.len(),
+                "inputResidualEnergyRatio":residual_ratio,
+                "visited":stats.visited,"expanded":stats.expanded,
+                "rerankFetches":stats.cold_reads,"sqlReads":sql_reads,"cacheHits":cache_hits,
+                "quadSkips":stats.exact_quad_skips,"distanceEvals":stats.exact_distance_evals,
+                "converged":stats.converged,"visitLimitReached":stats.visit_limit_reached,
+                "expansionLimitReached":stats.expansion_limit_reached,
+                "stage05Evaluations":stats.asymmetric_evals,
+                "epaAvailable":epa.cache_available,
+                "meanInboundQuantile":if ids.is_empty() {0.0} else {
+                    ids.iter().filter_map(|&id|field.inbound_quantile(id)).sum::<f64>()/ids.len() as f64
+                }
+            }));
+            ids.into_iter().map(|id| (id as u64,0.0_f32)).collect::<Vec<_>>()
+        } else {
+            let mut guard = index.write().map_err(|error| format!("Pyramid index lock failed: {}", error))?;
+            guard.ensure_routing(connection, None)?;
+            let matches=guard.search_sql(connection, None, &residual, config.pyramid_top_k.clamp(1, 128))
+                .map_err(|error| format!("Memo pyramid retrieval search failed: {:?}", error))?;
+            #[cfg(test)]
+            routing.push(serde_json::json!({"level":level,
+                "ids":matches.iter().map(|m|m.0).collect::<Vec<_>>(),"radius":null}));
+            matches
+        };
+        if matches.is_empty() {
             break;
         }
-        // P3（上游 9aa1f67）：Gram-Schmidt 之前过滤图外 Tag——图外方向拿不到被接纳
-        // 传播种子能承载的能量；不要求出度（eligible = artifact.node_index）。
-        // 命中与距离成对过滤，legacy 档的距离配对不因过滤错位。
-        let hits: Vec<(i64, Option<f32>)> = matches
-            .keys
-            .iter()
-            .zip(matches.distances.iter())
-            .map(|(id, distance)| (*id as i64, Some(*distance)))
-            .filter(|(id, _)| eligible.map_or(true, |nodes| nodes.contains_key(id)))
-            .collect();
-        let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
-        let names = load_tag_names(connection, &ids)?;
-        // P1.2：向量装载走请求级共享池（SQL 权威行），池里缺的仍读索引——
-        // 相似度口径（1/(1+L2)，取自 usearch 距离）保持不变，既有读数不漂。
+        // Filter before cone fitting: graph-external tags cannot consume energy
+        // that no admitted propagation seed can carry. Do not require outdegree.
+        let ids: Vec<i64> = matches.iter().map(|(id, _)| *id as i64)
+            .filter(|id| eligible.map_or(true, |nodes| nodes.contains_key(id))).collect();
         ensure_tag_vectors_loaded(connection, tag_vectors, &ids, dimension)?;
-        let mut buffer = vec![0.0f32; dimension];
         let mut tags = Vec::new();
-        for (position, id) in ids.iter().enumerate() {
-            let vector = match tag_vectors.get(id) {
-                Some(vector) => vector.as_ref().to_vec(),
-                None => {
-                    let found = index.get(*id as u64, &mut buffer).map_err(|error| {
-                        format!("Memo pyramid Tag vector read failed: {:?}", error)
-                    })?;
-                    if found == 0 {
-                        continue;
-                    }
-                    buffer.clone()
-                }
-            };
+        for id in &ids {
+            let Some(vector) = tag_vectors.get(id).cloned() else { continue };
+            let similarity = cosine(&residual, &vector);
             tags.push(PyramidTagWork {
                 id: *id,
-                name: names
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("Tag#{}", id)),
-                similarity: pyramid_similarity(
-                    similarity_mode,
-                    hits[position].1,
-                    &residual,
-                    &vector,
-                ),
+                name: String::new(),
                 vector,
+                similarity,
                 contribution: 0.0,
                 handshake_magnitude: 0.0,
             });
+        }
+        let names = load_tag_names(connection, &ids)?;
+        for tag in &mut tags {
+            tag.name = names.get(&tag.id).cloned().unwrap_or_else(|| format!("Tag#{}", tag.id));
         }
         if tags.is_empty() {
             break;
         }
 
         let current_energy = magnitude(&residual).powi(2);
-        let (projection, next_residual, coefficients) =
-            orthogonal_projection(&residual, &tags, dimension);
-        // P3（上游 9aa1f67）：层内归一化——贡献 = 系数 / sqrt(层输入能量)。
-        for (tag, coefficient) in tags.iter_mut().zip(coefficients.iter()) {
-            tag.contribution = *coefficient / current_energy.sqrt().max(1e-12);
+        let cone_tags: Vec<(i64, &[f32])> = tags.iter()
+            .map(|tag| (tag.id, tag.vector.as_ref())).collect();
+        let solution = crate::memo_nnls::solve(&residual, &cone_tags)
+            .map_err(|error| format!("Memo pyramid layer {level}: {error}"))?;
+        let projection = solution.projection;
+        let next_residual = solution.residual;
+        for (tag, coefficient) in tags.iter_mut().zip(&solution.contributions) {
+            // Original unit-Tag reconstruction amplitude relative to layer
+            // input norm, not an independent orthogonal energy contribution.
+            tag.contribution = *coefficient;
         }
         let handshake = analyze_handshakes(&residual, &mut tags, dimension);
         let residual_magnitude = magnitude(&next_residual);
         let residual_energy = residual_magnitude * residual_magnitude;
         let energy_explained = positive(current_energy - residual_energy) / original_energy;
-        // P3：safe-stoploss——大残差不是「再来一层有用」的证据。在发布层工作与
-        // 残差（含动态虫洞输入）之前拒绝本层。
+        // A large remaining residual is not evidence that another layer is useful.
+        // Reject before publishing work/residuals, including dynamic-wormhole inputs.
         if energy_explained < config.min_layer_explained_energy.clamp(0.0, 1.0) {
             break;
         }
@@ -753,10 +904,13 @@ fn analyze_pyramid(
             residual_energy_ratio: residual_energy / original_energy,
             energy_explained,
             handshake_features: handshake,
+            nnls_diagnostics: solution.diagnostics,
         });
-        // P1.2（上游 696）：该层**输入**残差进动态虫洞上下文——只有更深的层能给源提供共鸣。
         if config.spike_routing.dynamic_wormholes {
             residuals.push(residual.clone());
+        }
+        if warped.is_some() {
+            excluded.extend(tags.iter().map(|tag| tag.id));
         }
         levels_work.push(tags);
         residual = next_residual;
@@ -765,15 +919,12 @@ fn analyze_pyramid(
         }
     }
 
-    // P3（上游 9aa1f67）：每个被接纳层一条前置残差，随后是未解释尾部。尾部只供
-    // 路由证据，绝不再当种子层。
+    // One pre-strip residual per accepted layer, followed by the unexplained
+    // tail. The tail supplies routing evidence only, never another seed layer.
     let tail_energy = magnitude(&residual).powi(2);
-    if config.spike_routing.dynamic_wormholes
-        && !levels_work.is_empty()
-        && tail_energy.is_finite()
-        && tail_energy > 1e-12
-        && tail_energy / original_energy >= 0.02
-    {
+    if config.spike_routing.dynamic_wormholes && !levels_work.is_empty()
+        && tail_energy.is_finite() && tail_energy > 1e-12
+        && tail_energy / original_energy >= 0.02 {
         residuals.push(residual);
     }
 
@@ -810,56 +961,117 @@ struct GatedTag {
     name: String,
     weight: f64,
     is_core: bool,
-    /// P3（上游 9aa1f67）：lexical 锚定（query_text 与 Tag 名的词法接地 ≥0.5）。
     lexical: bool,
 }
 
-// P3（上游 9aa1f67）：ASCII 词有词界；CJK 用相邻 bigram（单字连续段只出单字）。
-// 标点绝不拼接无关 ASCII 词。
+// ASCII words have token boundaries; CJK uses adjacent bigrams (singletons
+// only for one-character runs). Punctuation never joins unrelated ASCII words.
 fn lexical_tokens(text: &str) -> HashSet<String> {
     let mut tokens = HashSet::new();
     let mut ascii = String::new();
     let mut cjk = Vec::new();
     let flush = |ascii: &mut String, cjk: &mut Vec<char>, tokens: &mut HashSet<String>| {
-        if !ascii.is_empty() {
-            tokens.insert(std::mem::take(ascii));
-        }
-        if cjk.len() == 1 {
-            tokens.insert(cjk[0].to_string());
-        }
-        for pair in cjk.windows(2) {
-            tokens.insert(pair.iter().collect());
-        }
+        if !ascii.is_empty() { tokens.insert(std::mem::take(ascii)); }
+        if cjk.len() == 1 { tokens.insert(cjk[0].to_string()); }
+        for pair in cjk.windows(2) { tokens.insert(pair.iter().collect()); }
         cjk.clear();
     };
     for ch in text.to_lowercase().chars() {
         if ch.is_ascii_alphanumeric() {
-            if !cjk.is_empty() {
-                flush(&mut ascii, &mut cjk, &mut tokens);
-            }
+            if !cjk.is_empty() { flush(&mut ascii, &mut cjk, &mut tokens); }
             ascii.push(ch);
         } else if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
-            if !ascii.is_empty() {
-                flush(&mut ascii, &mut cjk, &mut tokens);
-            }
+            if !ascii.is_empty() { flush(&mut ascii, &mut cjk, &mut tokens); }
             cjk.push(ch);
-        } else {
-            flush(&mut ascii, &mut cjk, &mut tokens);
-        }
+        } else { flush(&mut ascii, &mut cjk, &mut tokens); }
     }
     flush(&mut ascii, &mut cjk, &mut tokens);
     tokens
 }
 
+#[cfg(test)]
 fn lexical_grounding(query: &str, name: &str) -> f64 {
-    let query = lexical_tokens(query);
-    let tag = lexical_tokens(name);
-    if tag.is_empty() {
-        return 0.0;
-    }
-    tag.intersection(&query).count() as f64 / tag.len() as f64
+    lexical_grounding_with_tokens(&lexical_tokens(query), name)
 }
 
+fn lexical_grounding_with_tokens(query: &HashSet<String>, name: &str) -> f64 {
+    let tag = lexical_tokens(name);
+    if tag.is_empty() { return 0.0; }
+    tag.intersection(query).count() as f64 / tag.len() as f64
+}
+
+/// Conservative lexical containment heuristic, not an ontology assertion.
+/// Collinear short names retain legacy alias rescue; independent coefficients win.
+fn superseded_hypernym(tag: &PyramidTagWork, peers: &[PyramidTagWork], threshold: f64) -> bool {
+    if tag.contribution >= threshold { return false; }
+    let tokens = lexical_tokens(&tag.name);
+    if tokens.is_empty() { return false; }
+    peers.iter().any(|peer| {
+        if peer.id == tag.id || peer.contribution < threshold || peer.similarity <= 0.0 {
+            return false;
+        }
+        let superset = lexical_tokens(&peer.name);
+        tokens.len() < superset.len() && tokens.is_subset(&superset)
+            && cosine(&tag.vector, &peer.vector) < 0.90
+    })
+}
+
+/// Remove only admitted redundant parent directions. All work is FP64;
+/// two-pass reorthogonalization and relative norm guards reject numerical axes.
+fn differentia_direction(
+    query: &[f32], levels: &[Vec<PyramidTagWork>], config: &PipelineConfig,
+    explicit_names: &HashSet<String>,
+) -> (Vec<f32>, Vec<i64>, f64) {
+    let qnorm = magnitude(query);
+    if !qnorm.is_finite() || qnorm <= 1e-12 { return (Vec::new(), Vec::new(), 0.0); }
+    let mut parents: Vec<&PyramidTagWork> = Vec::new();
+    for tags in levels {
+        let maximum = tags.iter().map(|t| positive(t.contribution)).fold(0.0, f64::max);
+        let threshold = (maximum * config.seed_contribution_ratio.clamp(0.0, 1.0))
+            .max(config.seed_contribution_floor.max(0.0));
+        for tag in tags {
+            if !explicit_names.contains(&tag.name.trim().to_lowercase())
+                && superseded_hypernym(tag, tags, threshold)
+                && cosine(query, &tag.vector) >= 0.65 {
+                parents.push(tag);
+            }
+        }
+    }
+    parents.sort_by_key(|t| t.id);
+    parents.dedup_by_key(|t| t.id);
+    let mut basis: Vec<Vec<f64>> = Vec::new();
+    let mut ids = Vec::new();
+    for parent in parents {
+        if parent.vector.len() != query.len() { continue; }
+        let mut axis: Vec<f64> = parent.vector.iter().map(|v| *v as f64).collect();
+        let original = axis.iter().map(|v| v*v).sum::<f64>().sqrt();
+        if !original.is_finite() || original <= 1e-12 { continue; }
+        for _ in 0..2 {
+            for unit in &basis {
+                let projection = axis.iter().zip(unit).map(|(a,b)| a*b).sum::<f64>();
+                for (a,b) in axis.iter_mut().zip(unit) { *a -= projection*b; }
+            }
+        }
+        let norm = axis.iter().map(|v| v*v).sum::<f64>().sqrt();
+        if !norm.is_finite() || norm <= 1e-5 * original { continue; }
+        for value in &mut axis { *value /= norm; }
+        basis.push(axis);
+        ids.push(parent.id);
+    }
+    if basis.is_empty() { return (Vec::new(), ids, 0.0); }
+    let mut residual: Vec<f64> = query.iter().map(|v| *v as f64 / qnorm).collect();
+    for _ in 0..2 {
+        for unit in &basis {
+            let projection = residual.iter().zip(unit).map(|(a,b)| a*b).sum::<f64>();
+            for (a,b) in residual.iter_mut().zip(unit) { *a -= projection*b; }
+        }
+    }
+    let norm = residual.iter().map(|v| v*v).sum::<f64>().sqrt();
+    if !norm.is_finite() || norm < 1e-4 { return (Vec::new(), ids, 0.0); }
+    // Smoothly attenuate near-degenerate directions instead of amplifying noise.
+    let confidence = clamp01(norm / 0.1);
+    (residual.into_iter().map(|v| (v/norm) as f32).collect(), ids, confidence)
+}
 fn range_value(values: &[f64], index: usize, fallback: f64) -> f64 {
     values
         .get(index)
@@ -884,7 +1096,6 @@ fn technical_name(value: &str, allow_space: bool) -> bool {
         })
 }
 
-/// P3（上游 9aa1f67）：旧入口降为测试薄壳——生产路径全部走 gate_tags_for_graph。
 #[cfg(test)]
 fn gate_tags(
     levels: &[Vec<PyramidTagWork>],
@@ -897,32 +1108,22 @@ fn gate_tags(
     gate_tags_for_graph(levels, epa, pyramid, core_tags, config, query_text, None, &[])
 }
 
-/// P3（上游 9aa1f67）：隐式种子等比例缩放——非 core/lexical 的最大权重不超过
-/// 显式（core/lexical 且图内）最大权重的 0.35 倍。
 fn scale_implicit_seeds(gated: &mut [GatedTag], eligible: Option<&HashMap<i64, usize>>) {
-    let explicit_max = gated
-        .iter()
-        .filter(|tag| (tag.is_core || tag.lexical)
-            && eligible.map_or(true, |ids| ids.contains_key(&tag.id)))
-        .map(|tag| tag.weight)
-        .fold(0.0, f64::max);
-    let implicit_max = gated
-        .iter()
-        .filter(|tag| !tag.is_core && !tag.lexical)
-        .map(|tag| tag.weight)
-        .fold(0.0, f64::max);
+    let explicit_max = gated.iter().filter(|t| (t.is_core || t.lexical)
+        && eligible.map_or(true, |ids| ids.contains_key(&t.id)))
+        .map(|t| t.weight).fold(0.0, f64::max);
+    let implicit_max = gated.iter().filter(|t| !t.is_core && !t.lexical)
+        .map(|t| t.weight).fold(0.0, f64::max);
     if explicit_max > 0.0 && implicit_max > 0.35 * explicit_max {
         let scale = 0.35 * explicit_max / implicit_max;
         for tag in gated {
-            if !tag.is_core && !tag.lexical {
-                tag.weight *= scale;
-            }
+            if !tag.is_core && !tag.lexical { tag.weight *= scale; }
         }
     }
 }
 
-/// P3（上游 9aa1f67）：显式名字对 SQL 原件解析，绝不发明图节点。硬幽灵可绑定
-/// 真 Tag；软幽灵与未知幽灵保持 fusion-only。
+/// Resolve explicit names against SQL originals without inventing graph nodes.
+/// Hard ghosts may bind to real Tags; soft and unknown ghosts stay fusion-only.
 fn resolve_core_seeds(
     connection: &Connection,
     core_tags: &[String],
@@ -931,25 +1132,15 @@ fn resolve_core_seeds(
     pool: &mut TagVectorPool,
     dimension: usize,
 ) -> std::result::Result<Vec<(i64, String)>, String> {
-    let mut statement = connection
-        .prepare("SELECT id, name FROM tags WHERE lower(name) = lower(?1) LIMIT 1")
-        .map_err(|error| format!("prepare Memo core seed query failed: {}", error))?;
+    let mut statement = connection.prepare(
+        "SELECT id, name FROM tags WHERE lower(name) = lower(?1) LIMIT 1"
+    ).map_err(|error| format!("prepare Memo core seed query failed: {error}"))?;
     let mut resolved = Vec::new();
     let mut seen = HashSet::new();
-    for name in core_tags
-        .iter()
-        .map(String::as_str)
-        .chain(
-            ghost_tags
-                .iter()
-                .filter(|tag| tag.is_core)
-                .map(|tag| tag.name.as_str()),
-        )
-    {
+    for name in core_tags.iter().map(String::as_str)
+        .chain(ghost_tags.iter().filter(|tag| tag.is_core).map(|tag| tag.name.as_str())) {
         let name = name.trim();
-        if name.is_empty() {
-            continue;
-        }
+        if name.is_empty() { continue; }
         let row = statement.query_row(rusqlite::params![name], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         });
@@ -958,22 +1149,18 @@ fn resolve_core_seeds(
                 resolved.push((id, name));
             }
             Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {}
-            Err(error) => return Err(format!("query Memo core seed failed: {}", error)),
+            Err(error) => return Err(format!("query Memo core seed failed: {error}")),
         }
     }
     let ids: Vec<i64> = resolved.iter().map(|tag| tag.0).collect();
     ensure_tag_vectors_loaded(connection, pool, &ids, dimension)?;
-    resolved.retain(|(id, _)| pool.get(id).is_some_and(|vector| magnitude(&vector) > 1e-12));
+    resolved.retain(|(id, _)| pool.get(id).is_some_and(|v| magnitude(v) > 1e-12));
     Ok(resolved)
 }
 
 fn gate_tags_for_graph(
-    levels: &[Vec<PyramidTagWork>],
-    epa: &EpaOutput,
-    pyramid: &PyramidOutput,
-    core_tags: &[String],
-    config: &PipelineConfig,
-    query_text: &str,
+    levels: &[Vec<PyramidTagWork>], epa: &EpaOutput, pyramid: &PyramidOutput,
+    core_tags: &[String], config: &PipelineConfig, query_text: &str,
     eligible: Option<&HashMap<i64, usize>>,
     explicit_cores: &[(i64, String)],
 ) -> (Vec<GatedTag>, f64, f64) {
@@ -993,11 +1180,8 @@ fn gate_tags_for_graph(
     let core_min = range_value(&config.core_boost_range, 0, 1.2);
     let core_max = range_value(&config.core_boost_range, 1, 1.4);
     let dynamic_core_boost = core_min + core_metric * (core_max - core_min);
-    let core_names: HashSet<String> = core_tags
-        .iter()
-        .map(|name| name.trim().to_lowercase())
-        .chain(explicit_cores.iter().map(|(_, name)| name.to_lowercase()))
-        .collect();
+    let core_names: HashSet<String> = core_tags.iter().map(|name| name.trim().to_lowercase())
+        .chain(explicit_cores.iter().map(|(_, name)| name.to_lowercase())).collect();
     let world = epa
         .dominant_axes
         .first()
@@ -1009,19 +1193,17 @@ fn gate_tags_for_graph(
         .any(|token| world_lower.contains(token));
     let technical_world = world != "Unknown" && technical_name(world, false);
 
+    let query_tokens = lexical_tokens(query_text);
     let mut seen = HashSet::new();
     let mut gated = Vec::new();
     for (level, tags) in levels.iter().enumerate() {
-        let maximum = tags
-            .iter()
-            .map(|tag| positive(tag.contribution))
-            .fold(0.0, f64::max);
+        let maximum = tags.iter().map(|tag| positive(tag.contribution)).fold(0.0, f64::max);
         let threshold = (maximum * config.seed_contribution_ratio.clamp(0.0, 1.0))
             .max(config.seed_contribution_floor.max(0.0));
-        let dominant = tags
-            .first()
-            .filter(|tag| tag.contribution.powi(2) > 0.85 && tag.similarity > 0.0);
-        // 至多两个冗余方向借幅，总量有界；原始正交贡献与残差不动。
+        let dominant = tags.first().filter(|tag|
+            tag.contribution.powi(2) > 0.85 && tag.similarity > 0.0);
+        // At most two redundant directions borrow amplitude; the sum is bounded.
+        // Raw orthogonal contributions and residuals remain untouched.
         let mut redundancy_left = dominant.map_or(0.0, |tag| 0.3 * tag.contribution);
         let mut redundancy_slots = 2usize;
         for tag in tags {
@@ -1029,76 +1211,59 @@ fn gate_tags_for_graph(
             if tag.id <= 0 || seen.contains(&tag.id) {
                 continue;
             }
-            let grounding = lexical_grounding(query_text, &tag.name);
+            // Do not resurrect a geometrically redundant lexical parent.
+            // Explicit user cores remain authoritative and bypass this heuristic.
+            if !is_core && superseded_hypernym(tag, tags, threshold) { continue; }
+            let grounding = lexical_grounding_with_tokens(&query_tokens, &tag.name);
             let lexical = grounding >= 0.5;
-            // 只有已独立支撑的同伴能借幅；低贡献别名不能递归赞助别的别名。
-            let sponsor = tags
-                .iter()
-                .filter(|peer| peer.id != tag.id
-                    && peer.contribution >= threshold
-                    && peer.similarity > 0.0)
+            // Only already independently supported peers can lend amplitude.
+            // A low-contribution alias cannot recursively sponsor other aliases.
+            let sponsor = tags.iter().filter(|peer| peer.id != tag.id
+                && peer.contribution >= threshold && peer.similarity > 0.0)
                 .filter_map(|peer| {
                     let tightness = clamp01(cosine(&peer.vector, &tag.vector));
                     (tightness >= 0.80).then_some(peer.contribution * tightness)
-                })
-                .fold(0.0, f64::max);
+                }).fold(0.0, f64::max);
             let alias = tag.similarity >= 0.20 && sponsor > 0.0;
-            let collapsed_redundant = !is_core
-                && !lexical
-                && tag.contribution < 1e-6
+            let collapsed_redundant = !is_core && !lexical && tag.contribution < 1e-6
                 && tag.similarity >= 0.75
                 && dominant.is_some_and(|first| first.id != tag.id
                     && cosine(&first.vector, &tag.vector) >= 0.90);
             let redundant = collapsed_redundant && redundancy_slots > 0;
-            if collapsed_redundant && !redundant {
-                continue;
-            }
+            if collapsed_redundant && !redundant { continue; }
             let redundancy_floor = if redundant {
                 let first = dominant.unwrap();
                 let borrowed = (0.15 * first.contribution
                     * clamp01(tag.similarity / first.similarity)
-                    * clamp01(cosine(&first.vector, &tag.vector)))
-                .min(redundancy_left);
+                    * clamp01(cosine(&first.vector, &tag.vector))).min(redundancy_left);
                 redundancy_left -= borrowed;
                 redundancy_slots -= 1;
                 borrowed
-            } else {
-                0.0
-            };
+            } else { 0.0 };
             if !is_core && !lexical && !alias
-                && (tag.contribution < threshold || tag.similarity <= 0.0)
-            {
+                && (tag.contribution < threshold || tag.similarity <= 0.0) {
                 continue;
             }
             let effective_contribution = if lexical {
-                // 字面焦点独立点燃，不受别名策略压低。
+                // Preserve 1.1 literal-focus ignition independently of alias policy.
                 tag.contribution.max(0.6 * sponsor).max(0.6 * maximum)
             } else if redundant {
                 tag.contribution.max(redundancy_floor)
             } else if alias {
                 tag.contribution.max(0.6 * sponsor * tag.similarity.clamp(0.2, 1.0))
-            } else {
-                tag.contribution
-            };
+            } else { tag.contribution };
             seen.insert(tag.id);
             // Cosine zero is a measured orthogonal relationship, not a
             // missing-score sentinel. Every pyramid candidate is measured
             // against its SQL original before entering this gate.
-            let relevance = if tag.similarity != 0.0 {
-                tag.similarity
-            } else {
-                0.5
-            };
+            let relevance = tag.similarity;
             let core_gain = if is_core {
                 dynamic_core_boost * (0.95 + relevance * 0.1)
             } else {
                 1.0
             };
             let mut language_gain = 1.0;
-            if !lexical
-                && config.lang_confidence_enabled
-                && technical_name(&tag.name, true)
-                && !technical_world
+            if !lexical && config.lang_confidence_enabled && technical_name(&tag.name, true) && !technical_world
             {
                 let penalty = if world == "Unknown" {
                     config.lang_penalty_unknown
@@ -1113,27 +1278,14 @@ fn gate_tags_for_graph(
                 };
             }
             let decay = config.layer_decay.clamp(0.0, 1.0).powi(level as i32);
-            // 恢复（绝不放大）被接纳层里的强残差焦点。
+            // Restore, never amplify, strong residual foci in accepted layers.
             let independent_support = clamp01(effective_contribution / maximum.max(1e-12));
-            let layer_gain = if lexical {
-                1.0
-            } else {
+            let layer_gain = if lexical { 1.0 } else {
                 decay + (1.0 - decay) * independent_support
             };
-            let raw_weight = positive(effective_contribution)
-                * layer_gain
-                * language_gain
-                * core_gain
-                * if lexical && !is_core {
-                    1.6
-                } else {
-                    1.0
-                };
-            let weight = if is_core {
-                raw_weight
-            } else {
-                raw_weight.min(1.0)
-            };
+            let raw_weight = positive(effective_contribution) * layer_gain * language_gain * core_gain
+                * if lexical && !is_core { 1.6 } else { 1.0 };
+            let weight = if is_core { raw_weight } else { raw_weight.min(1.0) };
             if weight > 0.0 {
                 gated.push(GatedTag {
                     id: tag.id,
@@ -1145,19 +1297,16 @@ fn gate_tags_for_graph(
             }
         }
     }
-    // 显式焦点有单位基础幅值，独立于 ANN 召回与 Gram-Schmidt 贡献。
-    // 促升既有 ID，绝不复制。
+    // Explicit focus has unit base amplitude, independent of ANN recall and
+    // Gram-Schmidt contribution. Promote existing IDs instead of duplicating them.
     for (id, name) in explicit_cores {
         if let Some(tag) = gated.iter_mut().find(|tag| tag.id == *id) {
             tag.is_core = true;
             tag.weight = tag.weight.max(dynamic_core_boost);
         } else {
             gated.push(GatedTag {
-                id: *id,
-                name: name.clone(),
-                weight: dynamic_core_boost,
-                is_core: true,
-                lexical: false,
+                id: *id, name: name.clone(), weight: dynamic_core_boost,
+                is_core: true, lexical: false,
             });
         }
     }
@@ -1171,7 +1320,21 @@ struct FusionTag {
     name: String,
     weight: f64,
     is_core: bool,
-    vector: Vec<f32>,
+    vector: Arc<[f32]>,
+    norm: f64,
+}
+
+impl FusionTag {
+    fn cosine(&self, other: &Self) -> f64 {
+        // Both vectors were admitted with the request's dimension. Keep the
+        // original multiplication and division order, including the tiny-norm guard.
+        let denominator = self.norm * other.norm;
+        if denominator > 1e-12 {
+            dot(&self.vector, &other.vector) / denominator
+        } else {
+            0.0
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -1187,10 +1350,18 @@ struct FusionDiagnostics {
     ghost_count: usize,
 }
 
+#[cfg(test)]
 fn fuse_observation(
-    index: &Index,
+    connection: &Connection, query: &[f32], observation: &SenseOutput,
+    gated_tags: &[GatedTag], core_tags: &[String], ghost_tags: &[GhostTagInput],
+    dynamic_core_boost: f64, dimension: usize, alpha: f64, config: &PipelineConfig,
+) -> std::result::Result<(Vec<f64>, FusionDiagnostics, Vec<FusionTag>), String> {
+    fuse_observation_with_pool(connection, query, observation, gated_tags, core_tags,
+        ghost_tags, dynamic_core_boost, dimension, alpha, config, &mut TagVectorPool::new())
+}
+
+fn fuse_observation_with_pool(
     connection: &Connection,
-    tag_vectors: &mut TagVectorPool,
     query: &[f32],
     observation: &SenseOutput,
     gated_tags: &[GatedTag],
@@ -1200,6 +1371,7 @@ fn fuse_observation(
     dimension: usize,
     alpha: f64,
     config: &PipelineConfig,
+    tag_vectors: &mut TagVectorPool,
 ) -> std::result::Result<(Vec<f64>, FusionDiagnostics, Vec<FusionTag>), String> {
     // 与 JS SOTA 完全相同：传播后的原始种子取 max，防止循环共现膨胀；
     // 纯涌现节点按能量排序后只保留 Top-N。
@@ -1241,6 +1413,8 @@ fn fuse_observation(
     let emergent_count = emergent.len();
     merged.extend(emergent);
 
+    // JS 使用传播后 allTags 的最大基准权重；coreBoostFactor 仅用于还原基准，
+    // 实际补全 Core 与 Hard Ghost 使用动态 Core 增益。
     let core_divisor =
         if config.core_boost_factor.is_finite() && config.core_boost_factor.abs() > 1e-12 {
             config.core_boost_factor
@@ -1286,26 +1460,15 @@ fn fuse_observation(
         }
     }
 
+    drop(core_statement);
     let requested_count = merged.len() + ghost_tags.len();
-    let mut buffer = vec![0.0f32; dimension];
+    let ids = merged.iter().map(|tag| tag.id).collect::<Vec<_>>();
+    ensure_tag_vectors_loaded(connection, tag_vectors, &ids, dimension)?;
     let mut vectors = Vec::with_capacity(requested_count);
-    // P1.2：融合向量也走共享池（金字塔阶段已装载的行直接命中；缺的读索引兜底）。
-    let merged_ids: Vec<i64> = merged.iter().map(|tag| tag.id).collect();
-    ensure_tag_vectors_loaded(connection, tag_vectors, &merged_ids, dimension)?;
     for tag in merged {
-        let vector = match tag_vectors.get(&tag.id) {
-            Some(vector) => vector.as_ref().to_vec(),
-            None => {
-                let found = index.get(tag.id as u64, &mut buffer).map_err(|error| {
-                    format!("Memo pipeline fusion vector read failed: {:?}", error)
-                })?;
-                if found == 0 {
-                    continue;
-                }
-                buffer.clone()
-            }
-        };
-        if magnitude(&vector) > 1e-12 {
+        let Some(vector) = tag_vectors.get(&tag.id).cloned() else { continue };
+        let norm = magnitude(&vector);
+        if norm > 1e-12 {
             vectors.push(FusionTag {
                 id: tag.id,
                 name: if tag.name.is_empty() {
@@ -1316,6 +1479,7 @@ fn fuse_observation(
                 weight: tag.weight,
                 is_core: tag.is_core,
                 vector,
+                norm,
             });
         }
     }
@@ -1324,15 +1488,16 @@ fn fuse_observation(
     let mut ghost_id = -1i64;
     let mut accepted_ghosts = 0usize;
     for ghost in ghost_tags {
-        // P3（上游 9aa1f67）：绑定到真 core 种子的硬幽灵已贡献其 SQL 向量，跳过。
-        if ghost.is_core
-            && gated_tags
-                .iter()
-                .any(|tag| tag.is_core && tag.name.eq_ignore_ascii_case(ghost.name.trim()))
-        {
+        // A hard ghost bound to a real core seed already contributes its SQL vector.
+        if ghost.is_core && gated_tags.iter().any(|tag|
+            tag.is_core && tag.name.eq_ignore_ascii_case(ghost.name.trim())) {
             continue;
         }
-        if ghost.vector.len() != dimension || magnitude(&ghost.vector) <= 1e-12 {
+        if ghost.vector.len() != dimension {
+            continue;
+        }
+        let norm = magnitude(&ghost.vector);
+        if norm <= 1e-12 {
             continue;
         }
         vectors.push(FusionTag {
@@ -1345,14 +1510,16 @@ fn fuse_observation(
                     1.0
                 },
             is_core: ghost.is_core,
-            vector: ghost.vector.clone(),
+            vector: Arc::from(ghost.vector.clone()),
+            norm,
         });
         ghost_id -= 1;
         accepted_ghosts += 1;
     }
     let found_count = vectors.len();
 
-    // JS SOTA：按权重降序贪心去重；冗余标签把 20% 能量转移给代表标签
+    // JS SOTA：按权重降序贪心去重；冗余标签把 20% 能量转移给代表标签，
+    // 同时保留 Core 属性。不能简化为“直接丢弃冗余标签”。
     vectors.sort_by(|left, right| {
         right
             .weight
@@ -1360,12 +1527,13 @@ fn fuse_observation(
             .unwrap_or(Ordering::Equal)
             .then_with(|| left.id.cmp(&right.id))
     });
+    vectors.truncate(config.max_fusion_tags.clamp(1, 1024));
     let threshold = config.deduplication_threshold.clamp(-1.0, 1.0);
     let mut selected: Vec<FusionTag> = Vec::new();
     for candidate in vectors {
         let redundant_index = selected
             .iter()
-            .position(|existing| cosine(&candidate.vector, &existing.vector) > threshold);
+            .position(|existing| candidate.cosine(existing) > threshold);
         if let Some(index) = redundant_index {
             selected[index].weight += candidate.weight * 0.2;
             selected[index].is_core |= candidate.is_core;
@@ -1376,7 +1544,8 @@ fn fuse_observation(
 
     let total_weight = selected.iter().map(|entry| entry.weight).sum::<f64>();
     if total_weight <= 0.0 {
-        // JS applyTagBoost() 的兼容契约：无法构造 Tag 上下文时原样返回查询向量
+        // JS applyTagBoost() 的兼容契约：无法构造 Tag 上下文时原样返回查询向量，
+        // 而不是抛错。空 selected 也确保 matched/coreTagsMatched 保持为空。
         let diagnostics = FusionDiagnostics {
             requested_count,
             found_count,
@@ -1404,12 +1573,11 @@ fn fuse_observation(
     }
     normalize(&mut context);
 
-    let fused: Vec<f64> = query
+    let mut fused: Vec<f64> = query
         .iter()
         .zip(context.iter())
         .map(|(source, memo)| (1.0 - alpha) * (*source as f64) + alpha * *memo)
         .collect();
-    let mut fused = fused;
     normalize(&mut fused);
     let diagnostics = FusionDiagnostics {
         requested_count,
@@ -1427,15 +1595,10 @@ fn fuse_observation(
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DualFieldDiagnostics {
-    iterations: usize,
-    local_converged: bool,
-    transfer_converged: bool,
-    local_residual: f64,
-    transfer_residual: f64,
-    local_mass: f64,
-    transfer_mass: f64,
-    // ── P1.3（上游 1098-1123）：投影支撑账。maxProjectionNodes=0 时全部留在缺省 0。──
-    /// 圈选并集里已装载到池的节点数；0 表示没走 basin 圈选（或空 core）。
+    retained_local_field_nodes: usize,
+    retained_transfer_field_nodes: usize,
+    local_domain_nodes: usize,
+    transfer_domain_nodes: usize,
     projected_nodes: usize,
     selected_projection_nodes: usize,
     sql_fetched_nodes: usize,
@@ -1451,17 +1614,13 @@ struct DualFieldDiagnostics {
     solve_ms: f64,
     domain_ms: f64,
     project_ms: f64,
-}
-
-/// 每侧支撑的读数（上游 1273-1281）。
-#[derive(Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectionSupportDiagnostics {
-    core_nodes: usize,
-    selected_nodes: usize,
-    outside_domain_nodes: usize,
-    missing_vector_nodes: usize,
-    stop_reason: String,
+    iterations: usize,
+    local_converged: bool,
+    transfer_converged: bool,
+    local_residual: f64,
+    transfer_residual: f64,
+    local_mass: f64,
+    transfer_mass: f64,
 }
 
 struct DualFieldOutput {
@@ -1474,7 +1633,11 @@ struct DualFieldOutput {
     diagnostics: DualFieldDiagnostics,
 }
 
-fn apply_transport(artifact: &NativeArtifact, input: &[f64], output: &mut [f64]) {
+fn apply_transport(
+    artifact: &crate::rivermemo_topology_v3::NativeArtifact,
+    input: &[f64],
+    output: &mut [f64],
+) {
     output.fill(0.0);
     for source in 0..artifact.node_ids.len() {
         let mass = input[source];
@@ -1487,10 +1650,11 @@ fn apply_transport(artifact: &NativeArtifact, input: &[f64], output: &mut [f64])
     }
 }
 
-/// P3（上游 9aa1f67）：`apply_transport` 的双场单趟版——一次 CSR 遍历同时产出
-/// 两场。每个输出位置收到的加法与两次独立遍历完全同序，各场保留自己的零质量跳过。
+/// `apply_transport` for both fields in one pass over the CSR. Every output
+/// position receives the same additions in the same order as two separate
+/// passes, and each field keeps its own zero-mass skip.
 fn apply_transport_pair(
-    artifact: &NativeArtifact,
+    artifact: &crate::rivermemo_topology_v3::NativeArtifact,
     local: &[f64],
     transfer: &[f64],
     local_output: &mut [f64],
@@ -1519,8 +1683,9 @@ fn apply_transport_pair(
     }
 }
 
-/// P3（上游 9aa1f67）：`next = (1 - alpha) * source + alpha * propagated`，单趟同时
-/// 累计对 `current` 的 L1 变化——算术与索引序和「先更新再求非负项 L1 和」一致。
+/// `next = (1 - alpha) * source + alpha * propagated` and the L1 change from
+/// `current`, in one pass with the same arithmetic and index order as a
+/// separate update followed by an L1 sum of non-negative terms.
 fn relax_field(
     source: &[f64],
     propagated: &[f64],
@@ -1540,7 +1705,11 @@ fn field_mass(field: &[f64]) -> f64 {
     field.iter().map(|value| positive(*value)).sum()
 }
 
-fn effective_domain(artifact: &NativeArtifact, field: &[f64], ratio: f64) -> Vec<i64> {
+fn effective_domain(
+    artifact: &crate::rivermemo_topology_v3::NativeArtifact,
+    field: &[f64],
+    ratio: f64,
+) -> Vec<i64> {
     let total = field_mass(field);
     if total <= 0.0 {
         return Vec::new();
@@ -1571,13 +1740,212 @@ fn effective_domain(artifact: &NativeArtifact, field: &[f64], ratio: f64) -> Vec
     retained
 }
 
-/// P1.3 basin 圈选投影（上游 memo_pipeline.rs:1404-1444 逐语义）：
-/// grow 给出两场各自的支撑（并集共用 maxProjectionNodes 预算），并集一次性补池后按
-/// 选中节点的场质量加权平均。缺向量的节点跳过——读数由 missing_vector_nodes /
-/// projected_mass_ratio 明示，绝不静默补 0。
+#[cfg(test)]
+fn project_field(
+    vectors: &HashMap<i64, Vec<f32>>,
+    artifact: &crate::rivermemo_topology_v3::NativeArtifact,
+    field: &[f64],
+    dimension: usize,
+) -> std::result::Result<Vec<f32>, String> {
+    let mut output = vec![0.0f64; dimension];
+    let mut total = 0.0;
+    for (node_index, mass) in field.iter().copied().enumerate() {
+        if mass <= 0.0 {
+            continue;
+        }
+        let id = artifact.node_ids[node_index];
+        let Some(buffer) = vectors.get(&id) else { continue };
+        total += mass;
+        for offset in 0..dimension {
+            output[offset] += buffer[offset] as f64 * mass;
+        }
+    }
+    if total > 0.0 {
+        for value in &mut output {
+            *value /= total;
+        }
+        normalize(&mut output);
+    }
+    Ok(output.into_iter().map(|value| value as f32).collect())
+}
+
+/// Legacy full-support projection retained only as a regression reference.
+#[cfg(test)]
+fn project_dual_fields(
+    connection: &Connection,
+    artifact: &crate::rivermemo_topology_v3::NativeArtifact,
+    local: &[f64],
+    transfer: &[f64],
+    dimension: usize,
+) -> std::result::Result<(Vec<f32>, Vec<f32>), String> {
+    let mut outputs = [vec![0.0f64; dimension], vec![0.0f64; dimension]];
+    let mut totals = [0.0f64; 2];
+    for (batch_index, ids) in artifact.node_ids.chunks(128).enumerate() {
+        let start = batch_index * 128;
+        let requested: Vec<i64> = ids.iter().enumerate()
+            .filter(|(offset, _)| local[start + offset] > 0.0
+                || transfer[start + offset] > 0.0)
+            .map(|(_, id)| *id)
+            .collect();
+        let vectors = load_vectors_by_ids(connection, "tags", &requested, dimension)?;
+        for (offset, id) in ids.iter().enumerate() {
+            let Some(vector) = vectors.get(id) else { continue };
+            for (field, mass) in [local[start + offset], transfer[start + offset]]
+                .into_iter().enumerate()
+            {
+                if mass <= 0.0 { continue; }
+                totals[field] += mass;
+                for (output, value) in outputs[field].iter_mut().zip(vector) {
+                    *output += *value as f64 * mass;
+                }
+            }
+        }
+    }
+    for (output, total) in outputs.iter_mut().zip(totals) {
+        if total > 0.0 {
+            for value in output.iter_mut() { *value /= total; }
+            normalize(output);
+        }
+    }
+    let [local, transfer] = outputs;
+    Ok((
+        local.into_iter().map(|value| value as f32).collect(),
+        transfer.into_iter().map(|value| value as f32).collect(),
+    ))
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionSupportDiagnostics {
+    core_nodes: usize,
+    selected_nodes: usize,
+    outside_domain_nodes: usize,
+    missing_vector_nodes: usize,
+    stop_reason: String,
+}
+
+#[cfg(test)]
+struct ProjectionSupport {
+    ids: Vec<i64>,
+    diagnostics: ProjectionSupportDiagnostics,
+}
+
+// A deterministic max-heap: highest field mass first, then lowest Tag ID.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct ProjectionFrontier {
+    mass: f64,
+    id: i64,
+    index: usize,
+}
+#[cfg(test)]
+impl PartialEq for ProjectionFrontier {
+    fn eq(&self, other: &Self) -> bool {
+        self.mass.total_cmp(&other.mass) == Ordering::Equal && self.id == other.id
+    }
+}
+#[cfg(test)]
+impl Eq for ProjectionFrontier {}
+#[cfg(test)]
+impl PartialOrd for ProjectionFrontier {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+#[cfg(test)]
+impl Ord for ProjectionFrontier {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.mass.total_cmp(&other.mass).then_with(|| other.id.cmp(&self.id))
+    }
+}
+
+/// Core-anchored directed region growing. A candidate is exposed only by an
+/// already selected predecessor; low-mass bridges are never skipped to reach peaks.
+/// Domains remain unchanged for downstream geometry: they supply only the mass target.
+#[cfg(test)]
+fn select_projection_support(
+    artifact: &crate::rivermemo_topology_v3::NativeArtifact,
+    field: &[f64],
+    domain: &[i64],
+    river_ids: &[i64],
+    limit: usize,
+) -> std::result::Result<ProjectionSupport, String> {
+    let mut ids: Vec<i64> = river_ids.iter().copied()
+        .filter(|id| artifact.node_index.contains_key(id)).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if limit > 0 && ids.len() > limit {
+        return Err(format!(
+            "MEMO_PROJECTION_CORE_EXCEEDS_BUDGET: core has {} nodes, per-field budget is {}; increase maxFieldProjectionNodes or use 0",
+            ids.len(), limit));
+    }
+    let domain_set: HashSet<i64> = domain.iter().copied().collect();
+    let target_mass: f64 = domain.iter().filter_map(|id| artifact.node_index.get(id))
+        .map(|&i| positive(field[i])).sum();
+    let mut diagnostics = ProjectionSupportDiagnostics {
+        core_nodes: ids.len(), ..ProjectionSupportDiagnostics::default()
+    };
+    if ids.is_empty() {
+        diagnostics.stop_reason = "empty_core".into();
+        return Ok(ProjectionSupport { ids, diagnostics });
+    }
+    let mut discovered: HashSet<usize> = ids.iter().map(|id| artifact.node_index[id]).collect();
+    let mut frontier = BinaryHeap::new();
+    let cutoff = field.iter().copied().map(positive).fold(0.0_f64, f64::max) * 1e-12;
+    let expose = |source: usize, discovered: &mut HashSet<usize>,
+                  frontier: &mut BinaryHeap<ProjectionFrontier>| {
+        for cursor in artifact.row_offsets[source]..artifact.row_offsets[source + 1] {
+            if positive(artifact.weights[cursor]) <= 0.0 { continue; }
+            let index = artifact.targets[cursor];
+            let mass = positive(field[index]);
+            // Do not fill seats with numerical tails or zero-mass transit nodes.
+            if mass > 0.0 && mass >= cutoff && discovered.insert(index) {
+                frontier.push(ProjectionFrontier { mass, id: artifact.node_ids[index], index });
+            }
+        }
+    };
+    // Stable initial summation and edge exposure, independent of hash iteration.
+    let mut selected_mass: f64 = ids.iter().map(|id| positive(field[artifact.node_index[id]])).sum();
+    for id in &ids { expose(artifact.node_index[id], &mut discovered, &mut frontier); }
+    loop {
+        if selected_mass >= target_mass {
+            diagnostics.stop_reason = "mass_target".into();
+            break;
+        }
+        if limit > 0 && ids.len() >= limit {
+            diagnostics.stop_reason = "budget".into();
+            break;
+        }
+        let Some(next) = frontier.pop() else {
+            diagnostics.stop_reason = "frontier_exhausted".into();
+            break;
+        };
+        ids.push(next.id);
+        selected_mass += next.mass;
+        expose(next.index, &mut discovered, &mut frontier);
+    }
+    diagnostics.selected_nodes = ids.len();
+    diagnostics.outside_domain_nodes = ids.iter().filter(|id| !domain_set.contains(id)).count();
+    Ok(ProjectionSupport { ids, diagnostics })
+}
+
+#[cfg(test)]
+fn project_supported_fields(
+    connection: &Connection,
+    artifact: &crate::rivermemo_topology_v3::NativeArtifact,
+    fields: [&[f64]; 2],
+    domains: [&[i64]; 2],
+    dimension: usize,
+    limit: usize,
+    river_ids: &[i64],
+    pool: &mut TagVectorPool,
+    diagnostics: &mut DualFieldDiagnostics,
+) -> std::result::Result<(Vec<f32>, Vec<f32>), String> {
+    project_basin_fields(connection, artifact, fields, domains, dimension, limit,
+        river_ids, &[], pool, diagnostics)
+}
+
 fn project_basin_fields(
     connection: &Connection,
-    artifact: &NativeArtifact,
+    artifact: &crate::rivermemo_topology_v3::NativeArtifact,
     fields: [&[f64]; 2],
     domains: [&[i64]; 2],
     dimension: usize,
@@ -1587,26 +1955,21 @@ fn project_basin_fields(
     pool: &mut TagVectorPool,
     diagnostics: &mut DualFieldDiagnostics,
 ) -> std::result::Result<(Vec<f32>, Vec<f32>), String> {
-    let supports = crate::memo_projection::grow(
-        artifact, fields, domains, river_ids, basins, limit,
-    )?;
+    let supports = crate::memo_projection::grow(artifact, fields, domains, river_ids, basins, limit)?;
     let selected = supports.ids;
-    let growth = supports.diagnostics;
-    let support_diagnostics = |field: usize| {
-        let domain: HashSet<i64> = domains[field].iter().copied().collect();
+    let support_diagnostics = |f: usize| {
+        let domain: HashSet<i64> = domains[f].iter().copied().collect();
         ProjectionSupportDiagnostics {
-            core_nodes: growth.core_nodes,
-            selected_nodes: selected[field].len(),
-            outside_domain_nodes: selected[field]
-                .iter()
-                .filter(|id| !domain.contains(id))
-                .count(),
-            stop_reason: growth.stop_reason.clone(),
+            core_nodes: supports.diagnostics.core_nodes,
+            selected_nodes: selected[f].len(),
+            outside_domain_nodes: selected[f].iter().filter(|id| !domain.contains(id)).count(),
+            stop_reason: supports.diagnostics.stop_reason.clone(),
             ..ProjectionSupportDiagnostics::default()
         }
     };
     diagnostics.local_support = support_diagnostics(0);
     diagnostics.transfer_support = support_diagnostics(1);
+    diagnostics.growth = supports.diagnostics;
     let mut union: Vec<i64> = selected.iter().flatten().copied().collect();
     union.sort_unstable();
     union.dedup();
@@ -1616,16 +1979,10 @@ fn project_basin_fields(
     diagnostics.sql_requested_nodes = stats.requested_nodes;
     diagnostics.sql_batches = stats.sql_batches;
     diagnostics.projected_nodes = union.iter().filter(|id| pool.contains_key(id)).count();
-    diagnostics.local_support.missing_vector_nodes = selected[0]
-        .iter()
-        .filter(|id| !pool.contains_key(id))
-        .count();
-    diagnostics.transfer_support.missing_vector_nodes = selected[1]
-        .iter()
-        .filter(|id| !pool.contains_key(id))
-        .count();
-    diagnostics.growth = growth;
-
+    diagnostics.local_support.missing_vector_nodes =
+        selected[0].iter().filter(|id| !pool.contains_key(id)).count();
+    diagnostics.transfer_support.missing_vector_nodes =
+        selected[1].iter().filter(|id| !pool.contains_key(id)).count();
     let mut outputs = [vec![0.0f64; dimension], vec![0.0f64; dimension]];
     let mut selected_ratios = [0.0; 2];
     let mut projected_ratios = [0.0; 2];
@@ -1634,35 +1991,24 @@ fn project_basin_fields(
         let mut selected_mass = 0.0;
         let mut projected_mass = 0.0;
         for id in &selected[field] {
-            let Some(&index) = artifact.node_index.get(id) else {
-                continue;
-            };
+            let Some(&index) = artifact.node_index.get(id) else { continue };
             let mass = positive(fields[field][index]);
             selected_mass += mass;
-            let Some(vector) = pool.get(id) else {
-                continue;
-            };
+            let Some(vector) = pool.get(id) else { continue };
             projected_mass += mass;
-            // P3（上游 9aa1f67）：传输已经惩罚过枢纽。这里只做温和的残差投影折扣，
-            // 保留观测到的 query core 不动。
+            // Transport already penalizes hubs. Apply only a mild residual
+            // projection discount, preserving the observed query core unchanged.
             let hub_ratio = if artifact.max_inbound > 0.0 {
                 positive(artifact.inbound.get(id).copied().unwrap_or(0.0)) / artifact.max_inbound
-            } else {
-                0.0
-            };
-            let projection_gain = if river_ids.contains(id) {
-                1.0
-            } else {
-                1.0 / (1.0 + hub_ratio.sqrt())
-            };
+            } else { 0.0 };
+            let projection_gain = if river_ids.contains(id) { 1.0 }
+                else { 1.0 / (1.0 + hub_ratio.sqrt()) };
             for (out, value) in outputs[field].iter_mut().zip(vector.iter()) {
                 *out += *value as f64 * mass * projection_gain;
             }
         }
         if projected_mass > 0.0 {
-            for out in &mut outputs[field] {
-                *out /= projected_mass;
-            }
+            for out in &mut outputs[field] { *out /= projected_mass; }
             normalize(&mut outputs[field]);
         }
         if total_mass > 0.0 {
@@ -1670,27 +2016,36 @@ fn project_basin_fields(
             projected_ratios[field] = projected_mass / total_mass;
         }
     }
-    diagnostics.local_selected_mass_ratio = selected_ratios[0];
-    diagnostics.transfer_selected_mass_ratio = selected_ratios[1];
-    diagnostics.local_projected_mass_ratio = projected_ratios[0];
-    diagnostics.transfer_projected_mass_ratio = projected_ratios[1];
+    [diagnostics.local_selected_mass_ratio, diagnostics.transfer_selected_mass_ratio] = selected_ratios;
+    [diagnostics.local_projected_mass_ratio, diagnostics.transfer_projected_mass_ratio] = projected_ratios;
     let [local, transfer] = outputs;
-    Ok((
-        local.into_iter().map(|value| value as f32).collect(),
-        transfer.into_iter().map(|value| value as f32).collect(),
-    ))
+    Ok((local.into_iter().map(|v| v as f32).collect(),
+        transfer.into_iter().map(|v| v as f32).collect()))
 }
 
+#[cfg(test)]
 fn solve_dual_fields(
-    artifact: &NativeArtifact,
+    artifact: &crate::rivermemo_topology_v3::NativeArtifact,
     connection: &Connection,
-    tag_vectors: &mut TagVectorPool,
     source_entries: &[(i64, f64)],
-    river_ids: &[i64],
-    basins: &[crate::memo_projection::Basin],
     dimension: usize,
     config: &PipelineConfig,
 ) -> std::result::Result<DualFieldOutput, String> {
+    solve_dual_fields_with_pool(artifact, connection, source_entries, dimension, config,
+        &mut TagVectorPool::new(), &source_entries.iter().map(|entry| entry.0).collect::<Vec<_>>(), &[])
+}
+
+fn solve_dual_fields_with_pool(
+    artifact: &crate::rivermemo_topology_v3::NativeArtifact,
+    connection: &Connection,
+    source_entries: &[(i64, f64)],
+    dimension: usize,
+    config: &PipelineConfig,
+    pool: &mut TagVectorPool,
+    river_ids: &[i64],
+    basins: &[crate::memo_projection::Basin],
+) -> std::result::Result<DualFieldOutput, String> {
+    let solve_started = Instant::now();
     let mut source = vec![0.0f64; artifact.node_ids.len()];
     for (id, mass) in source_entries {
         if let Some(index) = artifact.node_index.get(id) {
@@ -1710,6 +2065,10 @@ fn solve_dual_fields(
                 iterations: 0,
                 local_converged: true,
                 transfer_converged: true,
+                local_residual: 0.0,
+                transfer_residual: 0.0,
+                local_mass: 0.0,
+                transfer_mass: 0.0,
                 ..DualFieldDiagnostics::default()
             },
         });
@@ -1720,7 +2079,6 @@ fn solve_dual_fields(
 
     let local_alpha = config.local_alpha.clamp(0.0, 0.999999);
     let transfer_alpha = config.transfer_alpha.clamp(0.0, 0.999999);
-    let solve_started = Instant::now();
     let mut local = source.clone();
     let mut transfer = source.clone();
     let mut next_local = vec![0.0; source.len()];
@@ -1735,34 +2093,24 @@ fn solve_dual_fields(
 
     for iteration in 1..=config.field_max_iterations.max(1) {
         iterations = iteration;
-        // P3（上游 9aa1f67）：两场独立；双场都在动时一趟 CSR 服务两场。
+        // The fields are independent; while both move, one CSR pass serves both.
         if !local_converged && !transfer_converged {
-            apply_transport_pair(
-                artifact,
-                &local,
-                &transfer,
-                &mut propagated_local,
-                &mut propagated_transfer,
-            );
+            apply_transport_pair(artifact, &local, &transfer,
+                &mut propagated_local, &mut propagated_transfer);
         } else if !local_converged {
             apply_transport(artifact, &local, &mut propagated_local);
         } else if !transfer_converged {
             apply_transport(artifact, &transfer, &mut propagated_transfer);
         }
         if !local_converged {
-            local_residual =
-                relax_field(&source, &propagated_local, local_alpha, &local, &mut next_local);
+            local_residual = relax_field(&source, &propagated_local, local_alpha,
+                &local, &mut next_local);
             local_converged = local_residual <= config.local_tolerance.max(1e-15);
             std::mem::swap(&mut local, &mut next_local);
         }
         if !transfer_converged {
-            transfer_residual = relax_field(
-                &source,
-                &propagated_transfer,
-                transfer_alpha,
-                &transfer,
-                &mut next_transfer,
-            );
+            transfer_residual = relax_field(&source, &propagated_transfer, transfer_alpha,
+                &transfer, &mut next_transfer);
             transfer_converged = transfer_residual <= config.transfer_tolerance.max(1e-15);
             std::mem::swap(&mut transfer, &mut next_transfer);
         }
@@ -1771,56 +2119,44 @@ fn solve_dual_fields(
         }
     }
 
-    let local_field: Vec<(i64, f64)> = artifact
-        .node_ids
-        .iter()
-        .copied()
-        .zip(local.iter().copied())
-        .filter(|(_, mass)| *mass > 0.0)
-        .collect();
-    let transfer_field: Vec<(i64, f64)> = artifact
-        .node_ids
-        .iter()
-        .copied()
-        .zip(transfer.iter().copied())
-        .filter(|(_, mass)| *mass > 0.0)
-        .collect();
     let solve_ms = solve_started.elapsed().as_secs_f64() * 1000.0;
     let domain_started = Instant::now();
     let local_domain_ids = effective_domain(artifact, &local, config.local_mass_ratio);
     let transfer_domain_ids = effective_domain(artifact, &transfer, config.transfer_mass_ratio);
-    let domain_ms = domain_started.elapsed().as_secs_f64() * 1000.0;
+    // Scalar retention is independent of projection K. Keep meaningful tails for
+    // path potentials/tail penalties, and always preserve support/river nodes.
+    let mut retained: Vec<i64> = local_domain_ids.iter().chain(&transfer_domain_ids)
+        .chain(river_ids).copied().collect();
+    retained.sort_unstable();
+    retained.dedup();
+    let required: HashSet<i64> = retained.into_iter().collect();
+    let scalar = |field: &[f64]| -> Vec<(i64, f64)> {
+        let maximum = field.iter().copied().fold(0.0f64, f64::max);
+        let cutoff = maximum * 1e-12;
+        artifact.node_ids.iter().copied().zip(field.iter().copied())
+            .filter(|(id, mass)| mass.is_finite() && *mass > 0.0
+                && (*mass >= cutoff || required.contains(id)))
+            .collect()
+    };
+    let local_field = scalar(&local);
+    let transfer_field = scalar(&transfer);
     let local_mass = field_mass(&local);
     let transfer_mass = field_mass(&transfer);
-    let mut diagnostics = DualFieldDiagnostics {
-        iterations,
-        local_converged,
-        transfer_converged,
-        local_residual,
-        transfer_residual,
-        local_mass,
-        transfer_mass,
+    let mut projection = DualFieldDiagnostics {
         solve_ms,
-        domain_ms,
+        retained_local_field_nodes: local_field.len(),
+        retained_transfer_field_nodes: transfer_field.len(),
+        local_domain_nodes: local_domain_ids.len(),
+        transfer_domain_nodes: transfer_domain_ids.len(),
+        domain_ms: domain_started.elapsed().as_secs_f64() * 1000.0,
         ..DualFieldDiagnostics::default()
     };
-    // P3（上游 9aa1f67 solve_dual_fields_with_pool:1893-1896）：投影无条件走
-    // basin 圈选（grow 预算 = max_field_projection_nodes，缺省 256），
-    // v9.2 全支撑投影路径退役。
     let project_started = Instant::now();
     let (local_vector, transfer_vector) = project_basin_fields(
-        connection,
-        artifact,
-        [&local, &transfer],
-        [&local_domain_ids, &transfer_domain_ids],
-        dimension,
-        config.max_field_projection_nodes,
-        river_ids,
-        basins,
-        tag_vectors,
-        &mut diagnostics,
-    )?;
-    diagnostics.project_ms = project_started.elapsed().as_secs_f64() * 1000.0;
+        connection, artifact, [&local, &transfer],
+        [&local_domain_ids, &transfer_domain_ids], dimension,
+        config.max_field_projection_nodes, river_ids, basins, pool, &mut projection)?;
+    projection.project_ms = project_started.elapsed().as_secs_f64() * 1000.0;
 
     Ok(DualFieldOutput {
         local_field,
@@ -1829,7 +2165,16 @@ fn solve_dual_fields(
         transfer_domain_ids,
         local_vector,
         transfer_vector,
-        diagnostics,
+        diagnostics: DualFieldDiagnostics {
+            iterations,
+            local_converged,
+            transfer_converged,
+            local_residual,
+            transfer_residual,
+            local_mass,
+            transfer_mass,
+            ..projection
+        },
     })
 }
 
@@ -1840,12 +2185,15 @@ struct PipelineDiagnostics {
     runtime_ownership: String,
     epa_ms: f64,
     pyramid_ms: f64,
+    tag_routing_check_ms: f64,
     gating_ms: f64,
     sensing_ms: f64,
     fusion_ms: f64,
+    dual_field_solve_ms: f64,
+    dual_field_project_ms: f64,
+    dual_field_domain_ms: f64,
     total_ms: f64,
     seed_nodes: usize,
-    /// P3（上游 9aa1f67）：路由残差数与「尾部残差是否追加」。
     routing_residual_count: usize,
     routing_tail_appended: bool,
     observation_cached: bool,
@@ -1853,30 +2201,11 @@ struct PipelineDiagnostics {
     observation_cache_error: Option<String>,
     dual_field: DualFieldDiagnostics,
     fusion: FusionDiagnostics,
-    /// P1.2（上游 1646）：感知层诊断（含动态虫洞 6 计数与工作账）随管线外露——
-    /// 暗上线期间看「关」是否真零工作、开闸后看虫洞命中。
     sensing: SenseDiagnostics,
-    /// P2：上一次 `rebuildMemoArtifact` 的 schema-v2 兜底探针（2.0 迁移会删
-    /// `tag_pair_similarity` / `tag_intrinsic_residuals`）。放这里而不是 artifact payload，
-    /// 因为 payload 是逐字节深比对面（多一个键就记「缺侧」）。
-    build_schema_v2: BuildSchemaV2Flags,
-    /// 仅 `debugDualFieldVectors: true` 时出现（取证用；缺省 None ⇒ 不序列化）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    dual_field_vectors: Option<DualFieldVectors>,
-}
-
-#[derive(Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DualFieldVectors {
-    local: Vec<f32>,
-    transfer: Vec<f32>,
-}
-
-#[derive(Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BuildSchemaV2Flags {
-    pairwise_table_missing: bool,
-    intrinsic_table_missing: bool,
+    tag_routing: Option<serde_json::Value>,
+    #[cfg(test)]
+    pyramid_attempts: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -1892,31 +2221,35 @@ struct PipelineMetadataOutput {
     matched_tags: Vec<String>,
     core_tags_matched: Vec<String>,
     effective_tag_boost: f64,
-    // 上游 9aa1f67 同位：input.config.spike_routing 的回显（SenseConfig 已带 Serialize）。
     propagation_parameters: SenseConfig,
     diagnostics: PipelineDiagnostics,
 }
 
 pub struct MemoPipelineComputeOutput {
-    metadata_json: String,
-    enhanced_vector: Vec<f32>,
+    pub(crate) metadata_json: String,
+    pub(crate) enhanced_vector: Vec<f32>,
 }
 
+/// 统一 Memo 查询的轻量 N-API 返回值。
+///
+/// 完整 Observation、双场、域集合与投影向量只保留在 MemoRuntime 中；Node
+/// 只接收后续读出所需的句柄、诊断摘要和用于 KNN 的增强查询向量。
 #[napi(object)]
 pub struct MemoPipelineResult {
     pub metadata_json: String,
     pub enhanced_vector: Float32Array,
 }
 
-fn run_pipeline(
-    index: &Arc<RwLock<Index>>,
+fn run_pipeline_with_connection(
+    index: &Arc<crate::index_handle::IndexHandle>,
     runtime: &MemoRuntime,
-    db_path: &str,
     artifact_sig: &str,
     dimensions: usize,
     input_json: &str,
     query_vector: &[f32],
     ghost_vectors: &[f32],
+    artifact: &Arc<crate::rivermemo_topology_v3::NativeArtifact>,
+    connection: &Connection,
 ) -> std::result::Result<MemoPipelineComputeOutput, String> {
     let total_started = Instant::now();
     let mut input: PipelineInput = serde_json::from_str(input_json)
@@ -1946,51 +2279,68 @@ fn run_pipeline(
         let start = position * dimensions;
         ghost.vector = ghost_vectors[start..start + dimensions].to_vec();
     }
-    let artifact = load_artifact_from_runtime(runtime, db_path, artifact_sig)?;
-    let connection = open_readonly(db_path)?;
-
     let epa_started = Instant::now();
-    let epa = analyze_epa(&connection, &input.query_vector, dimensions);
+    if !["absolute","relativeLinear","relativeSqrt","backgroundRelative"].contains(&input.config.epa_gate_mode.as_str()) {
+        return Err("Invalid epaGateMode".into());
+    }
+    let mut epa_digest=None;
+    let epa = analyze_epa_with_digest(&connection, &input.query_vector, dimensions,
+        &input.config.epa_gate_mode,&mut epa_digest);
     let epa_ms = epa_started.elapsed().as_secs_f64() * 1000.0;
 
-    let pyramid_started = Instant::now();
-    let index_guard = index
-        .read()
-        .map_err(|error| format!("Memo pipeline index lock failed: {}", error))?;
-    // P1.2：请求级共享 Tag 向量池——金字塔装载、虫洞共鸣、融合、双场投影共用。
+    if !["cosine","warped_ags"].contains(&input.config.tag_routing_mode.as_str()) {
+        return Err("Invalid tagRoutingMode".into());
+    }
+    let routing_check_started = Instant::now();
+    let mut fallback_reason=None;
+    let mut field_source=None;
+    let warped = if input.config.tag_routing_mode == "warped_ags" {
+        match crate::warped_tag_field::load_or_build(runtime,connection,artifact_sig,
+            artifact,dimensions,input.config.warped_preset) {
+            Ok((field,source))=>{field_source=Some(source);Some(field)},
+            Err(error) if error.starts_with("WARPED_NOT_INITIALIZED:")=>{
+                fallback_reason=Some(error);None
+            },
+            Err(error)=>return Err(error),
+        }
+    } else { None };
+    if warped.is_some()
+        && index.lazy_tag_routing.load(std::sync::atomic::Ordering::Acquire)
+    {
+        let mut routing = index.write().map_err(|error| error.to_string())?;
+        routing.sleep_routing().map_err(|error| error.to_string())?;
+    }
+    let tag_routing_check_ms = routing_check_started.elapsed().as_secs_f64()*1000.0;
     let mut tag_vectors = TagVectorPool::new();
-    let (pyramid, level_tags, residuals) = analyze_pyramid(
-        &index_guard,
+    let mut routing_attempts = Vec::new();
+    #[cfg(test)]
+    let audit_stage=crate::storage::tag_read_audit::Stage::enter("pyramid");
+    let pyramid_started = Instant::now();
+    let (pyramid, level_tags, residuals) = analyze_pyramid_routed(
+        index,
         &connection,
         &input.query_vector,
         dimensions,
         &input.config,
         &mut tag_vectors,
         Some(&artifact.node_index),
+        warped.as_deref().map(|field| (field, &epa)),
+        &mut routing_attempts,
     )?;
     let pyramid_ms = pyramid_started.elapsed().as_secs_f64() * 1000.0;
 
+    #[cfg(test)]
+    drop(audit_stage);
+    #[cfg(test)]
+    let audit_stage=crate::storage::tag_read_audit::Stage::enter("gating");
     let gating_started = Instant::now();
-    // P3（上游 9aa1f67）：显式 Core/硬幽灵先对 SQL 原件解析成图内种子。
-    let explicit_cores = resolve_core_seeds(
-        &connection,
-        &input.core_tags,
-        &input.ghost_tags,
-        &artifact.node_index,
-        &mut tag_vectors,
-        dimensions,
-    )?;
-    let (gated_tags, effective_tag_boost, dynamic_core_boost) = gate_tags_for_graph(
-        &level_tags,
-        &epa,
-        &pyramid,
-        &input.core_tags,
-        &input.config,
-        &input.query_text,
-        Some(&artifact.node_index),
-        &explicit_cores,
-    );
-    // 空 Pyramid 也能点燃合法的显式 Core。图外/未知 Core 与幽灵保留 fusion-only 回退。
+    let explicit_cores = resolve_core_seeds(connection, &input.core_tags, &input.ghost_tags,
+        &artifact.node_index, &mut tag_vectors, dimensions)?;
+    let (gated_tags, effective_tag_boost, dynamic_core_boost) =
+        gate_tags_for_graph(&level_tags, &epa, &pyramid, &input.core_tags, &input.config,
+            &input.query_text, Some(&artifact.node_index), &explicit_cores);
+    // Even an empty Pyramid can ignite valid explicit cores. Unknown/out-of-graph
+    // cores and ghosts retain their fusion-only fallback.
     let seeds: Vec<SenseSeed> = gated_tags
         .iter()
         .map(|tag| SenseSeed {
@@ -2007,24 +2357,22 @@ fn run_pipeline(
         .collect();
     let gating_ms = gating_started.elapsed().as_secs_f64() * 1000.0;
 
+    #[cfg(test)]
+    drop(audit_stage);
+    #[cfg(test)]
+    let audit_stage=crate::storage::tag_read_audit::Stage::enter("wormhole");
     let sensing_started = Instant::now();
-    // P1.2（上游 1759-1780）：种子层号 = 该 Tag 在金字塔中出现的最小层；层相似度复用
-    // （同层残差与目标向量的余弦就是金字塔的 similarity，无需重复点积）。
-    let mut seed_levels: HashMap<i64, usize> = HashMap::new();
+    let mut seed_levels = HashMap::new();
     for (level, tags) in level_tags.iter().enumerate() {
-        for tag in tags {
-            seed_levels.entry(tag.id).or_insert(level);
-        }
+        for tag in tags { seed_levels.entry(tag.id).or_insert(level); }
     }
-    // P3（上游 9aa1f67）：路由残差账——层数之外的即尾部追加了那条。
     let routing_residual_count = residuals.len();
     let routing_tail_appended = residuals.len() > level_tags.len();
-    let mut wormholes =
-        DynamicWormholeContext::new(&connection, &mut tag_vectors, residuals, seed_levels);
+    let mut wormholes = DynamicWormholeContext::new(
+        connection, &mut tag_vectors, residuals, seed_levels,
+    );
     for (layer, tags) in level_tags.iter().enumerate() {
-        for tag in tags {
-            wormholes.reuse_score(layer, tag.id, tag.similarity);
-        }
+        for tag in tags { wormholes.reuse_score(layer, tag.id, tag.similarity); }
     }
     let observation = sense_with_context(
         &artifact,
@@ -2040,11 +2388,13 @@ fn run_pipeline(
     drop(wormholes);
     let sensing_ms = sensing_started.elapsed().as_secs_f64() * 1000.0;
 
+    #[cfg(test)]
+    drop(audit_stage);
+    #[cfg(test)]
+    let audit_stage=crate::storage::tag_read_audit::Stage::enter("fusion");
     let fusion_started = Instant::now();
-    let (enhanced_vector, fusion, selected_tags) = fuse_observation(
-        &index_guard,
+    let (enhanced_vector, fusion, selected_tags) = fuse_observation_with_pool(
         &connection,
-        &mut tag_vectors,
         &input.query_vector,
         &observation,
         &gated_tags,
@@ -2054,31 +2404,25 @@ fn run_pipeline(
         dimensions,
         effective_tag_boost,
         &input.config,
+        &mut tag_vectors,
     )?;
     let fusion_ms = fusion_started.elapsed().as_secs_f64() * 1000.0;
-    // P3（上游 9aa1f67 run_pipeline:2105-2111）：basin 圈选与 river_ids 每查询
-    // 无条件现算（上游无闸）；limit 在 solve 内取 max_field_projection_nodes。
-    let river_ids = observation
-        .nodes
-        .iter()
-        .map(|node| node.id)
-        .collect::<Vec<i64>>();
-    let basins = crate::memo_projection::seed_basins(&observation, &artifact);
-    let dual_fields = solve_dual_fields(
-        &artifact,
-        &connection,
-        &mut tag_vectors,
+    #[cfg(test)]
+    drop(audit_stage);
+    #[cfg(test)]
+    let _audit_stage=crate::storage::tag_read_audit::Stage::enter("projection");
+    let dual_fields = solve_dual_fields_with_pool(
+        artifact,
+        connection,
         &observation.source_field,
-        &river_ids,
-        &basins,
         dimensions,
         &input.config,
+        &mut tag_vectors,
+        &observation.nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+        &crate::memo_projection::seed_basins(&observation, artifact),
     )?;
-    drop(index_guard);
-    drop(connection);
 
-    let enhanced_vector_f32: Vec<f32> =
-        enhanced_vector.iter().map(|value| *value as f32).collect();
+    let enhanced_vector_f32: Vec<f32> = enhanced_vector.iter().map(|value| *value as f32).collect();
     let observation_handle = runtime.store_query_observation(
         artifact_sig,
         observation,
@@ -2090,7 +2434,34 @@ fn run_pipeline(
         dual_fields.transfer_field.clone(),
         dual_fields.local_domain_ids.clone(),
         dual_fields.transfer_domain_ids.clone(),
+        Arc::new(tag_vectors),
+        crate::storage::read_generation(connection)?,
+        {
+            let explicit_names = input.core_tags.iter().map(|s| s.trim().to_lowercase())
+                .chain(explicit_cores.iter().map(|(_,s)| s.trim().to_lowercase()))
+                .collect();
+            let (differentia_vector, superseded_ids, differentia_confidence) =
+                differentia_direction(&input.query_vector, &level_tags, &input.config, &explicit_names);
+            // Readout-only witness: do not infer a complete focus from a
+            // lexical seed's boosted weight or from a sponsored alias.
+            let query_name = input.query_text.trim().to_lowercase();
+            let exact_focus_id = level_tags.first().and_then(|tags| {
+                tags.iter().filter(|t| !query_name.is_empty()
+                    && t.name.trim().to_lowercase() == query_name
+                    && t.similarity > 0.0 && t.contribution > 0.0)
+                    .max_by(|a, b| a.contribution.total_cmp(&b.contribution)
+                        .then_with(|| b.id.cmp(&a.id)))
+                    .map(|t| t.id)
+            });
+            crate::rivermemo_topology_v3::QueryCalibration {
+                exact_focus_id,
+                differentia_vector, superseded_ids, differentia_confidence,
+                explained_ratio: Some(clamp01(pyramid.total_explained_energy)),
+            }
+        },
+        artifact.clone(),
     )?;
+    let observation_cached = true;
 
     let maximum_weight = selected_tags
         .iter()
@@ -2135,34 +2506,37 @@ fn run_pipeline(
             runtime_ownership: "vexus-index-instance".to_string(),
             epa_ms,
             pyramid_ms,
+            tag_routing_check_ms,
             gating_ms,
             sensing_ms,
             fusion_ms,
+            dual_field_solve_ms: dual_field_diagnostics.solve_ms,
+            dual_field_project_ms: dual_field_diagnostics.project_ms,
+            dual_field_domain_ms: dual_field_diagnostics.domain_ms,
             total_ms: total_started.elapsed().as_secs_f64() * 1000.0,
             seed_nodes,
             routing_residual_count,
             routing_tail_appended,
-            observation_cached: true,
+            observation_cached,
             observation_cache_error: None,
             dual_field: dual_field_diagnostics,
             fusion,
             sensing: sensing_diagnostics,
-            dual_field_vectors: if input.config.debug_dual_field_vectors {
-                Some(DualFieldVectors {
-                    local: dual_fields.local_vector.clone(),
-                    transfer: dual_fields.transfer_vector.clone(),
-                })
-            } else {
-                None
-            },
-            build_schema_v2: {
-                let (pairwise_missing, intrinsic_missing) =
-                    crate::memo_artifact_builder::schema_v2_fallback_flags();
-                BuildSchemaV2Flags {
-                    pairwise_table_missing: pairwise_missing,
-                    intrinsic_table_missing: intrinsic_missing,
-                }
-            },
+            #[cfg(test)]
+            pyramid_attempts: routing_attempts.clone(),
+            tag_routing: (input.config.tag_routing_mode == "warped_ags").then(||serde_json::json!({
+                "used":if warped.is_some() {"warped_ags"} else {"cosine"},
+                "fallback":warped.is_none(),
+                "preset":input.config.warped_preset.name(),
+                "source":field_source,
+                "fallbackReason":fallback_reason,
+                "radiusStrategy":format!("{:?}",input.config.warped_radius_strategy),
+                "legacyBudget":input.config.warped_legacy_budget,
+                "shellDirectory":input.config.warped_shell_directory,
+                "reuseBeam":input.config.warped_reuse_beam,
+                "seedPolicy":input.config.warped_seed_policy,
+                "attempts":routing_attempts,
+            })),
         },
     })
     .map_err(|error| format!("encode unified Memo pipeline metadata failed: {}", error))?;
@@ -2173,8 +2547,36 @@ fn run_pipeline(
     })
 }
 
+fn run_pipeline(
+    index: &Arc<crate::index_handle::IndexHandle>,
+    runtime: &MemoRuntime,
+    db_path: &str,
+    artifact_sig: &str,
+    dimensions: usize,
+    input_json: &str,
+    query_vector: &[f32],
+    ghost_vectors: &[f32],
+) -> std::result::Result<MemoPipelineComputeOutput, String> {
+    with_registered_read_transaction(db_path, |connection| {
+        crate::storage::read_generation(connection)?;
+        let artifact = load_artifact_with_connection(runtime, connection, artifact_sig)?;
+        run_pipeline_with_connection(
+            index,
+            runtime,
+            artifact_sig,
+            dimensions,
+            input_json,
+            query_vector,
+            ghost_vectors,
+            &artifact,
+            connection,
+        )
+    })
+}
+
 pub struct MemoPipelineTask {
-    index: Arc<RwLock<Index>>,
+    index: Arc<crate::index_handle::IndexHandle>,
+    content_revision: Arc<std::sync::atomic::AtomicU64>,
     runtime: Arc<MemoRuntime>,
     db_path: String,
     artifact_sig: String,
@@ -2189,6 +2591,28 @@ impl Task for MemoPipelineTask {
     type JsValue = MemoPipelineResult;
 
     fn compute(&mut self) -> Result<Self::Output> {
+        let scopes = ["global_tags".to_string()];
+        let mut gate = crate::publication_gate::acquire_read(&self.db_path, &scopes)
+            .map_err(Error::from_reason)?;
+        if crate::knowledge_runtime::ensure_index_scopes_ready(&self.db_path, &scopes).is_err() {
+            drop(gate);
+            gate = crate::publication_gate::acquire(&self.db_path, &scopes)
+                .map_err(Error::from_reason)?;
+        }
+        match crate::knowledge_runtime::ensure_index_scopes_ready(&self.db_path, &scopes) {
+            Ok(()) => {}
+            Err(error) if error.starts_with("KBM_INDEX_NOT_READY:") => {
+                self.runtime.clear().map_err(Error::from_reason)?;
+                crate::knowledge_runtime::recover_index_snapshot(
+                    &self.db_path, "global_tags".to_string(), None,
+                    &self.index, &self.content_revision, self.dimensions,
+                ).map_err(Error::from_reason)?;
+            }
+            Err(error) => return Err(Error::from_reason(error)),
+        }
+        crate::knowledge_runtime::ensure_index_scopes_ready(&self.db_path, &scopes)
+            .map_err(Error::from_reason)?;
+        gate.downgrade().map_err(Error::from_reason)?;
         run_pipeline(
             &self.index,
             &self.runtime,
@@ -2210,9 +2634,9 @@ impl Task for MemoPipelineTask {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_with_runtime(
-    index: Arc<RwLock<Index>>,
+pub(crate) fn compute_owned(
+    index: Arc<crate::index_handle::IndexHandle>,
+    content_revision: Arc<std::sync::atomic::AtomicU64>,
     runtime: Arc<MemoRuntime>,
     db_path: String,
     artifact_sig: String,
@@ -2220,9 +2644,28 @@ pub(crate) fn run_with_runtime(
     input_json: String,
     query_vector: Vec<f32>,
     ghost_vectors: Vec<f32>,
-) -> AsyncTask<MemoPipelineTask> {
-    AsyncTask::new(MemoPipelineTask {
+) -> Result<MemoPipelineComputeOutput> {
+    MemoPipelineTask {
+        index, content_revision, runtime, db_path, artifact_sig, dimensions,
+        input_json, query_vector, ghost_vectors,
+    }.compute()
+}
+
+pub(crate) fn run_with_runtime(
+    lifecycle: &Arc<crate::task_lifecycle::TaskLifecycle>,
+    index: Arc<crate::index_handle::IndexHandle>,
+    content_revision: Arc<std::sync::atomic::AtomicU64>,
+    runtime: Arc<MemoRuntime>,
+    db_path: String,
+    artifact_sig: String,
+    dimensions: usize,
+    input_json: String,
+    query_vector: Vec<f32>,
+    ghost_vectors: Vec<f32>,
+) -> AsyncTask<crate::task_lifecycle::TrackedTask<MemoPipelineTask>> {
+    AsyncTask::new(crate::task_lifecycle::TrackedTask::new(lifecycle, MemoPipelineTask {
         index,
+        content_revision,
         runtime,
         db_path,
         artifact_sig,
@@ -2230,47 +2673,411 @@ pub(crate) fn run_with_runtime(
         input_json,
         query_vector,
         ghost_vectors,
-    })
+    }))
 }
+
+
+#[cfg(test)]
+mod audit_gate_tests {
+    use super::*;
+
+    #[test]
+    fn fusion_cached_norm_cosines_match_original_bits() {
+        let mut state = 20261114_u64;
+        for dimension in [1, 3, 65, 3072] {
+            let mut vectors = vec![
+                vec![0.0; dimension], vec![-0.0; dimension],
+                vec![f32::from_bits(1); dimension], vec![1e-8; dimension],
+                vec![f32::MAX; dimension], vec![-f32::MAX; dimension],
+            ];
+            for _ in 0..80 {
+                vectors.push((0..dimension).map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((state >> 32) as i32 as f32) / i32::MAX as f32
+                }).collect());
+            }
+            let tags: Vec<FusionTag> = vectors.into_iter().enumerate().map(|(id, vector)| {
+                let norm = magnitude(&vector);
+                FusionTag { id: id as i64, name: String::new(), weight: 1.0,
+                    is_core: false, vector: Arc::from(vector), norm }
+            }).collect();
+            for left in &tags {
+                for right in &tags {
+                    assert_eq!(left.cosine(right).to_bits(),
+                        cosine(&left.vector, &right.vector).to_bits(),
+                        "dimension={dimension}, pair=({}, {})", left.id, right.id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn batched_dual_projection_matches_materialized_projection_bit_for_bit() {
+        use crate::rivermemo_topology_v3::NativeArtifact;
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE tags(id INTEGER PRIMARY KEY,vector BLOB);"
+        ).unwrap();
+        let ids: Vec<i64> = (1..=300).rev().collect();
+        for id in 1..=300_i64 {
+            if id == 129 { continue; }
+            let vector = if id == 258 {
+                vec![f32::NAN, 0.0, 0.0]
+            } else {
+                vec![(id as f32).sin(), id as f32 * 0.01, -0.25]
+            };
+            let bytes: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+            connection.execute("INSERT INTO tags VALUES (?1,?2)",
+                rusqlite::params![id, bytes]).unwrap();
+        }
+        let artifact = NativeArtifact {
+            node_index: ids.iter().enumerate().map(|(i, id)| (*id, i)).collect(),
+            node_ids: ids.clone(), row_offsets: vec![], targets: vec![],
+            weights: vec![], inbound: HashMap::new(), max_inbound: 0.0,
+            anchor_gain: HashMap::new(), wormhole_edges: HashSet::new(),
+            provenance: HashMap::new(),
+            ..NativeArtifact::default()
+        };
+        let local: Vec<f64> = (0..300).map(|i|
+            if i % 3 == 0 { 0.0 } else { 1.0 / (i + 1) as f64 }).collect();
+        let transfer: Vec<f64> = (0..300).map(|i|
+            if i % 5 == 0 { 0.0 } else { (i + 1) as f64 * 0.0001 }).collect();
+        let vectors = load_vectors_by_ids(&connection, "tags", &ids, 3).unwrap();
+        let expected_local = project_field(&vectors, &artifact, &local, 3).unwrap();
+        let expected_transfer = project_field(&vectors, &artifact, &transfer, 3).unwrap();
+        let (actual_local, actual_transfer) =
+            project_dual_fields(&connection, &artifact, &local, &transfer, 3).unwrap();
+        assert_eq!(actual_local.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected_local.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+        assert_eq!(actual_transfer.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected_transfer.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+        let zeros = vec![0.0; 300];
+        assert_eq!(project_dual_fields(&connection, &artifact, &zeros, &zeros, 3).unwrap(),
+            (vec![0.0; 3], vec![0.0; 3]));
+    }
+
+    #[test]
+    fn core_gate_preserves_zero_and_negative_cosine_measurements() {
+        let epa = EpaOutput {
+            logic_depth: 0.5, entropy: 0.0, resonance: 0.0,
+            dominant_axes: vec![], bridges: vec![], basis_count: 0,
+            cache_available: false, out_of_domain: 0.0,
+            semantic_explained_ratio: 0.0, in_domain_gate: 1.0,
+            baseline_coverage: 0.0, background_ratio: 0.0,
+        };
+        let pyramid = PyramidOutput {
+            levels: vec![], total_explained_energy: 0.0,
+            features: PyramidFeatures::default(),
+        };
+        let levels = vec![[-1.0, 0.0, 1.0].into_iter().enumerate()
+            .map(|(position, similarity)| PyramidTagWork {
+                id: position as i64 + 1, name: format!("核心{}", position),
+                vector: Arc::from(vec![]), similarity, contribution: 1.0,
+                handshake_magnitude: 0.0,
+            }).collect::<Vec<_>>()];
+        let names = levels[0].iter().map(|tag| tag.name.clone()).collect::<Vec<_>>();
+        let (gated, _, core_boost) = gate_tags(
+            &levels, &epa, &pyramid, &names, &PipelineConfig::default(), "",
+        );
+        assert_eq!(gated.len(), 3);
+        for (tag, cosine) in gated.iter().zip([-1.0, 0.0, 1.0]) {
+            assert!((tag.weight - core_boost * (0.95 + cosine * 0.1)).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn pyramid_uses_index_only_for_ids_and_measures_sql_originals() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE tags(id INTEGER PRIMARY KEY,name TEXT,vector BLOB);"
+        ).unwrap();
+        let bytes: Vec<u8> = [3.0_f32, 0.0, 0.0].iter()
+            .flat_map(|value| value.to_le_bytes()).collect();
+        connection.execute("INSERT INTO tags VALUES (1,'sql-original',?1)", [bytes]).unwrap();
+        let index = crate::VexusIndex::new(3, 16).unwrap();
+        index.index.write().unwrap().add(1, &[-9.0, 0.0, 0.0]).unwrap();
+        let config = PipelineConfig {
+            max_levels: 1, pyramid_top_k: 1, ..PipelineConfig::default()
+        };
+        let query = [1.0_f32, 2.0, 0.0];
+        connection.execute_batch("BEGIN").unwrap();
+        let (output, work) = analyze_pyramid(
+            &index.index, &connection, &query, 3, &config,
+        ).unwrap();
+        assert_eq!(work[0][0].vector.as_ref(), &[3.0, 0.0, 0.0]);
+        assert!((output.levels[0].tags[0].similarity - 1.0 / 5.0_f64.sqrt()).abs() < 1e-12);
+        assert!((output.levels[0].projection_magnitude - 1.0).abs() < 1e-6);
+        assert!((output.levels[0].residual_magnitude - 2.0).abs() < 1e-6);
+        assert!((output.total_explained_energy - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fusion_and_dual_projection_use_sql_original_f32() {
+        use crate::rivermemo_topology_v3::NativeArtifact;
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE tags(id INTEGER PRIMARY KEY,name TEXT,vector BLOB);"
+        ).unwrap();
+        let originals = [[3.0_f32, 0.0, 0.0], [0.0, 4.0, 0.0]];
+        for (slot, vector) in originals.iter().enumerate() {
+            let bytes: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+            connection.execute("INSERT INTO tags VALUES (?1,?2,?3)",
+                rusqlite::params![slot as i64 + 1, format!("core-{}", slot + 1), bytes]
+            ).unwrap();
+        }
+        let artifact = NativeArtifact {
+            node_ids: vec![1, 2],
+            node_index: HashMap::from([(1, 0), (2, 1)]),
+            row_offsets: vec![0, 1, 2],
+            targets: vec![1, 0],
+            weights: vec![1.0, 1.0],
+            inbound: HashMap::new(), max_inbound: 0.0,
+            anchor_gain: HashMap::new(), wormhole_edges: HashSet::new(),
+            provenance: HashMap::new(),
+            ..NativeArtifact::default()
+        };
+        let artifact = artifact.prepared();
+        let config = PipelineConfig { local_mass_ratio: 1.0, transfer_mass_ratio: 1.0, ..PipelineConfig::default() };
+        let observation = sense_typed(&artifact, "sql-original-test", SenseInput {
+            query_id: None, seeds: Vec::new(), config: SenseConfig::default(),
+        }).unwrap();
+        let (fused, diagnostics, selected) = fuse_observation(
+            &connection, &[0.0, 0.0, 1.0], &observation, &[],
+            &["core-1".into(), "core-2".into()], &[], 1.0, 3, 0.5, &config,
+        ).unwrap();
+        assert_eq!(diagnostics.found_count, 2);
+        assert_eq!(selected[0].vector.as_ref(), &originals[0]);
+        assert_eq!(selected[1].vector.as_ref(), &originals[1]);
+        let mut expected_fusion = vec![0.3_f64, 0.4, 0.5];
+        normalize(&mut expected_fusion);
+        for (actual, expected) in fused.iter().zip(expected_fusion) {
+            assert!((actual - expected).abs() <= 1e-6);
+        }
+        let fields = solve_dual_fields(
+            &artifact, &connection, &[(1, 1.0)], 3, &config,
+        ).unwrap();
+        for (field, actual) in [
+            (&fields.local_field, &fields.local_vector),
+            (&fields.transfer_field, &fields.transfer_vector),
+        ] {
+            let mut expected = vec![0.0_f64; 3];
+            for (id, mass) in field {
+                for (out, value) in expected.iter_mut().zip(originals[*id as usize - 1]) {
+                    *out += value as f64 * mass;
+                }
+            }
+            normalize(&mut expected);
+            for (value, expected) in actual.iter().zip(expected) {
+                assert!((*value as f64 - expected).abs() <= 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn pipeline_recovers_invalid_global_index_before_loading_artifact() {
+        let root = std::env::temp_dir().join(format!(
+            "kbm-pipeline-audit-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("test.sqlite").to_string_lossy().into_owned();
+        let (storage, _) = crate::storage::SqliteStorageEngine::open_and_init(
+            &db, crate::storage::StorageOptions::default(),
+        ).unwrap();
+        storage.submit_write(|tx| {
+            tx.execute(
+                "INSERT INTO kbm_index_states VALUES ('global_tags','invalid',1,0,NULL,0)", []
+            ).map_err(|error| error.to_string())?;
+            Ok(crate::storage::WriteReceipt {
+                operation: "fixture".into(), database_generation: 0, facts_changed: false,
+            })
+        }).unwrap();
+        let index = crate::VexusIndex::new(2, 16).unwrap();
+        index.index.write().unwrap().add(999, &[1.0_f32, 0.0]).unwrap();
+        let mut task = MemoPipelineTask {
+            index: index.index.clone(), content_revision: index.content_revision.clone(),
+            runtime: index.memo_runtime.clone(), db_path: db.clone(), artifact_sig: "missing".into(),
+            dimensions: 2, input_json: "{}".into(), query_vector: vec![1.0, 0.0], ghost_vectors: vec![],
+        };
+        assert!(task.compute().is_err()); // 图资产缺失仍应显式失败，不能跳过索引门禁。
+        assert_eq!(index.index.read().unwrap().size(), 0);
+        crate::knowledge_runtime::ensure_index_scopes_ready(&db, &["global_tags".into()]).unwrap();
+        assert_eq!(index.content_revision.load(std::sync::atomic::Ordering::Acquire), 1);
+        storage.shutdown().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 
 #[cfg(test)]
 mod geometry_epa_tests {
     use super::*;
-    use crate::memo_projection::grow;
 
-    /// 生产路径的诊断折算（project_basin_fields 前半段的纯函数版，无 SQL）。
-    /// 第二场恒为 0 质量 → 该 lane 不活跃，等价于单场观测。
-    fn support(
-        graph: &NativeArtifact,
-        field: &[f64],
-        domain: &[i64],
-        core: &[i64],
-        limit: usize,
-    ) -> std::result::Result<(Vec<i64>, ProjectionSupportDiagnostics), String> {
-        let zero = vec![0.0f64; graph.node_ids.len()];
-        let supports = grow(graph, [field, &zero], [domain, domain], core, &[], limit)?;
-        let domain_set: HashSet<i64> = domain.iter().copied().collect();
-        let diagnostics = ProjectionSupportDiagnostics {
-            core_nodes: supports.diagnostics.core_nodes,
-            selected_nodes: supports.ids[0].len(),
-            outside_domain_nodes: supports.ids[0]
-                .iter()
-                .filter(|id| !domain_set.contains(id))
-                .count(),
-            stop_reason: supports.diagnostics.stop_reason.clone(),
-            ..ProjectionSupportDiagnostics::default()
-        };
-        Ok((supports.ids[0].clone(), diagnostics))
+    fn encoded(values: &[f32]) -> String {
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
-    /// 1 -> 2 -> 3；1 -> 4；5 是不可达的高质量孤岛（上游 2370 同构）。
+    #[test]
+    fn calibrated_gates_preserve_scale_and_reject_background() {
+        assert_eq!(calibrated_gate(0.07,0.07,0.02,"relativeLinear"),1.0);
+        assert_eq!(calibrated_gate(0.07,0.07,0.02,"backgroundRelative"),1.0);
+        assert_eq!(calibrated_gate(0.02,0.07,0.02,"backgroundRelative"),0.0);
+        assert_eq!(calibrated_gate(0.01,0.07,0.02,"backgroundRelative"),0.0);
+        assert_eq!(calibrated_gate(0.1,0.01,0.02,"backgroundRelative"),0.0);
+        assert!((calibrated_gate(0.025,0.1,0.0,"relativeSqrt")-0.5).abs()<1e-12);
+    }
+
+    #[test]
+    fn cached_coverage_calibrates_prefix_without_tail_backing() {
+        let connection=Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE kv_store(key TEXT PRIMARY KEY,value TEXT);").unwrap();
+        let cache=serde_json::json!({
+            "mean":encoded(&[0.0,0.0,0.0,0.0]),
+            "basis":[encoded(&[1.0,0.0,0.0,0.0])],
+            "coverage":[0.75],"kSem":1
+        });
+        connection.execute("INSERT INTO kv_store VALUES ('epa_basis_cache',?1)",[cache.to_string()]).unwrap();
+        let inside=analyze_epa_with_mode(&connection,&[1.0,0.0,0.0,0.0],4,"backgroundRelative");
+        assert_eq!(inside.baseline_coverage,0.75);
+        assert_eq!(inside.background_ratio,0.25);
+        assert_eq!(inside.logic_depth,1.0);
+        let background=analyze_epa_with_mode(&connection,&[0.5,0.8660254,0.0,0.0],4,"backgroundRelative");
+        assert!(background.logic_depth<1e-6);
+        assert_eq!(PipelineConfig::default().epa_gate_mode,"backgroundRelative");
+    }
+
+    #[test]
+    fn semantic_entropy_ignores_tail_axes_and_reports_out_of_domain() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE kv_store(key TEXT PRIMARY KEY,value TEXT);").unwrap();
+        let write = |basis: Vec<Vec<f32>>| {
+            let cache = serde_json::json!({
+                "mean": encoded(&[0.0,0.0,0.0]),
+                "basis": basis.iter().map(|v| encoded(v)).collect::<Vec<_>>(),
+                "kSem": 2
+            });
+            connection.execute(
+                "INSERT OR REPLACE INTO kv_store VALUES ('epa_basis_cache',?1)",
+                [cache.to_string()],
+            ).unwrap();
+        };
+        write(vec![vec![1.0,0.0,0.0],vec![0.0,1.0,0.0]]);
+        let first = analyze_epa(&connection, &[0.5,0.5,0.70710677], 3);
+        assert!(first.cache_available);
+        assert!((first.entropy-1.0).abs()<1e-12);
+        assert!((first.out_of_domain-0.70710678).abs()<1e-6);
+        write(vec![vec![1.0,0.0,0.0],vec![0.0,1.0,0.0],vec![0.0,0.0,1.0]]);
+        let expanded = analyze_epa(&connection, &[0.5,0.5,0.70710677], 3);
+        assert_eq!(expanded.entropy, first.entropy);
+        assert!(expanded.out_of_domain<1e-6);
+        assert_eq!(expanded.semantic_explained_ratio, first.semantic_explained_ratio);
+        let low_energy = analyze_epa(&connection, &[0.1,0.0,0.9949874], 3);
+        assert!(low_energy.out_of_domain<1e-6); // Tail explains most energy, not the semantic prefix.
+        assert!(low_energy.entropy<1e-12);
+        assert!((low_energy.logic_depth-0.01).abs()<1e-6);
+        let on_axis = analyze_epa(&connection, &[1.0,0.0,0.0], 3);
+        assert_eq!(on_axis.logic_depth,1.0);
+        write(vec![vec![1.0,0.0,0.0]]);
+        let orthogonal = analyze_epa(&connection, &[0.0,1.0,0.0], 3);
+        assert!(orthogonal.cache_available);
+        assert_eq!(orthogonal.out_of_domain,1.0);
+        assert_eq!(orthogonal.entropy,1.0);
+        write(vec![]);
+        assert!(analyze_epa(&connection, &[0.0,1.0,0.0], 3).cache_available);
+    }
+}
+
+
+#[cfg(test)]
+mod projection_budget_tests {
+    use super::*;
+    use crate::rivermemo_topology_v3::NativeArtifact;
+
+    #[test]
+    fn independent_domains_budget_union_and_pool_reuse() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY, vector BLOB);").unwrap();
+        for (id, values) in [(1, [1.0f32, 0.0]), (2, [0.0, 1.0]), (3, [1.0, 1.0])] {
+            let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            connection.execute("INSERT INTO tags VALUES (?1,?2)",
+                rusqlite::params![id, bytes]).unwrap();
+        }
+        let artifact = NativeArtifact {
+            node_ids: vec![1, 2, 3],
+            node_index: HashMap::from([(1, 0), (2, 1), (3, 2)]),
+            row_offsets: vec![0, 2, 2, 2], targets: vec![1, 2], weights: vec![0.5, 0.5],
+            inbound: HashMap::new(), max_inbound: 0.0, anchor_gain: HashMap::new(),
+            wormhole_edges: HashSet::new(), provenance: HashMap::new(),
+            ..NativeArtifact::default()
+        };
+        let local = [0.7, 0.2, 0.1];
+        let transfer = [0.1, 0.7, 0.2];
+        let mut pool = TagVectorPool::new();
+        ensure_tag_vectors_loaded(&connection, &mut pool, &[1], 2).unwrap();
+        let original = pool[&1].clone();
+        let mut diagnostics = DualFieldDiagnostics::default();
+        let projected = project_supported_fields(&connection, &artifact,
+            [&local, &transfer], [&[1, 2], &[2, 3]], 2, 2, &[1],
+            &mut pool, &mut diagnostics).unwrap();
+        assert!(projected.0[0] > projected.0[1]);
+        assert!(projected.1[1] > projected.1[0]);
+        assert_eq!(diagnostics.projected_nodes, 2);
+        assert_eq!(diagnostics.sql_fetched_nodes, 1);
+        assert_eq!(diagnostics.sql_batches, 1);
+        assert!((diagnostics.local_selected_mass_ratio - 0.9).abs() < 1e-12);
+        assert!(Arc::ptr_eq(&original, &pool[&1]));
+        project_supported_fields(&connection, &artifact,
+            [&local, &transfer], [&[1, 2], &[2, 3]], 2, 2, &[1],
+            &mut pool, &mut diagnostics).unwrap();
+        assert_eq!(diagnostics.sql_batches, 0);
+        assert_eq!(diagnostics.sql_fetched_nodes, 0);
+        project_supported_fields(&connection, &artifact,
+            [&local, &transfer], [&[1, 2], &[2, 3]], 2, 0, &[1],
+            &mut pool, &mut diagnostics).unwrap();
+        assert_eq!(diagnostics.selected_projection_nodes, 3);
+        assert_eq!(diagnostics.sql_fetched_nodes, 1);
+        assert!((diagnostics.local_selected_mass_ratio - 0.9).abs() < 1e-12);
+    }
+
+    #[test]
+    fn arbitrary_budget_and_missing_rows_do_not_expand_support() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY, vector BLOB);").unwrap();
+        let ids: Vec<i64> = (1..=600).collect();
+        let artifact = NativeArtifact {
+            node_index: ids.iter().enumerate().map(|(i,id)| (*id,i)).collect(),
+            node_ids: ids.clone(),
+            row_offsets: std::iter::once(0).chain(1..=599).chain(std::iter::once(599)).collect(),
+            targets: (1..600).collect(), weights: vec![1.0; 599],
+            inbound: HashMap::new(), max_inbound: 0.0, anchor_gain: HashMap::new(),
+            wormhole_edges: HashSet::new(), provenance: HashMap::new(),
+            ..NativeArtifact::default()
+        };
+        let values = vec![1.0; 600];
+        for k in [0, 1, 64, 128, 193, 256, 512, 1000] {
+            let mut diagnostics = DualFieldDiagnostics::default();
+            let result = project_supported_fields(&connection, &artifact,
+                [&values, &values], [&ids[..400], &ids[200..]], 2, k, &[1],
+                &mut TagVectorPool::new(), &mut diagnostics).unwrap();
+            let count = if k == 0 { 400 } else { k.min(400) };
+            let expected: HashSet<i64> = ids[..count].iter().copied().collect();
+            assert_eq!(diagnostics.selected_projection_nodes, expected.len());
+            assert_eq!(diagnostics.sql_requested_nodes, expected.len());
+            assert_eq!(diagnostics.sql_batches, expected.len().div_ceil(128));
+            assert_eq!(diagnostics.projected_nodes, 0);
+            assert_eq!(diagnostics.local_projected_mass_ratio, 0.0);
+            assert_eq!(result, (vec![0.0; 2], vec![0.0; 2]));
+        }
+    }
+
     fn support_graph() -> NativeArtifact {
+        // 1 -> 2 -> 3; 1 -> 4; 5 is an unreachable high-mass island.
         NativeArtifact {
             node_ids: vec![1, 2, 3, 4, 5],
             node_index: (1..=5).enumerate().map(|(i, id)| (id, i)).collect(),
             row_offsets: vec![0, 2, 3, 3, 3, 3],
-            targets: vec![1, 3, 2],
-            weights: vec![0.5, 0.5, 1.0],
+            targets: vec![1, 3, 2], weights: vec![0.5, 0.5, 1.0],
             ..NativeArtifact::default()
         }
     }
@@ -2279,319 +3086,124 @@ mod geometry_epa_tests {
     fn growing_keeps_low_mass_bridge_and_rejects_global_islands() {
         let graph = support_graph();
         let field = [0.1, 0.01, 0.3, 0.02, 0.57];
-        let (ids, diagnostics) = support(&graph, &field, &[5, 3, 1], &[1], 0).unwrap();
-        // 我方 grow 按图距离（-ln w）推进；上游旧启发式给 [1,4,2,3]——集合相同。
-        assert_eq!(ids, vec![1, 2, 3, 4]);
-        assert_eq!(diagnostics.outside_domain_nodes, 2); // 2、4 在域外，3 在域内
-        assert_eq!(diagnostics.stop_reason, "frontier_exhausted");
-        // 每个非 core 节点都有更早入选的正权前驱：绝不发明连接边。
-        for (position, id) in ids.iter().enumerate().skip(1) {
-            assert!(
-                ids[..position]
-                    .iter()
-                    .any(|parent| graph.edge_weight(*parent, *id) > 0.0),
-                "node {} lacks an admitted predecessor",
-                id
-            );
+        let support = select_projection_support(&graph, &field, &[5, 3, 1], &[1], 0).unwrap();
+        assert_eq!(support.ids, vec![1, 4, 2, 3]);
+        assert_eq!(support.diagnostics.outside_domain_nodes, 2);
+        assert_eq!(support.diagnostics.stop_reason, "frontier_exhausted");
+        let limited = select_projection_support(&graph, &field, &[5, 3, 1], &[1], 3).unwrap();
+        assert_eq!(limited.ids, vec![1, 4, 2]);
+        assert_eq!(limited.diagnostics.stop_reason, "budget");
+        // Every non-core node has an earlier selected, positive-weight predecessor.
+        for (position, id) in support.ids.iter().enumerate().skip(1) {
+            assert!(support.ids[..position].iter().any(|parent| graph.edge_weight(*parent, *id) > 0.0));
         }
-        let (limited, diagnostics) = support(&graph, &field, &[5, 3, 1], &[1], 3).unwrap();
-        assert_eq!(limited, vec![1, 2, 3]);
-        assert_eq!(limited.len(), 3);
-        assert_eq!(diagnostics.stop_reason, "budget");
     }
 
     #[test]
     fn fields_grow_independently_and_ties_use_tag_id() {
         let graph = support_graph();
-        // 每场只在自家节点上有质量 → 支撑互不借用（上游同构断言）。
-        let (local, _) = support(&graph, &[0.1, 0.6, 0.0, 0.0, 0.0], &[1, 2], &[1], 2).unwrap();
-        let (transfer, _) = support(&graph, &[0.1, 0.0, 0.0, 0.6, 0.0], &[1, 4], &[1], 2).unwrap();
-        assert_eq!(local, vec![1, 2]);
-        assert_eq!(transfer, vec![1, 4]);
-        // 等距平手按 Tag ID 升序取席。
-        let (tied, diagnostics) = support(&graph, &[0.2; 5], &[1, 2, 3, 4, 5], &[1], 2).unwrap();
-        assert_eq!(tied, vec![1, 2]);
-        assert_eq!(diagnostics.stop_reason, "budget");
+        let local = select_projection_support(&graph, &[0.1, 0.6, 0.1, 0.1, 0.1],
+            &[2, 1, 3, 4, 5], &[1], 2).unwrap();
+        let transfer = select_projection_support(&graph, &[0.1, 0.1, 0.1, 0.6, 0.1],
+            &[4, 1, 2, 3, 5], &[1], 2).unwrap();
+        assert_eq!(local.ids, vec![1, 2]);
+        assert_eq!(transfer.ids, vec![1, 4]);
+        let tied = select_projection_support(&graph, &[0.2; 5],
+            &[1, 2, 3, 4, 5], &[1], 2).unwrap();
+        assert_eq!(tied.ids, vec![1, 2]);
     }
 
     #[test]
     fn core_budget_empty_core_and_mass_stop_are_explicit() {
         let graph = support_graph();
         let field = [0.2; 5];
-        let error = support(&graph, &field, &[1, 2], &[1, 2], 1).err().unwrap();
+        let error = select_projection_support(&graph, &field, &[1, 2], &[1, 2], 1)
+            .err().unwrap();
         assert!(error.starts_with("MEMO_PROJECTION_CORE_EXCEEDS_BUDGET:"));
-        let (empty, diagnostics) = support(&graph, &field, &[1, 2], &[], 2).unwrap();
-        assert!(empty.is_empty());
-        assert_eq!(diagnostics.stop_reason, "empty_core");
-        let (stopped, diagnostics) = support(&graph, &field, &[1], &[1], 256).unwrap();
-        assert_eq!(stopped, vec![1]);
-        assert_eq!(diagnostics.stop_reason, "mass_target");
-        // 独立的 seed 分量各自成立；不发明桥接边。
-        let (multi, diagnostics) = support(&graph, &field, &[1, 5], &[5, 1, 5], 2).unwrap();
-        assert_eq!(multi, vec![1, 5]);
-        assert_eq!(diagnostics.core_nodes, 2);
+        let empty = select_projection_support(&graph, &field, &[1, 2], &[], 2).unwrap();
+        assert!(empty.ids.is_empty());
+        assert_eq!(empty.diagnostics.stop_reason, "empty_core");
+        let stopped = select_projection_support(&graph, &field, &[1], &[1], 256).unwrap();
+        assert_eq!(stopped.ids, vec![1]);
+        assert_eq!(stopped.diagnostics.stop_reason, "mass_target");
+        // Independent seed components stay explicit; no invented connecting edges.
+        let multi = select_projection_support(&graph, &field, &[1, 5], &[5, 1, 5], 2).unwrap();
+        assert_eq!(multi.ids, vec![1, 5]);
+        assert_eq!(multi.diagnostics.core_nodes, 2);
     }
 
     #[test]
     fn zero_edges_cycles_and_numerical_tails_never_fill_seats() {
         let mut graph = support_graph();
-        graph.weights[0] = 0.0; // 1 的唯一入边权重为 0
-        let (ids, diagnostics) =
-            support(&graph, &[0.1, 0.4, 0.3, 1e-15, 0.2], &[1, 2, 3, 5], &[1], 256).unwrap();
-        assert_eq!(ids, vec![1]);
-        assert_eq!(diagnostics.stop_reason, "frontier_exhausted");
-        // 自环 + 双边环：不重复占席、不卡死。
-        let cyclic = NativeArtifact {
-            node_ids: vec![1, 2],
-            node_index: HashMap::from([(1, 0), (2, 1)]),
-            row_offsets: vec![0, 2, 3],
-            targets: vec![0, 1, 0],
-            weights: vec![1.0; 3],
+        graph.weights[0] = 0.0;
+        let support = select_projection_support(&graph, &[0.1, 0.4, 0.3, 1e-15, 0.2],
+            &[1, 2, 3, 5], &[1], 256).unwrap();
+        assert_eq!(support.ids, vec![1]);
+        assert_eq!(support.diagnostics.stop_reason, "frontier_exhausted");
+        let graph = NativeArtifact {
+            node_ids: vec![1, 2], node_index: HashMap::from([(1, 0), (2, 1)]),
+            row_offsets: vec![0, 2, 3], targets: vec![0, 1, 0], weights: vec![1.0; 3],
             ..NativeArtifact::default()
         };
-        let (ids, diagnostics) = support(&cyclic, &[0.5, 0.5], &[1, 2], &[1], 0).unwrap();
-        assert_eq!(ids, vec![1, 2]);
-        assert_eq!(diagnostics.stop_reason, "mass_target");
+        let support = select_projection_support(&graph, &[0.5, 0.5], &[1, 2], &[1], 0).unwrap();
+        assert_eq!(support.ids, vec![1, 2]);
     }
 
     #[test]
     fn budget_config_is_nonnegative_integer_with_default() {
-        // P3（上游 9aa1f67）：maxFieldProjectionNodes 缺省 256（无条件 basin 圈选）；
-        // 旧暗上线键 maxProjectionNodes 停止消费（缺省臂会显式发 0，当别名会
-        // 把 256 预算降级成无界），发送它不影响新键取值。
         let default: PipelineConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(default.max_field_projection_nodes, 256);
-        for k in [0usize, 64, 193, 512] {
-            let config: PipelineConfig =
-                serde_json::from_value(serde_json::json!({ "maxFieldProjectionNodes": k }))
-                    .unwrap();
+        for k in [0, 64, 193, 512] {
+            let config: PipelineConfig = serde_json::from_value(
+                serde_json::json!({"maxFieldProjectionNodes": k})).unwrap();
             assert_eq!(config.max_field_projection_nodes, k);
         }
-        // 旧键被忽略：显式 maxProjectionNodes=0 不再把缺省 256 降级。
-        let legacy: PipelineConfig =
-            serde_json::from_value(serde_json::json!({ "maxProjectionNodes": 0 })).unwrap();
-        assert_eq!(legacy.max_field_projection_nodes, 256);
-        for value in [
-            serde_json::json!(-1),
-            serde_json::json!(1.5),
-            serde_json::json!("256"),
-        ] {
+        for value in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("256")] {
             assert!(serde_json::from_value::<PipelineConfig>(
-                serde_json::json!({ "maxFieldProjectionNodes": value })
-            )
-            .is_err());
+                serde_json::json!({"maxFieldProjectionNodes": value})).is_err());
         }
-    }
-
-    #[test]
-    fn basin_projection_loads_union_once_and_reports_sql_batches() {
-        let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY, vector BLOB);")
-            .unwrap();
-        for (id, values) in [(1i64, [1.0f32, 0.0]), (2, [0.0, 1.0]), (3, [0.5, 0.5])] {
-            let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-            connection
-                .execute("INSERT INTO tags VALUES (?1,?2)", rusqlite::params![id, bytes])
-                .unwrap();
-        }
-        let artifact = NativeArtifact {
-            node_ids: vec![1, 2, 3],
-            node_index: HashMap::from([(1, 0), (2, 1), (3, 2)]),
-            row_offsets: vec![0, 2, 2, 2],
-            targets: vec![1, 2],
-            weights: vec![0.5, 0.5],
-            ..NativeArtifact::default()
-        };
-        let local = [0.7, 0.2, 0.1];
-        let transfer = [0.1, 0.7, 0.2];
-        let mut pool = TagVectorPool::new();
-        let mut diagnostics = DualFieldDiagnostics::default();
-        let projected = project_basin_fields(
-            &connection,
-            &artifact,
-            [&local, &transfer],
-            [&[1, 2], &[2, 3]],
-            2,
-            2,
-            &[1],
-            &[],
-            &mut pool,
-            &mut diagnostics,
-        )
-        .unwrap();
-        // 每场被自家质量主导（不是被对方的向量拉平）。
-        assert!(projected.0[0] > projected.0[1]);
-        assert!(projected.1[1] > projected.1[0]);
-        assert_eq!(diagnostics.selected_projection_nodes, 2);
-        assert_eq!(diagnostics.projected_nodes, 2);
-        assert_eq!(diagnostics.sql_requested_nodes, 2);
-        assert_eq!(diagnostics.sql_fetched_nodes, 2);
-        assert_eq!(diagnostics.sql_batches, 1);
-        assert_eq!(diagnostics.local_support.selected_nodes, 2);
-        assert_eq!(diagnostics.local_support.outside_domain_nodes, 0);
-        assert_eq!(diagnostics.transfer_support.outside_domain_nodes, 1);
-        assert_eq!(diagnostics.local_support.stop_reason, "budget");
-        assert!((diagnostics.local_selected_mass_ratio - 0.9).abs() < 1e-12);
-        // 同一请求内池已热：第二次零 SQL（并集一次性补池的判据）。
-        project_basin_fields(
-            &connection,
-            &artifact,
-            [&local, &transfer],
-            [&[1, 2], &[2, 3]],
-            2,
-            2,
-            &[1],
-            &[],
-            &mut pool,
-            &mut diagnostics,
-        )
-        .unwrap();
-        assert_eq!(diagnostics.sql_batches, 0);
-        assert_eq!(diagnostics.sql_fetched_nodes, 0);
-        assert_eq!(pool.len(), 2);
     }
 }
 
-#[cfg(test)]
-mod similarity_mode_tests {
-    use super::*;
-
-    #[test]
-    fn similarity_mode_config_defaults_to_cosine_and_rejects_unknown() {
-        // P3 起缺省翻为 cosine（对齐上游 2.0 无条件 cosine）；legacy 为显式兼容档。
-        let default: PipelineConfig = serde_json::from_str("{}").unwrap();
-        assert!(default.similarity_mode.is_none());
-        assert_eq!(
-            resolve_similarity_mode(default.similarity_mode),
-            SimilarityMode::Cosine
-        );
-        let cosine: PipelineConfig =
-            serde_json::from_value(serde_json::json!({ "similarityMode": "cosine" })).unwrap();
-        assert_eq!(
-            resolve_similarity_mode(cosine.similarity_mode),
-            SimilarityMode::Cosine
-        );
-        let legacy: PipelineConfig =
-            serde_json::from_value(serde_json::json!({ "similarityMode": "legacy" })).unwrap();
-        assert_eq!(
-            resolve_similarity_mode(legacy.similarity_mode),
-            SimilarityMode::Legacy
-        );
-        // 未知档位必须炸（不静默回退：配置面写错要立刻知道）
-        assert!(serde_json::from_value::<PipelineConfig>(
-            serde_json::json!({ "similarityMode": "cos" })
-        )
-        .is_err());
-    }
-
-    /// B 实测口径（p2-divergence-2026-10-22.md §5）：单位向量下 L2² = 2-2cos，
-    /// 所以 legacy 的 1/(1+d)（d = usearch 的平方距离）= 1/(1+2-2cos)，与 cos 不同口径。
-    /// tag5 实测：cos 0.5525 / L2² 0.895 / legacy 0.5277。
-    #[test]
-    fn legacy_is_one_over_one_plus_squared_l2_while_cosine_is_geometric() {
-        let residual = [1.0f32, 0.0];
-        let cosine_target = 0.5525f32;
-        let vector = [cosine_target, (1.0 - cosine_target * cosine_target).sqrt()];
-        let squared_l2 = 2.0 - 2.0 * cosine_target as f64; // 0.895
-        let distance = Some(squared_l2 as f32);
-        let legacy = pyramid_similarity(SimilarityMode::Legacy, distance, &residual, &vector);
-        let cosine = pyramid_similarity(SimilarityMode::Cosine, distance, &residual, &vector);
-        assert!((legacy - 1.0 / (1.0 + squared_l2)).abs() < 1e-12);
-        assert!((legacy - 0.5277).abs() < 1e-4, "legacy {}", legacy);
-        assert!((cosine - cosine_target as f64).abs() < 1e-6, "cosine {}", cosine);
-        assert!(cosine > legacy, "正交附近 cos 高于 1/(1+L2²)");
-    }
-
-    /// 杀伤力所在：近正交时 legacy 给 1/3（>0.2 恒过阈），cosine 给 ≈0（恒不过阈）⇒
-    /// 动态虫洞的 known_scores 通道被二值化翻转（闸关时 context=None，零漂移）。
-    #[test]
-    fn near_orthogonal_similarity_straddles_dynamic_wormhole_threshold() {
-        let residual = [1.0f32, 0.0];
-        let orthogonal = [0.0f32, 1.0];
-        let legacy = pyramid_similarity(SimilarityMode::Legacy, Some(2.0), &residual, &orthogonal);
-        let cosine = pyramid_similarity(SimilarityMode::Cosine, Some(2.0), &residual, &orthogonal);
-        assert!((legacy - 1.0 / 3.0).abs() < 1e-12);
-        assert!(legacy >= 0.2, "legacy {} 应过 0.2 阈值", legacy);
-        assert!(cosine < 0.2, "cosine {} 不应过 0.2 阈值", cosine);
-        // 向量维度不匹配（未装载成功的脏行）时余弦给 0，不伪造支撑
-        assert_eq!(
-            pyramid_similarity(SimilarityMode::Cosine, Some(2.0), &residual, &[1.0f32]),
-            0.0
-        );
-    }
-}
 
 #[cfg(test)]
 mod stoploss_gate_tests {
     use super::*;
 
-    fn epa() -> EpaOutput {
-        EpaOutput {
-            logic_depth: 0.5,
-            entropy: 0.5,
-            resonance: 0.0,
-            dominant_axes: vec![],
-            bridges: vec![],
-            basis_count: 0,
-            cache_available: false,
-        }
-    }
-
     #[test]
     fn contribution_tails_are_removed_and_residual_focus_keeps_weight() {
+        let epa = EpaOutput {
+            logic_depth: 0.5, entropy: 0.5, resonance: 0.0, dominant_axes: vec![],
+            bridges: vec![], basis_count: 0, cache_available: false, out_of_domain: 1.0,
+            semantic_explained_ratio: 0.0, in_domain_gate: 0.0,
+            baseline_coverage: 0.0, background_ratio: 0.0,
+        };
         let make = |id, contribution, similarity| PyramidTagWork {
-            id,
-            name: format!("标签{id}"),
-            vector: if id == 2 || id == 4 {
-                vec![0.0_f32, 1.0]
-            } else {
-                vec![1.0_f32, 0.0]
-            },
-            similarity,
-            contribution,
-            handshake_magnitude: 0.0,
+            id, name: format!("标签{id}"), vector: Arc::from(
+                if id == 2 || id == 4 { vec![0.0_f32, 1.0] } else { vec![1.0_f32, 0.0] }),
+            similarity, contribution, handshake_magnitude: 0.0,
         };
-        let levels = vec![
-            vec![make(1, 0.66, 0.66), make(2, 0.02, 0.6)],
-            vec![
-                make(3, 0.2, 0.32),
-                make(4, 0.01, 0.1),
-                make(5, 0.1, -0.1),
-            ],
-        ];
-        let pyramid = PyramidOutput {
-            levels: vec![],
-            total_explained_energy: 0.68,
-            features: PyramidFeatures::default(),
-        };
-        let (gated, _, _) = gate_tags(
-            &levels,
-            &epa(),
-            &pyramid,
-            &[],
-            &PipelineConfig::default(),
-            "",
-        );
+        let levels = vec![vec![make(1, 0.66, 0.66), make(2, 0.02, 0.6)],
+            vec![make(3, 0.2, 0.32), make(4, 0.01, 0.1), make(5, 0.1, -0.1)]];
+        let pyramid = PyramidOutput { levels: vec![], total_explained_energy: 0.68,
+            features: PyramidFeatures::default() };
+        let (gated, _, _) = gate_tags(&levels, &epa, &pyramid, &[], &PipelineConfig::default(), "");
         assert_eq!(gated.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 3]);
         assert!((gated[1].weight - 0.2).abs() < 1e-12);
     }
 }
+
 
 #[cfg(test)]
 mod lexical_patch_tests {
     use super::*;
 
     fn epa() -> EpaOutput {
-        EpaOutput {
-            logic_depth: 0.5,
-            entropy: 0.5,
-            resonance: 0.0,
-            dominant_axes: vec![],
-            bridges: vec![],
-            basis_count: 0,
-            cache_available: false,
-        }
+        EpaOutput { logic_depth: 0.5, entropy: 0.5, resonance: 0.0,
+            dominant_axes: vec![], bridges: vec![], basis_count: 0,
+            cache_available: false, out_of_domain: 1.0,
+            semantic_explained_ratio: 0.0, in_domain_gate: 0.0,
+            baseline_coverage: 0.0, background_ratio: 0.0 }
     }
 
     #[test]
@@ -2609,99 +3221,57 @@ mod lexical_patch_tests {
     #[test]
     fn grounded_residual_and_short_alias_survive_and_ignite_without_lowering_threshold() {
         let make = |id, name: &str, contribution, similarity, vector: Vec<f32>| PyramidTagWork {
-            id,
-            name: name.into(),
-            contribution,
-            similarity,
-            vector,
-            handshake_magnitude: 0.0,
+            id, name: name.into(), contribution, similarity,
+            vector: Arc::from(vector), handshake_magnitude: 0.0,
         };
-        // 现实的层归一化系数；短别名在 Gram-Schmidt 下失去独立分量但保留身份。
+        // Realistic layer-normalized coefficients; short alias loses its
+        // independent component under Gram-Schmidt but retains identity.
         let levels = vec![
             vec![make(1, "AI自编自演Galgame", 0.6604, 0.66, vec![1.0, 0.0])],
-            vec![
-                make(2, "Lunarium星之旅", 0.2109 / 0.6648, 0.32, vec![0.0, 1.0]),
-                make(3, "Lunarium", 0.0288 / 0.6648, 0.23, vec![0.0, 1.0]),
-            ],
+            vec![make(2, "Lunarium星之旅", 0.2109 / 0.6648, 0.32, vec![0.0, 1.0]),
+                 make(3, "Lunarium", 0.0288 / 0.6648, 0.23, vec![0.0, 1.0])],
         ];
-        let pyramid = PyramidOutput {
-            levels: vec![],
-            total_explained_energy: 0.68,
-            features: PyramidFeatures::default(),
-        };
-        let (gated, _, _) = gate_tags(
-            &levels,
-            &epa(),
-            &pyramid,
-            &[],
-            &PipelineConfig::default(),
-            "Lunarium 星之旅有问题",
-        );
+        let pyramid = PyramidOutput { levels: vec![], total_explained_energy: 0.68,
+            features: PyramidFeatures::default() };
+        let (gated, _, _) = gate_tags(&levels, &epa(), &pyramid, &[],
+            &PipelineConfig::default(), "Lunarium 星之旅有问题");
         let focus = gated.iter().find(|t| t.id == 2).unwrap();
         let alias = gated.iter().find(|t| t.id == 3).unwrap();
         let implicit = gated.iter().find(|t| t.id == 1).unwrap();
         assert!(focus.lexical && alias.lexical);
         assert!(focus.weight > 0.5);
-        assert!(alias.weight > 0.3); // ASCII 语言罚不得压低字面名
+        assert!(alias.weight > 0.3); // ASCII language penalty must not suppress literal names.
         assert!(implicit.weight <= focus.weight * 0.35);
         let graph = crate::rivermemo_topology_v3::NativeArtifact {
             node_ids: vec![1, 2, 3, 4],
-            node_index: [(1, 0), (2, 1), (3, 2), (4, 3)].into_iter().collect(),
-            row_offsets: vec![0, 0, 1, 1, 1],
-            targets: vec![3],
-            weights: vec![0.1],
+            node_index: [(1,0), (2,1), (3,2), (4,3)].into_iter().collect(),
+            row_offsets: vec![0,0,1,1,1], targets: vec![3], weights: vec![0.1],
             ..crate::rivermemo_topology_v3::NativeArtifact::default()
-        }
-        .prepared();
-        let output = sense_typed(
-            &graph,
-            "lexical-test",
-            SenseInput {
-                query_id: None,
-                seeds: gated
-                    .iter()
-                    .map(|t| SenseSeed {
-                        id: t.id,
-                        energy: t.weight,
-                        source_type: if t.lexical { "lexical_seed" } else { "seed" }.into(),
-                    })
-                    .collect(),
-                config: SenseConfig::default(),
-            },
-        )
-        .unwrap();
+        }.prepared();
+        let output = sense_typed(&graph, "lexical-test", SenseInput {
+            query_id: None,
+            seeds: gated.iter().map(|t| SenseSeed { id: t.id, energy: t.weight,
+                source_type: if t.lexical { "lexical_seed" } else { "seed" }.into() }).collect(),
+            config: SenseConfig::default(),
+        }).unwrap();
         assert!(output.edges.iter().any(|e| e.source_id == 2 && e.target_id == 4));
-        assert_eq!(
-            output.nodes.iter().find(|n| n.id == 2).unwrap().source_type,
-            "lexical_seed"
-        );
+        assert_eq!(output.nodes.iter().find(|n| n.id == 2).unwrap().source_type, "lexical_seed");
     }
 }
+
 
 #[cfg(test)]
 mod v21_seed_tests {
     use super::*;
 
     fn tag(id: i64, weight: f64, lexical: bool) -> GatedTag {
-        GatedTag {
-            id,
-            name: id.to_string(),
-            weight,
-            lexical,
-            is_core: false,
-        }
+        GatedTag { id, name: id.to_string(), weight, lexical, is_core: false }
     }
-
     fn epa() -> EpaOutput {
-        EpaOutput {
-            logic_depth: 0.5,
-            entropy: 0.5,
-            resonance: 0.0,
-            dominant_axes: vec![],
-            bridges: vec![],
-            basis_count: 0,
-            cache_available: false,
-        }
+        EpaOutput { logic_depth: 0.5, entropy: 0.5, resonance: 0.0,
+            dominant_axes: vec![], bridges: vec![], basis_count: 0, cache_available: false,
+            out_of_domain: 1.0, semantic_explained_ratio: 0.0, in_domain_gate: 0.0,
+            baseline_coverage: 0.0, background_ratio: 0.0 }
     }
 
     #[test]
@@ -2713,42 +3283,24 @@ mod v21_seed_tests {
         assert!((accepted[1].weight / accepted[2].weight - 2.0).abs() < 1e-12);
         let mut missing = original.clone();
         scale_implicit_seeds(&mut missing, Some(&HashMap::from([(2, 0), (3, 1)])));
-        assert_eq!(
-            missing.iter().map(|t| t.weight).collect::<Vec<_>>(),
-            vec![0.4, 0.8, 0.4]
-        );
+        assert_eq!(missing.iter().map(|t| t.weight).collect::<Vec<_>>(), vec![0.4, 0.8, 0.4]);
     }
 
     #[test]
     fn sponsorship_has_gradient_and_collapsed_rescue_is_bounded_without_rewriting_energy() {
         let make = |id, similarity, contribution| PyramidTagWork {
-            id,
-            name: format!("标签{id}"),
-            similarity,
-            contribution,
-            vector: vec![1.0, 0.0],
-            handshake_magnitude: 0.0,
+            id, name: format!("标签{id}"), similarity, contribution,
+            vector: Arc::from(vec![1.0, 0.0]), handshake_magnitude: 0.0,
         };
-        let pyramid = PyramidOutput {
-            levels: vec![],
-            total_explained_energy: 1.0,
-            features: PyramidFeatures::default(),
-        };
+        let pyramid = PyramidOutput { levels: vec![], total_explained_energy: 1.0,
+            features: PyramidFeatures::default() };
         let config = PipelineConfig::default();
-        let levels = vec![vec![
-            make(1, 0.8, 0.8),
-            make(2, 0.7, 0.01),
-            make(3, 0.4, 0.01),
-        ]];
+        let levels = vec![vec![make(1, 0.8, 0.8), make(2, 0.7, 0.01), make(3, 0.4, 0.01)]];
         let (gated, _, _) = gate_tags(&levels, &epa(), &pyramid, &[], &config, "");
         assert!(gated[1].weight > gated[2].weight);
         assert!((gated[1].weight / gated[2].weight - 1.75).abs() < 1e-12);
-        let levels = vec![vec![
-            make(1, 0.96, 0.96),
-            make(2, 0.90, 1e-9),
-            make(3, 0.80, 1e-10),
-            make(4, 0.76, 1e-11),
-        ]];
+        let levels = vec![vec![make(1, 0.96, 0.96), make(2, 0.90, 1e-9),
+            make(3, 0.80, 1e-10), make(4, 0.76, 1e-11)]];
         let (gated, _, _) = gate_tags(&levels, &epa(), &pyramid, &[], &config, "");
         assert_eq!(gated.len(), 3);
         assert!(gated[1].weight > gated[2].weight);
@@ -2759,46 +3311,22 @@ mod v21_seed_tests {
     }
 }
 
+
 #[cfg(test)]
 mod v22_residual_tests {
     use super::*;
     use crate::rivermemo_topology_v3::NativeArtifact;
 
-    fn test_index(dimensions: usize, capacity: usize) -> Index {
-        let index = Index::new(&usearch::IndexOptions {
-            dimensions,
-            metric: usearch::MetricKind::L2sq,
-            quantization: usearch::ScalarKind::F32,
-            connectivity: 16,
-            expansion_add: 128,
-            expansion_search: 64,
-            multi: false,
-        })
-        .unwrap();
-        index.reserve(capacity).unwrap();
-        index
-    }
-
-    fn fixture() -> (Connection, Index) {
+    fn fixture() -> (Connection, crate::VexusIndex) {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY,name TEXT,vector BLOB);")
-            .unwrap();
-        let index = test_index(3, 16);
-        for (id, v) in [
-            (1, [1.0_f32, 0.0, 0.0]),
-            (2, [0.0, 1.0, 0.0]),
-            (3, [0.0, 0.0, 1.0]),
-            (99, [3.0, 2.0, 1.0]),
-        ] {
+        db.execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY,name TEXT,vector BLOB);").unwrap();
+        let index = crate::VexusIndex::new(3, 16).unwrap();
+        for (id, v) in [(1, [1.0_f32,0.0,0.0]), (2, [0.0,1.0,0.0]),
+            (3, [0.0,0.0,1.0]), (99, [3.0,2.0,1.0])] {
             let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
-            db.execute(
-                "INSERT INTO tags VALUES (?1,?2,?3)",
-                rusqlite::params![id, format!("tag{id}"), bytes],
-            )
-            .unwrap();
-            if id != 3 {
-                index.add(id as u64, &v).unwrap();
-            }
+            db.execute("INSERT INTO tags VALUES (?1,?2,?3)",
+                rusqlite::params![id, format!("tag{id}"), bytes]).unwrap();
+            if id != 3 { index.index.write().unwrap().add(id as u64, &v).unwrap(); }
         }
         db.execute_batch("BEGIN").unwrap();
         (db, index)
@@ -2807,250 +3335,131 @@ mod v22_residual_tests {
     #[test]
     fn graph_external_tag_is_filtered_before_projection_but_isolated_member_survives() {
         let (db, index) = fixture();
-        // 我方缺省 dynamic_wormholes=false（上游 true），显式开闸对齐上游测试前提。
-        let config = PipelineConfig {
-            max_levels: 1,
-            pyramid_top_k: 3,
-            spike_routing: SenseConfig {
-                dynamic_wormholes: true,
-                ..SenseConfig::default()
-            },
-            ..PipelineConfig::default()
-        };
-        let eligible = HashMap::from([(1, 0)]);
-        let (p, tags, residuals) = analyze_pyramid(
-            &index,
-            &db,
-            &[3.0, 2.0, 1.0],
-            3,
-            &config,
-            &mut TagVectorPool::new(),
-            Some(&eligible),
-        )
-        .unwrap();
+        let config = PipelineConfig { max_levels: 1, pyramid_top_k: 3, ..PipelineConfig::default() };
+        let eligible = HashMap::from([(1,0)]);
+        let (p, tags, residuals) = analyze_pyramid_with_pool(&index.index, &db,
+            &[3.0,2.0,1.0], 3, &config, &mut TagVectorPool::new(), Some(&eligible)).unwrap();
         assert_eq!(tags[0].iter().map(|t| t.id).collect::<Vec<_>>(), vec![1]);
-        assert!((p.total_explained_energy - 9.0 / 14.0).abs() < 1e-6);
+        assert!((p.total_explained_energy - 9.0/14.0).abs() < 1e-6);
         assert_eq!(residuals.len(), 2);
-        assert_eq!(residuals[1], vec![0.0, 2.0, 1.0]);
+        assert_eq!(residuals[1], vec![0.0,2.0,1.0]);
         let empty = HashMap::new();
-        let (p, tags, residuals) = analyze_pyramid(
-            &index,
-            &db,
-            &[3.0, 2.0, 1.0],
-            3,
-            &config,
-            &mut TagVectorPool::new(),
-            Some(&empty),
-        )
-        .unwrap();
+        let (p, tags, residuals) = analyze_pyramid_with_pool(&index.index, &db,
+            &[3.0,2.0,1.0], 3, &config, &mut TagVectorPool::new(), Some(&empty)).unwrap();
         assert!(p.levels.is_empty() && tags.is_empty() && residuals.is_empty());
     }
 
     #[test]
     fn final_tail_routes_single_and_last_accepted_layer_without_extra_seeds() {
-        let (db, _index) = fixture();
-        // 把图外 top 命中从索引移除做单命中层测试。SQL 仍是向量权威；
-        // 独立索引只含两条种子轴。
-        let axes = test_index(3, 16);
-        axes.add(1, &[1.0, 0.0, 0.0]).unwrap();
-        axes.add(2, &[0.0, 1.0, 0.0]).unwrap();
+        let (db, index) = fixture();
+        // Remove the graph-external top hit from the index for the one-hit layer test.
+        // SQL remains authoritative; a separate index has only the two seed axes.
+        let axes = crate::VexusIndex::new(3,16).unwrap();
+        axes.index.write().unwrap().add(1, &[1.0,0.0,0.0]).unwrap();
+        axes.index.write().unwrap().add(2, &[0.0,1.0,0.0]).unwrap();
         let graph = NativeArtifact {
-            node_ids: vec![1, 2, 3],
-            node_index: HashMap::from([(1, 0), (2, 1), (3, 2)]),
-            row_offsets: vec![0, 1, 2, 2],
-            targets: vec![2, 2],
-            weights: vec![0.2, 0.2],
+            node_ids: vec![1,2,3], node_index: HashMap::from([(1,0),(2,1),(3,2)]),
+            row_offsets: vec![0,1,2,2], targets: vec![2,2], weights: vec![0.2,0.2],
             ..NativeArtifact::default()
-        }
-        .prepared();
-        for depth in [1, 2] {
-            let config = PipelineConfig {
-                max_levels: depth,
-                pyramid_top_k: 1,
-                spike_routing: SenseConfig {
-                    dynamic_wormholes: true,
-                    ..SenseConfig::default()
-                },
-                ..PipelineConfig::default()
-            };
+        }.prepared();
+        for depth in [1,2] {
+            let config = PipelineConfig { max_levels: depth, pyramid_top_k: 1,
+                ..PipelineConfig::default() };
             let mut pool = TagVectorPool::new();
-            let (p, tags, residuals) = analyze_pyramid(
-                &axes,
-                &db,
-                &[3.0, 2.0, 1.0],
-                3,
-                &config,
-                &mut pool,
-                Some(&graph.node_index),
-            )
-            .unwrap();
+            let (p, tags, residuals) = analyze_pyramid_with_pool(&axes.index, &db,
+                &[3.0,2.0,1.0], 3, &config, &mut pool, Some(&graph.node_index)).unwrap();
             assert_eq!(p.levels.len(), depth);
             assert_eq!(tags.len(), depth);
             assert_eq!(residuals.len(), depth + 1);
             let last = tags.last().unwrap()[0].id;
-            let mut ctx =
-                DynamicWormholeContext::new(&db, &mut pool, residuals, HashMap::from([(last, depth - 1)]));
-            let output = sense_with_context(
-                &graph,
-                "tail-test",
-                SenseInput {
-                    query_id: None,
-                    seeds: vec![SenseSeed {
-                        id: last,
-                        energy: 1.0,
-                        source_type: "seed".into(),
-                    }],
-                    config: SenseConfig {
-                        max_safe_hops: 1,
-                        dynamic_wormholes: true,
-                        ..SenseConfig::default()
-                    },
-                },
-                Some(&mut ctx),
-            )
-            .unwrap();
+            let mut ctx = DynamicWormholeContext::new(&db, &mut pool, residuals,
+                HashMap::from([(last,depth-1)]));
+            let output = sense_with_context(&graph, "tail-test", SenseInput {
+                query_id: None,
+                seeds: vec![SenseSeed { id: last, energy: 1.0, source_type: "seed".into() }],
+                config: SenseConfig { max_safe_hops: 1, ..SenseConfig::default() },
+            }, Some(&mut ctx)).unwrap();
             assert_eq!(output.diagnostics.accepted_seed_nodes, 1);
             assert!(output.diagnostics.dynamic_wormhole_candidates > 0);
             assert_eq!(output.diagnostics.dynamic_wormhole_edges_fired, 1);
-            assert!(output
-                .edges
-                .iter()
-                .all(|e| e.source_id == last && e.target_id == 3));
+            assert!(output.edges.iter().all(|e| e.source_id == last && e.target_id == 3));
         }
+        drop(index);
     }
 
     #[test]
     fn disabled_tiny_exhausted_and_unaccepted_tails_are_not_appended() {
         let (db, index) = fixture();
-        let eligible = HashMap::from([(1, 0)]);
+        let eligible = HashMap::from([(1,0)]);
         for (enabled, query, minimum, expected_layers, expected_residuals) in [
-            (false, [3.0, 2.0, 1.0], 0.03, 1, 0),
-            (true, [10.0, 1.0, 0.0], 0.03, 1, 1),
-            (true, [1.0, 0.0, 0.0], 0.03, 1, 1),
-            (true, [3.0, 2.0, 1.0], 0.99, 0, 0),
+            (false, [3.0,2.0,1.0], 0.03, 1, 0),
+            (true, [10.0,1.0,0.0], 0.03, 1, 1),
+            (true, [1.0,0.0,0.0], 0.03, 1, 1),
+            (true, [3.0,2.0,1.0], 0.99, 0, 0),
         ] {
-            let config = PipelineConfig {
-                max_levels: 1,
-                pyramid_top_k: 3,
+            let config = PipelineConfig { max_levels: 1, pyramid_top_k: 3,
                 min_layer_explained_energy: minimum,
-                spike_routing: SenseConfig {
-                    dynamic_wormholes: enabled,
-                    ..SenseConfig::default()
-                },
-                ..PipelineConfig::default()
-            };
-            let (p, _, residuals) = analyze_pyramid(
-                &index,
-                &db,
-                &query,
-                3,
-                &config,
-                &mut TagVectorPool::new(),
-                Some(&eligible),
-            )
-            .unwrap();
+                spike_routing: SenseConfig { dynamic_wormholes: enabled, ..SenseConfig::default() },
+                ..PipelineConfig::default() };
+            let (p, _, residuals) = analyze_pyramid_with_pool(&index.index, &db,
+                &query, 3, &config, &mut TagVectorPool::new(), Some(&eligible)).unwrap();
             assert_eq!(p.levels.len(), expected_layers);
             assert_eq!(residuals.len(), expected_residuals);
         }
     }
 }
 
+
 #[cfg(test)]
 mod explicit_core_seed_tests {
     use super::*;
 
-    fn epa() -> EpaOutput {
-        EpaOutput {
-            logic_depth: 0.0,
-            entropy: 1.0,
-            resonance: 0.0,
-            dominant_axes: vec![],
-            bridges: vec![],
-            basis_count: 0,
-            cache_available: false,
-        }
-    }
-
     #[test]
     fn sql_cores_and_hard_anchors_ignite_without_pyramid_but_soft_ghosts_do_not() {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY,name TEXT,vector BLOB);")
-            .unwrap();
+        db.execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY,name TEXT,vector BLOB);").unwrap();
         for (id, name, vector) in [
-            (1, "尊界", [1.0_f32, 0.0]),
-            (2, "问界", [0.0, 1.0]),
-            (3, "软标签", [1.0, 1.0]),
-            (4, "图外", [1.0, 0.0]),
+            (1, "尊界", [1.0_f32, 0.0]), (2, "问界", [0.0, 1.0]),
+            (3, "软标签", [1.0, 1.0]), (4, "图外", [1.0, 0.0]),
             (5, "坏向量", [0.0, 0.0]),
         ] {
             let bytes: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
-            db.execute(
-                "INSERT INTO tags VALUES (?1,?2,?3)",
-                rusqlite::params![id, name, bytes],
-            )
-            .unwrap();
+            db.execute("INSERT INTO tags VALUES (?1,?2,?3)",
+                rusqlite::params![id, name, bytes]).unwrap();
         }
-        let ghost =
-            |name: &str, is_core| GhostTagInput {
-                name: name.into(),
-                vector: vec![1.0, 0.0],
-                is_core,
-            };
-        let ghosts = vec![ghost("问界", true), ghost("软标签", false), ghost("不存在", true)];
+        let ghost = |name: &str, is_core| GhostTagInput {
+            name: name.into(), vector: vec![1.0, 0.0], is_core,
+        };
+        let ghosts = vec![ghost("问界", true), ghost("软标签", false),
+            ghost("不存在", true)];
         let cores = vec![" 尊界 ".into(), "尊界".into(), "图外".into(), "坏向量".into()];
         let graph = crate::rivermemo_topology_v3::NativeArtifact {
             node_ids: vec![1, 2, 3, 5],
             node_index: HashMap::from([(1, 0), (2, 1), (3, 2), (5, 3)]),
-            row_offsets: vec![0, 1, 1, 1, 1],
-            targets: vec![2],
-            weights: vec![0.5],
+            row_offsets: vec![0, 1, 1, 1, 1], targets: vec![2], weights: vec![0.5],
             ..crate::rivermemo_topology_v3::NativeArtifact::default()
-        }
-        .prepared();
-        let resolved = resolve_core_seeds(
-            &db,
-            &cores,
-            &ghosts,
-            &graph.node_index,
-            &mut TagVectorPool::new(),
-            2,
-        )
-        .unwrap();
+        }.prepared();
+        let resolved = resolve_core_seeds(&db, &cores, &ghosts,
+            &graph.node_index, &mut TagVectorPool::new(), 2).unwrap();
         assert_eq!(resolved, vec![(1, "尊界".into()), (2, "问界".into())]);
-        let pyramid = PyramidOutput {
-            levels: vec![],
-            total_explained_energy: 0.0,
-            features: PyramidFeatures::default(),
+        let epa = EpaOutput {
+            logic_depth: 0.0, entropy: 1.0, resonance: 0.0, dominant_axes: vec![],
+            bridges: vec![], basis_count: 0, cache_available: false, out_of_domain: 1.0,
+            semantic_explained_ratio: 0.0, in_domain_gate: 0.0,
+            baseline_coverage: 0.0, background_ratio: 0.0,
         };
-        let (gated, _, boost) = gate_tags_for_graph(
-            &[],
-            &epa(),
-            &pyramid,
-            &cores,
-            &PipelineConfig::default(),
-            "",
-            Some(&graph.node_index),
-            &resolved,
-        );
+        let pyramid = PyramidOutput { levels: vec![], total_explained_energy: 0.0,
+            features: PyramidFeatures::default() };
+        let (gated, _, boost) = gate_tags_for_graph(&[], &epa, &pyramid, &cores,
+            &PipelineConfig::default(), "", Some(&graph.node_index), &resolved);
         assert_eq!(gated.len(), 2);
         assert!(gated.iter().all(|t| t.is_core && t.weight == boost));
-        let observation = sense_typed(
-            &graph,
-            "explicit-core",
-            SenseInput {
-                query_id: None,
-                config: SenseConfig::default(),
-                seeds: gated
-                    .iter()
-                    .map(|t| SenseSeed {
-                        id: t.id,
-                        energy: t.weight,
-                        source_type: "core".into(),
-                    })
-                    .collect(),
-            },
-        )
-        .unwrap();
+        let observation = sense_typed(&graph, "explicit-core", SenseInput {
+            query_id: None, config: SenseConfig::default(),
+            seeds: gated.iter().map(|t| SenseSeed {
+                id: t.id, energy: t.weight, source_type: "core".into(),
+            }).collect(),
+        }).unwrap();
         assert_eq!(observation.diagnostics.accepted_seed_nodes, 2);
         for id in [1, 2] {
             let node = observation.nodes.iter().find(|n| n.id == id).unwrap();
@@ -3058,52 +3467,248 @@ mod explicit_core_seed_tests {
             assert_eq!(node.source_type, "core");
         }
         assert!(!observation.edges.is_empty());
-        let index = Index::new(&usearch::IndexOptions {
-            dimensions: 2,
-            metric: usearch::MetricKind::L2sq,
-            quantization: usearch::ScalarKind::F32,
-            connectivity: 16,
-            expansion_add: 128,
-            expansion_search: 64,
-            multi: false,
-        })
-        .unwrap();
-        let (_, fusion, _) = fuse_observation(
-            &index,
-            &db,
-            &mut TagVectorPool::new(),
-            &[1.0, 0.0],
-            &observation,
-            &gated,
-            &[],
-            &ghosts[..1],
-            boost,
-            2,
-            0.2,
-            &PipelineConfig::default(),
-        )
-        .unwrap();
+        let (_, fusion, _) = fuse_observation(&db, &[1.0, 0.0], &observation,
+            &gated, &[], &ghosts[..1], boost, 2, 0.2, &PipelineConfig::default()).unwrap();
         assert_eq!(fusion.ghost_count, 0);
 
         let levels = vec![vec![PyramidTagWork {
-            id: 1,
-            name: "尊界".into(),
-            vector: vec![1.0, 0.0],
-            similarity: 0.2,
-            contribution: 0.01,
-            handshake_magnitude: 0.0,
+            id: 1, name: "尊界".into(), vector: Arc::from(vec![1.0, 0.0]),
+            similarity: 0.2, contribution: 0.01, handshake_magnitude: 0.0,
         }]];
-        let (promoted, _, boost) = gate_tags_for_graph(
-            &levels,
-            &epa(),
-            &pyramid,
-            &cores,
-            &PipelineConfig::default(),
-            "",
-            Some(&graph.node_index),
-            &resolved,
-        );
+        let (promoted, _, boost) = gate_tags_for_graph(&levels, &epa, &pyramid, &cores,
+            &PipelineConfig::default(), "", Some(&graph.node_index), &resolved);
         assert_eq!(promoted.len(), 2);
         assert!(promoted.iter().all(|t| t.is_core && t.weight >= boost));
+    }
+}
+#[cfg(test)]
+mod optimization_invariant_tests {
+    use super::*;
+
+    fn work(vector: Vec<f32>) -> PyramidTagWork {
+        PyramidTagWork {
+            id: 1, name: String::new(), vector: vector.into(),
+            similarity: 0.0, contribution: 0.0, handshake_magnitude: 0.0,
+        }
+    }
+
+    #[test]
+    fn handshake_scratch_matches_materialized_reference_bit_for_bit() {
+        for count in [0, 1, 2, 5, 6, 128] {
+            for scale in [1e-6_f32, 0.1, 1.0, 1e6] {
+                let query = [0.6 * scale, 0.8 * scale, 0.0];
+                let mut tags: Vec<_> = (0..count).map(|i| work(match i % 4 {
+                    0 => query.to_vec(),
+                    1 => vec![0.6, -0.8, 0.0],
+                    2 => vec![0.0; 3],
+                    _ => vec![0.0, 0.0, 1.0],
+                })).collect();
+                let mut directions = Vec::new();
+                let mut average = vec![0.0_f64; 3];
+                let mut distances = Vec::new();
+                for tag in &tags {
+                    let mut d: Vec<f64> = query.iter().zip(tag.vector.iter())
+                        .map(|(a,b)| (*a - *b) as f64).collect();
+                    let norm = d.iter().map(|v| v * v).sum::<f64>().sqrt();
+                    distances.push(norm);
+                    if norm > 1e-9 {
+                        for j in 0..3 { d[j] /= norm; average[j] += d[j]; }
+                    }
+                    directions.push(d);
+                }
+                let expected = if count == 0 {
+                    HandshakeFeatures::default()
+                } else {
+                    for v in &mut average { *v /= count as f64; }
+                    let coherence = clamp01(average.iter().map(|v| v*v).sum::<f64>().sqrt());
+                    let mut sum = 0.0;
+                    let mut pairs = 0;
+                    for a in 0..count.min(5) {
+                        for b in a+1..count.min(5) {
+                            sum += directions[a].iter().zip(&directions[b])
+                                .map(|(x,y)| x*y).sum::<f64>().abs();
+                            pairs += 1;
+                        }
+                    }
+                    let pattern = if pairs > 0 { clamp01(sum / pairs as f64) } else { 0.0 };
+                    HandshakeFeatures { direction_coherence: coherence,
+                        pattern_strength: pattern, novelty_signal: coherence,
+                        noise_signal: (1.0-coherence)*(1.0-pattern) }
+                };
+                let actual = analyze_handshakes(&query, &mut tags, 3);
+                for (a,b) in [
+                    (actual.direction_coherence, expected.direction_coherence),
+                    (actual.pattern_strength, expected.pattern_strength),
+                    (actual.novelty_signal, expected.novelty_signal),
+                    (actual.noise_signal, expected.noise_signal),
+                ] { assert_eq!(a.to_bits(), b.to_bits(), "count={count} scale={scale}"); }
+                for (tag, distance) in tags.iter().zip(distances) {
+                    assert_eq!(tag.handshake_magnitude.to_bits(), distance.to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_lexical_query_preserves_boundary_scores() {
+        for query in ["", "Rust rustacean", "武汉小雨，工程施工", "VCP-Rust 2026，中文A"] {
+            let cached = lexical_tokens(query);
+            for name in ["", "rust", "rustacean", "武汉", "小雨", "中文A", "VCP-Rust", "2026"] {
+                let original_query = lexical_tokens(query);
+                let original_tag = lexical_tokens(name);
+                let expected = if original_tag.is_empty() { 0.0 } else {
+                    original_tag.intersection(&original_query).count() as f64
+                        / original_tag.len() as f64
+                };
+                assert_eq!(lexical_grounding_with_tokens(&cached, name).to_bits(),
+                    expected.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn signed_axis_is_not_an_original_tag_nonnegative_coefficient() {
+        let q = [0.94_f32, 0.342];
+        let tags = vec![work(vec![1.0, 0.0]), work(vec![0.94, -0.342])];
+        assert!(cosine(&q, &tags[1].vector) > 0.0);
+        let (_, residual, coefficients) = orthogonal_projection(&q, &tags, 2);
+        assert!(magnitude(&residual) < 1e-6);
+        assert!(coefficients[1] > 0.34);
+        // A nonnegative combination of these original Tags has y <= 0.
+        // The subspace projection above is valid, but cannot be described as
+        // a nonnegative cone projection or original-Tag coefficient fit.
+        for a in [0.0_f64, 0.5, 1.0] {
+            for b in [0.0_f64, 0.5, 1.0] {
+                let y = a * tags[0].vector[1] as f64 + b * tags[1].vector[1] as f64;
+                assert!(y <= 0.0);
+            }
+        }
+    }
+}
+#[cfg(test)]
+mod experiment_c_tests {
+    use super::*;
+    fn tag(id: i64, name: &str, vector: Vec<f32>, contribution: f64) -> PyramidTagWork {
+        PyramidTagWork { id, name: name.into(), vector: vector.into(),
+            similarity: 1.0, contribution, handshake_magnitude: 0.0 }
+    }
+    #[test]
+    fn parent_is_suppressed_but_alias_and_independent_parent_survive() {
+        let child = tag(2, "华为汽车", vec![0.8,0.6], 1.0);
+        let parent = tag(1, "华为", vec![1.0,0.0], 0.0);
+        assert!(superseded_hypernym(&parent, &[parent.clone(),child.clone()], 0.1));
+        let mut independent = parent.clone();
+        independent.contribution = 0.2;
+        assert!(!superseded_hypernym(&independent, &[independent.clone(),child], 0.1));
+        let alias = tag(3,"Lunarium",vec![1.0,0.0],0.0);
+        let full = tag(4,"Lunarium星之旅",vec![1.0,0.0],1.0);
+        assert!(!superseded_hypernym(&alias,&[alias.clone(),full],0.1));
+    }
+    #[test]
+    fn differentia_is_orthogonal_and_explicit_parent_is_protected() {
+        let levels = vec![vec![
+            tag(1,"华为",vec![1.0,0.0],0.0),
+            tag(2,"华为汽车",vec![0.8,0.6],1.0),
+        ]];
+        let (direction, ids, confidence) = differentia_direction(
+            &[0.8,0.6], &levels, &PipelineConfig::default(), &HashSet::new());
+        assert_eq!(ids,vec![1]);
+        assert!(direction[0].abs() < 1e-6 && direction[1] > 0.99);
+        assert_eq!(confidence,1.0);
+        let (direction,ids,_) = differentia_direction(
+            &[0.8,0.6], &levels, &PipelineConfig::default(),
+            &HashSet::from(["华为".into()]));
+        assert!(direction.is_empty() && ids.is_empty());
+    }
+}
+
+
+#[cfg(test)]
+mod routing_initialization_tests {
+    use super::*;
+
+    #[test]
+    fn low_level_default_and_unready_warped_route_preserve_cosine_observation() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY,name TEXT,vector BLOB);
+            CREATE TABLE kv_store(key TEXT,value TEXT);
+            CREATE TABLE kbm_runtime_meta(key TEXT PRIMARY KEY,value TEXT);
+            INSERT INTO kbm_runtime_meta VALUES ('database_generation','1'),('memo_tag_facts','1'),('derived_geometry','1');
+            CREATE TABLE rivermemo_artifacts(artifact_sig TEXT,model_sig TEXT,status TEXT,algorithm_version TEXT,schema_version TEXT);
+            INSERT INTO rivermemo_artifacts VALUES ('synthetic','model','ready','memo.native-artifact-v2-binary','rivermemo-persisted-artifact-v2');
+            CREATE TABLE kbm_artifact_dependencies(artifact_sig TEXT,dependency_key TEXT,dependency_version TEXT);
+            INSERT INTO kbm_artifact_dependencies VALUES ('synthetic','memo_tag_facts','1'),('synthetic','derived_geometry','1');
+            CREATE TABLE tagmemo_artifacts(artifact_sig TEXT,asset_type TEXT,status TEXT,model_sig TEXT);").unwrap();
+        let vexus = crate::VexusIndex::new(3, 16).unwrap();
+        for (id, vector) in [(1, [1.0_f32, 0.0, 0.0]), (2, [0.0, 1.0, 0.0])] {
+            let bytes: Vec<_> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+            c.execute("INSERT INTO tags VALUES (?1,?2,?3)",
+                rusqlite::params![id, format!("t{id}"), bytes]).unwrap();
+            vexus.index.write().unwrap().add(id as u64, &vector).unwrap();
+        }
+        c.execute_batch("BEGIN").unwrap();
+        let artifact = Arc::new(crate::rivermemo_topology_v3::NativeArtifact {
+            node_ids: vec![1, 2], node_index: HashMap::from([(1, 0), (2, 1)]),
+            row_offsets: vec![0, 1, 2], targets: vec![1, 0], weights: vec![0.2, 0.2],
+            ..Default::default()
+        }.prepared());
+        let runtime = MemoRuntime::new();
+        let run = |input: &str| run_pipeline_with_connection(
+            &vexus.index, &runtime, "synthetic", 3, input,
+            &[0.6, 0.8, 0.2], &[], &artifact, &c).unwrap();
+        let default = run("{}");
+        let explicit = run(r#"{"config":{"tagRoutingMode":"cosine"}}"#);
+        let ledger = crate::storage::tag_read_audit::Session::begin();
+        let fallback = run(r#"{"config":{"tagRoutingMode":"warped_ags"}}"#);
+        let reads: Vec<_> = ledger.events().into_iter()
+            .filter(|(operation, _)| operation.ends_with(":bulk")).collect();
+        assert!(!reads.is_empty(), "the fixture must exercise request-pool reads");
+        let unique: HashSet<_> = reads.iter().map(|event| event.1).collect();
+        assert_eq!(reads.len(), unique.len(), "request pool must reuse Tag originals");
+        drop(ledger);
+        let default_meta: serde_json::Value = serde_json::from_str(&default.metadata_json).unwrap();
+        for output in [&explicit, &fallback] {
+            assert_eq!(default.enhanced_vector, output.enhanced_vector);
+            let metadata: serde_json::Value = serde_json::from_str(&output.metadata_json).unwrap();
+            assert_eq!(default_meta["pyramid"], metadata["pyramid"]);
+            runtime.release_query_observation(metadata["observationHandle"].as_str().unwrap()).unwrap();
+        }
+        let fallback_meta: serde_json::Value = serde_json::from_str(&fallback.metadata_json).unwrap();
+        assert_eq!(fallback_meta["diagnostics"]["tagRouting"]["used"], "cosine");
+        assert_eq!(fallback_meta["diagnostics"]["tagRouting"]["fallback"], true);
+        assert!(fallback_meta["diagnostics"]["tagRouting"]["fallbackReason"].as_str().unwrap()
+            .starts_with("WARPED_NOT_INITIALIZED:"));
+        assert!(default_meta["diagnostics"].get("tagRouting").is_none());
+        runtime.release_query_observation(default_meta["observationHandle"].as_str().unwrap()).unwrap();
+    }
+}
+
+
+#[cfg(test)]
+mod production_warped_config_tests {
+    use super::*;
+    #[test]
+    fn defaults_and_camel_case_aliases_are_production_canonical() {
+        use crate::warped_tag_field::{Preset,RadiusStrategy};
+        let c:PipelineConfig=serde_json::from_str("{}").unwrap();
+        assert_eq!(c.tag_routing_mode,"cosine");
+        assert_eq!(c.warped_preset,Preset::Locked2);
+        assert_eq!(c.warped_radius_strategy,RadiusStrategy::EpaGuided);
+        assert!(c.warped_shell_directory && c.warped_reuse_beam);
+        assert!(!c.warped_legacy_budget);
+        assert_eq!(c.warped_seed_policy,1);
+        for (name,expected) in [("epa_guided",RadiusStrategy::EpaGuided),
+            ("EpaGuided",RadiusStrategy::EpaGuided),("layer_schedule",RadiusStrategy::LayerSchedule),
+            ("LayerSchedule",RadiusStrategy::LayerSchedule)] {
+            let c:PipelineConfig=serde_json::from_value(serde_json::json!({
+                "tagRoutingMode":"warped_ags","warpedPreset":"locked_0","warpedRadiusStrategy":name
+            })).unwrap();
+            assert_eq!(c.warped_preset,Preset::Locked0);
+            assert_eq!(c.warped_radius_strategy,expected);
+        }
+        assert!(serde_json::from_str::<PipelineConfig>(
+            r#"{"warpedPreset":"unknown"}"#).is_err());
+        assert!(serde_json::from_str::<PipelineConfig>(
+            r#"{"warpedRadiusStrategy":"unknown"}"#).is_err());
     }
 }

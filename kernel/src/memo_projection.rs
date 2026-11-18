@@ -1,9 +1,4 @@
 //! Request-local seed-basin projection. Never modifies Sense, scalar fields or Omega.
-//! —— dsh-memo-river 移植件：上游 /home/h/app/VCPToolBox-2.0/rust-vexus-lite/src/memo_projection.rs
-//!    （HEAD 174a5e1，462 行）逐语义移植，算法与 8 个测试不改数值行为。
-//! 对齐点（已核）：SenseOutput 节点 {id, energy, hop, seed_id} / 边 {source_id, target_id, flow}
-//!   与我方 crate::memo_sensing（v9.2 复刻）同名字段；NativeArtifact 在 rivermemo_topology_v3.rs:32，
-//!   node_ids/node_index/row_offsets/targets/weights + prepared()/edge_weight() 全在位。
 use crate::memo_sensing::SenseOutput;
 use crate::rivermemo_topology_v3::NativeArtifact;
 use serde::Serialize;
@@ -261,7 +256,8 @@ pub(crate) fn grow(
             coverage.entry(a.id).or_default().insert(lane.diagnostics.basin_id);
             lane.diagnostics.radius = a.distance;
             for edge in graph.row_offsets[a.index]..graph.row_offsets[a.index + 1] {
-                if scanned >= EDGE_LIMIT { break; }
+                // Reached only with this node's out-edges left unscanned.
+                if scanned >= EDGE_LIMIT { lane.diagnostics.truncated = true; break; }
                 scanned += 1;
                 lane.diagnostics.scanned_edges += 1;
                 let weight = graph.weights[edge];
@@ -436,6 +432,24 @@ mod tests {
         assert!(result.diagnostics.scanned_edges <= EDGE_LIMIT);
         assert!(result.diagnostics.settled_states <= STATE_LIMIT);
         assert_eq!(result.diagnostics.stop_reason, "work_limit");
+    }
+
+    #[test]
+    fn edge_limit_inside_one_node_marks_lane_truncated_with_empty_frontier() {
+        // Zero-mass targets never enter the frontier, so the lane's frontier is
+        // empty when the edge limit cuts this node's row short.
+        let edges = vec![(0, 1, 0.5); EDGE_LIMIT + 4464];
+        let g = graph(3, &edges);
+        let field = [0.0, 0.0, 1.0]; // Unreachable mass keeps the target open.
+        let domain = g.node_ids.clone();
+        let result = grow(&g, [&field,&field], [&domain,&domain], &[1],
+            &[basin(1,1.0)], 0).unwrap();
+        assert_eq!(result.diagnostics.stop_reason, "work_limit");
+        assert_eq!(result.diagnostics.scanned_edges, EDGE_LIMIT);
+        let scanning = result.diagnostics.lanes.iter()
+            .find(|l| l.scanned_edges == EDGE_LIMIT).unwrap();
+        assert!(scanning.truncated, "unscanned out-edges must be reported");
+        assert_eq!(result.ids, [vec![1], vec![1]]);
     }
 
     #[test]

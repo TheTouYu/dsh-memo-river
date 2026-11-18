@@ -1,25 +1,18 @@
-//! memo_artifact_builder —— 对齐上游 9aa1f67（conservative-topology-v2.5-confidence-rrf）。
-//!
-//! 移植原则：公式、系数、SQL、签名拼接逐字对齐上游；差异仅在刻意省略处并有注释。
-//! 上游 174a5e1→9aa1f67 增量：stable_sums 稳定分组求和、add_edge 改 Vec 收集后排序、
-//! UnitVectors trait（对接 memo_geometry 工作区）、pair_gains 每无序对一次预计算、
-//! median select_nth、penalties 按 target 预计算、provenance Vec+stable_sums、
-//! rebuild 前置 stale 几何资产迁移（schema.rs migrate_geometry 的 builder 侧等价）。
-//! 差分判据见 kernel/tools/diff-runner.mjs：artifactSig 一致 + payload 深比 1e-9。
-
 use crate::rivermemo_topology_v3::{MemoRuntime, NativeArtifact};
+use crate::storage::{with_registered_read_transaction, with_registered_write};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
-use serde::Deserialize;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const PAYLOAD_SCHEMA: &str = "rivermemo-persisted-artifact-v2";
 const PAYLOAD_CODEC: &str = "gzip-json-v1";
@@ -33,6 +26,8 @@ struct BuildInput {
     model_sig: String,
     #[serde(default)]
     effective_config: Value,
+    #[serde(default)]
+    warped_presets: Vec<crate::warped_tag_field::Preset>,
 }
 
 #[derive(Clone)]
@@ -138,354 +133,51 @@ fn load_file_tags(connection: &Connection) -> std::result::Result<Vec<FileTag>, 
     Ok(output)
 }
 
-pub(crate) fn open_readonly(path: &str) -> std::result::Result<Connection, String> {
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| format!("open/config DB readonly failed: {}", error))?;
-    connection
-        .busy_timeout(Duration::from_secs(30))
-        .map_err(|error| format!("configure DB timeout failed: {}", error))?;
-    Ok(connection)
-}
-
-fn open_readwrite_inner(path: &str) -> std::result::Result<Connection, String> {
-    let connection = Connection::open(path)
-        .map_err(|error| format!("open/config DB readwrite failed: {}", error))?;
-    connection
-        .busy_timeout(Duration::from_secs(30))
-        .map_err(|error| format!("configure DB timeout failed: {}", error))?;
-    Ok(connection)
-}
-
-fn normalized_sqlite_path(db_path: &str) -> String {
-    let trimmed = db_path.trim();
-    if trimmed.is_empty() {
-        return std::path::PathBuf::from("knowledge_base.sqlite")
-            .canonicalize()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "knowledge_base.sqlite".to_string());
-    }
-    std::path::Path::new(trimmed)
-        .canonicalize()
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| trimmed.to_string())
-}
-
-/// WAL 双库契约（BUG-0930）：同进程内 node:sqlite（store 长连接）与 rusqlite 是两份
-/// 独立编译的 sqlite——任何在活桶上开 readwrite 的代码路径必须保 keepalive，
-/// 否则 close 从第二实例视角重置 -wal，把 node 侧未 checkpoint 的提交行静默回卷。
-static SQLITE_KEEPALIVES: LazyLock<Mutex<HashMap<String, Connection>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn ensure_sqlite_keepalive(db_path: &str) {
-    let normalized = normalized_sqlite_path(db_path);
-    let mut keepalives = SQLITE_KEEPALIVES.lock().unwrap_or_else(|poison| poison.into_inner());
-    if !keepalives.contains_key(&normalized) {
-        if let Ok(connection) = open_readwrite_inner(&normalized) {
-            keepalives.insert(normalized, connection);
-        }
-    }
-}
-
-pub(crate) fn open_readwrite(path: &str) -> std::result::Result<Connection, String> {
-    ensure_sqlite_keepalive(path);
-    open_readwrite_inner(path)
-}
-
-/// P2 交付2（schema-v2 兼容）：上游 schema 迁移会**删除**派生表
-/// （`schema.rs migrate_geometry` 删 `tag_pair_similarity` /
-/// `tag_intrinsic_residuals` 行 / `kv_store['epa_basis_cache']` /
-/// `tagmemo_artifacts` 的 pairwise·intrinsic 行）。缺表 = 那个世界本就没有这类证据，
-/// 走空集/缺省增益，**绝不硬崩**。
-static PAIRWISE_TABLE_MISSING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-static INTRINSIC_TABLE_MISSING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// 上一次 build 是否在 schema-v2 世界里（pipeline metadata 的 diagnostics 面外露，
-/// 便于观测「缺表兜底真的发生了」）。
-pub(crate) fn schema_v2_fallback_flags() -> (bool, bool) {
-    (
-        PAIRWISE_TABLE_MISSING.load(std::sync::atomic::Ordering::Relaxed),
-        INTRINSIC_TABLE_MISSING.load(std::sync::atomic::Ordering::Relaxed),
-    )
-}
-
-fn table_exists(connection: &Connection, table: &str) -> std::result::Result<bool, String> {
-    let count: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            params![table],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("schema probe failed for {}: {}", table, error))?;
-    Ok(count > 0)
-}
-
-/// rebuild 前置迁移：上游 `openAndInitStore → initialize_schema`（schema 事务）里
-/// `migrate_geometry`（schema.rs:288）的 builder 侧等价。我方无 ABI2/openAndInitStore
-/// 链，rebuild 是唯一入口，故在此把库带到 geometry_schema_v1 世界：
-/// - 无条件段：DROP 旧 pairwise 触发器/表/索引 + 清派生代际键 + 清 pairwise·intrinsic
-///   资产行（每次 rebuild 幂等执行，与上游每次 open 等价）。
-/// - flag 段：`geometry_schema_v1` 键不存在时**一次性**清 `tag_intrinsic_residuals`
-///   全行 / `tag_intrinsic_residual_status` / `kv_store['epa_basis_cache']` 并落键。
-///   之后 residuals 由 geometry rebuild 重填，rebuild 不再清。
-/// 外围不復刻：kbm_memo_changed_tags / memo_training_tag_count / 派生版本触发器
-/// （storage 层活性，不进 rebuild 输入输出面，见 docs/reverse-conservative-v2.5.md §6）。
-fn migrate_geometry_assets(db_path: &str) -> std::result::Result<(), String> {
-    let mut writable = open_readwrite(db_path)?;
-    let transaction = writable
-        .transaction()
-        .map_err(|error| format!("begin geometry migration failed: {}", error))?;
-    // 上游 storage.rs initialize_schema_metadata + SCHEMA_SQL 里 rebuild 直接依赖的最小面：
-    // kbm_runtime_meta（database_generation 键）与 rivermemo_artifacts（写入目标表）。
-    transaction
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS kbm_runtime_meta (
-                key TEXT PRIMARY KEY NOT NULL,
-                value TEXT NOT NULL
-            );
-            INSERT OR IGNORE INTO kbm_runtime_meta(key, value) VALUES ('database_generation', '0');
-            CREATE TABLE IF NOT EXISTS rivermemo_artifacts (
-                artifact_sig TEXT PRIMARY KEY,
-                schema_version TEXT NOT NULL,
-                algorithm_version TEXT NOT NULL,
-                source_v9_artifact_sig TEXT NOT NULL,
-                source_graph_generation TEXT NOT NULL,
-                model_sig TEXT NOT NULL,
-                config_hash TEXT NOT NULL,
-                database_generation TEXT NOT NULL,
-                provenance_generation TEXT NOT NULL,
-                payload_codec TEXT NOT NULL DEFAULT 'gzip-json-v1',
-                payload_checksum TEXT,
-                payload BLOB,
-                status TEXT NOT NULL,
-                error_message TEXT,
-                node_count INTEGER NOT NULL DEFAULT 0,
-                edge_count INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                published_at INTEGER
-            );",
-        )
-        .map_err(|error| format!("initialize geometry migration schema failed: {}", error))?;
-    let switched: bool = transaction
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM kbm_runtime_meta WHERE key='geometry_schema_v1')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("probe geometry_schema_v1 failed: {}", error))?;
-    for name in [
-        "trg_tags_delete_pair_cache",
-        "trg_pairwise_tags_insert_generation",
-        "trg_pairwise_tags_vector_generation",
-        "trg_pairwise_tags_delete_generation",
-        "trg_pairwise_file_tags_insert_generation",
-        "trg_pairwise_file_tags_delete_generation",
-    ] {
-        transaction
-            .execute_batch(&format!("DROP TRIGGER IF EXISTS {name};"))
-            .map_err(|error| format!("drop legacy trigger failed: {}", error))?;
-    }
-    for table in ["tag_pair_similarity", "tag_intrinsic_residuals", "kv_store"] {
-        for event in ["INSERT", "UPDATE", "DELETE"] {
-            transaction
-                .execute_batch(&format!(
-                    "DROP TRIGGER IF EXISTS trg_{table}_{event}_derived;"
-                ))
-                .map_err(|error| format!("drop derived trigger failed: {}", error))?;
-        }
-    }
-    transaction
-        .execute_batch(
-            "DROP INDEX IF EXISTS idx_intrinsic_residual_artifact;
-             DROP TABLE IF EXISTS tag_pair_similarity_status;
-             DROP TABLE IF EXISTS tag_pair_similarity;
-             DELETE FROM kbm_runtime_meta WHERE key IN ('derived_pairwise','derived_intrinsic','derived_epa');",
-        )
-        .map_err(|error| format!("migrate geometry assets failed: {}", error))?;
-    if table_exists(&transaction, "kv_store")? {
-        transaction
-            .execute_batch("DELETE FROM kv_store WHERE key='tagmemo_pairwise_fact_generation';")
-            .map_err(|error| format!("clear pairwise fact generation failed: {}", error))?;
-    }
-    if table_exists(&transaction, "tagmemo_artifacts")? {
-        transaction
-            .execute_batch(
-                "DELETE FROM tagmemo_artifacts \
-                 WHERE asset_type IN ('pairwise_similarity','intrinsic_residual');",
-            )
-            .map_err(|error| format!("clear stale memo artifacts failed: {}", error))?;
-    }
-    if !switched {
-        let mut clear = String::new();
-        if table_exists(&transaction, "kv_store")? {
-            clear.push_str("DELETE FROM kv_store WHERE key='epa_basis_cache';");
-        }
-        if table_exists(&transaction, "tag_intrinsic_residuals")? {
-            clear.push_str("DELETE FROM tag_intrinsic_residuals;");
-        }
-        if table_exists(&transaction, "tag_intrinsic_residual_status")? {
-            clear.push_str("DELETE FROM tag_intrinsic_residual_status;");
-        }
-        clear.push_str(
-            "INSERT INTO kbm_runtime_meta(key,value) VALUES ('geometry_schema_v1','1');",
-        );
-        transaction
-            .execute_batch(&clear)
-            .map_err(|error| format!("one-shot geometry switch failed: {}", error))?;
-    }
-    transaction
-        .commit()
-        .map_err(|error| format!("commit geometry migration failed: {}", error))?;
-    Ok(())
-}
-
-/// fact matrix 的语义门输入档位。缺省 `vectors` = 上游 9aa1f67 唯一路径
-/// （`UnitVectors` 读 `tags.vector` 单位向量）；`pairwise` = v9.2 显式兼容档
-/// （查 `tag_pair_similarity` 表——上游迁移已 DROP 该表，兼容档只对旧库有意义）。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum FactMatrixMode {
-    Pairwise,
-    Vectors,
-}
-
-fn read_fact_matrix_mode(config: &Value) -> std::result::Result<FactMatrixMode, String> {
-    match config.get("factMatrixMode").and_then(Value::as_str) {
-        None | Some("vectors") => Ok(FactMatrixMode::Vectors),
-        Some("pairwise") => Ok(FactMatrixMode::Pairwise),
-        Some(other) => Err(format!(
-            "invalid factMatrixMode \"{}\"（合法：vectors | pairwise）",
-            other
-        )),
-    }
-}
-
-fn load_pairwise(
-    connection: &Connection,
-    model_sig: &str,
-) -> std::result::Result<HashMap<(i64, i64), f64>, String> {
-    if !table_exists(connection, "tag_pair_similarity")? {
-        PAIRWISE_TABLE_MISSING.store(true, std::sync::atomic::Ordering::Relaxed);
-        return Ok(HashMap::new());
-    }
-    let mut statement = connection
-        .prepare("SELECT tag_a, tag_b, similarity FROM tag_pair_similarity WHERE model_sig = ?1")
-        .map_err(|error| format!("prepare pairwise failed: {}", error))?;
-    let rows = statement
-        .query_map(params![model_sig], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, f64>(2)?,
-            ))
-        })
-        .map_err(|error| format!("query pairwise failed: {}", error))?;
-    let mut output = HashMap::new();
-    for row in rows {
-        let (left, right, similarity) =
-            row.map_err(|error| format!("decode pairwise row failed: {}", error))?;
-        if !similarity.is_finite() {
-            return Err(format!(
-                "pairwise row ({}, {}) contains non-finite similarity",
-                left, right
-            ));
-        }
-        output.insert((left.min(right), left.max(right)), similarity);
-    }
-    Ok(output)
-}
-
-fn anchor_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<(i64, f64, f64, String)> {
-    Ok((
-        row.get::<_, i64>(0)?,
-        row.get::<_, f64>(1)?,
-        row.get::<_, f64>(2)?,
-        row.get::<_, String>(3)?,
-    ))
-}
-
-fn column_exists(
-    connection: &Connection,
-    table: &str,
-    column: &str,
-) -> std::result::Result<bool, String> {
-    let mut statement = connection
-        .prepare(&format!("PRAGMA table_info({})", table))
-        .map_err(|error| format!("schema probe failed for {}: {}", table, error))?;
-    let mut rows = statement
-        .query([])
-        .map_err(|error| format!("schema probe failed for {}: {}", table, error))?;
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| format!("schema probe failed for {}: {}", table, error))?
-    {
-        let name: String = row
-            .get(1)
-            .map_err(|error| format!("schema probe failed for {}: {}", table, error))?;
-        if name == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
 
 fn load_anchor_gains(
     connection: &Connection,
     model_sig: &str,
-    mode: FactMatrixMode,
 ) -> std::result::Result<(HashMap<i64, f64>, HashMap<i64, f64>, String), String> {
-    // 同族守卫：缺表 = 没有几何残差证据 → 空增益（build_fact_matrix 的
-    // unwrap_or(1.0) 兜底），不硬崩。
-    if !table_exists(connection, "tag_intrinsic_residuals")? {
-        INTRINSIC_TABLE_MISSING.store(true, std::sync::atomic::Ordering::Relaxed);
-        return Ok((HashMap::new(), HashMap::new(), String::new()));
-    }
-    // vectors 档照上游 9aa1f67 :135-186 —— 按 model_sig 过滤 + ORDER BY tag_id，
-    // residual signature 的权威源是 unified_geometry 资产行（不是 intrinsic 行），
-    // 并校验 memo_tag_facts 指纹；不符 ⇒ 硬拒建。
-    // pairwise 档保持 v9.2 逐字（无过滤、signature 取 intrinsic 行里的 artifact_sig）。
-    let vectors_mode = mode == FactMatrixMode::Vectors;
-    let sql = if vectors_mode {
-        "SELECT tag_id, COALESCE(v9_anchor_gain, residual_energy, 1.0), \
-         COALESCE(raw_residual_ratio, 0.0), COALESCE(artifact_sig, '') \
-         FROM tag_intrinsic_residuals WHERE model_sig = ?1 ORDER BY tag_id"
-    } else {
-        "SELECT tag_id, COALESCE(v9_anchor_gain, residual_energy, 1.0), \
-         COALESCE(raw_residual_ratio, 0.0), COALESCE(artifact_sig, '') \
-         FROM tag_intrinsic_residuals"
-    };
-    let mut collected: Vec<(i64, f64, f64, String)> = Vec::new();
-    {
-        let mut statement = connection
-            .prepare(sql)
-            .map_err(|error| format!("prepare intrinsic residuals failed: {}", error))?;
-        if vectors_mode {
-            let rows = statement
-                .query_map(params![model_sig], anchor_row)
-                .map_err(|error| format!("query intrinsic residuals failed: {}", error))?;
-            for row in rows {
-                collected.push(row.map_err(|error| {
-                    format!("decode intrinsic residual row failed: {}", error)
-                })?);
-            }
-        } else {
-            let rows = statement
-                .query_map([], anchor_row)
-                .map_err(|error| format!("query intrinsic residuals failed: {}", error))?;
-            for row in rows {
-                collected.push(row.map_err(|error| {
-                    format!("decode intrinsic residual row failed: {}", error)
-                })?);
-            }
-        }
-    }
+    let mut statement = connection
+        .prepare(
+            "SELECT tag_id, COALESCE(v9_anchor_gain, residual_energy, 1.0), \
+             COALESCE(raw_residual_ratio, 0.0), COALESCE(artifact_sig, '') \
+             FROM tag_intrinsic_residuals WHERE model_sig = ?1 ORDER BY tag_id",
+        )
+        .map_err(|error| format!("prepare intrinsic residuals failed: {}", error))?;
+    let rows = statement
+        .query_map(params![model_sig], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| format!("query intrinsic residuals failed: {}", error))?;
     let mut gains = HashMap::new();
     let mut raw = HashMap::new();
-    let mut signature = String::new();
-    for (tag_id, gain, raw_residual, artifact_sig) in collected {
+    let geometry = connection.query_row(
+        "SELECT artifact_sig,graph_generation FROM tagmemo_artifacts
+         WHERE asset_type='unified_geometry' AND model_sig=?1 AND status='ready'
+         ORDER BY updated_at DESC LIMIT 1",
+        [model_sig], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let signature = if let Some((signature, generation)) = geometry {
+        let facts: String = connection.query_row(
+            "SELECT value FROM kbm_runtime_meta WHERE key='memo_tag_facts'", [], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if generation != format!("facts:{facts}") {
+            return Err("KNOWLEDGE_STORE_DERIVED_DEPENDENCY_CONFLICT: geometry facts are stale".into());
+        }
+        signature
+    } else { String::new() };
+    for row in rows {
+        let (tag_id, gain, raw_residual, row_signature) =
+            row.map_err(|error| format!("decode intrinsic residual row failed: {}", error))?;
+        if !signature.is_empty() && row_signature != signature {
+            return Err(format!("intrinsic residual Tag {tag_id} geometry signature mismatch"));
+        }
         if !gain.is_finite() || !raw_residual.is_finite() {
             return Err(format!(
                 "intrinsic residual row for Tag {} contains non-finite values",
@@ -494,47 +186,6 @@ fn load_anchor_gains(
         }
         gains.insert(tag_id, gain.clamp(0.5, 2.0));
         raw.insert(tag_id, raw_residual.clamp(0.0, 1.0));
-        if signature.is_empty() && !artifact_sig.is_empty() {
-            signature = artifact_sig;
-        }
-    }
-    if vectors_mode {
-        let has_asset_columns = table_exists(connection, "tagmemo_artifacts")?
-            && column_exists(connection, "tagmemo_artifacts", "asset_type")?
-            && column_exists(connection, "tagmemo_artifacts", "graph_generation")?;
-        let geometry: Option<(String, String)> = if has_asset_columns {
-            connection
-                .query_row(
-                    "SELECT artifact_sig, graph_generation FROM tagmemo_artifacts \
-                     WHERE asset_type = 'unified_geometry' AND model_sig = ?1 AND status = 'ready' \
-                     ORDER BY updated_at DESC LIMIT 1",
-                    params![model_sig],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )
-                .optional()
-                .map_err(|error| format!("query unified geometry asset failed: {}", error))?
-        } else {
-            None
-        };
-        signature = match geometry {
-            Some((asset_sig, generation)) => {
-                let facts: String = connection
-                    .query_row(
-                        "SELECT value FROM kbm_runtime_meta WHERE key = 'memo_tag_facts'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(|error| format!("query memo_tag_facts failed: {}", error))?;
-                if generation != format!("facts:{}", facts) {
-                    return Err(
-                        "KNOWLEDGE_STORE_DERIVED_DEPENDENCY_CONFLICT: geometry facts are stale"
-                            .into(),
-                    );
-                }
-                asset_sig
-            }
-            None => String::new(),
-        };
     }
     Ok((gains, raw, signature))
 }
@@ -583,54 +234,10 @@ impl UnitVectors for HashMap<i64, Vec<f64>> {
     }
 }
 
-/// 语义门相似度源：vectors 档 = 单位向量 dot（上游唯一路径）；
-/// pairwise 兼容档 = 查 `tag_pair_similarity` 表、缺行落 low_fallback（v9.2 行为）。
-enum SemanticSource<'a> {
-    Vectors {
-        vectors: &'a dyn UnitVectors,
-        low_fallback: f64,
-    },
-    Pairwise {
-        table: &'a HashMap<(i64, i64), f64>,
-        low_fallback: f64,
-    },
-}
-
-impl SemanticSource<'_> {
-    fn similarity(&self, left: i64, right: i64) -> f64 {
-        match self {
-            Self::Vectors {
-                vectors,
-                low_fallback,
-            } => vectors
-                .unit_vector(left)
-                .zip(vectors.unit_vector(right))
-                .map(|(a, b)| crate::memo_geometry::dot(a, b).clamp(-1.0, 1.0))
-                .unwrap_or(*low_fallback),
-            Self::Pairwise {
-                table,
-                low_fallback,
-            } => table
-                .get(&(left.min(right), left.max(right)))
-                .copied()
-                .unwrap_or(*low_fallback),
-        }
-    }
-}
-
 fn semantic_gain_enabled(config: &Value) -> bool {
     let ordered = config.get("orderedCooccurrence").unwrap_or(&Value::Null);
     boolean(ordered, &["semanticGainEnabled"], false)
         || boolean(ordered, &["semanticGain", "enabled"], false)
-}
-
-fn low_sim_fallback(config: &Value) -> f64 {
-    let ordered = config.get("orderedCooccurrence").unwrap_or(&Value::Null);
-    number(
-        ordered,
-        &["semanticGainLowSimFallback"],
-        number(ordered, &["semanticGain", "lowSimFallback"], 0.1),
-    )
 }
 
 /// Tags of the files that contribute cooccurrence (2 to 100 Tags), sorted.
@@ -680,9 +287,7 @@ fn semantic_pairs(rows: &[FileTag]) -> Vec<(i64, i64)> {
 }
 
 fn configured_build_threads(value: Option<&str>, available: usize) -> usize {
-    value
-        .and_then(|text| text.parse::<usize>().ok())
-        .filter(|&n| n > 0)
+    value.and_then(|text| text.parse::<usize>().ok()).filter(|&n| n > 0)
         .unwrap_or_else(|| available.clamp(1, 8))
 }
 
@@ -702,7 +307,7 @@ fn evaluate_pair_gains(
 
 fn build_fact_matrix(
     rows: &[FileTag],
-    source: &SemanticSource<'_>,
+    vectors: &dyn UnitVectors,
     anchor_gain: &HashMap<i64, f64>,
     config: &Value,
 ) -> std::result::Result<HashMap<i64, HashMap<i64, f64>>, String> {
@@ -728,12 +333,19 @@ fn build_fact_matrix(
         number(ordered, &["semanticGain", "sigma"], 0.25),
     )
     .max(0.001);
+    let low_fallback = number(
+        ordered,
+        &["semanticGainLowSimFallback"],
+        number(ordered, &["semanticGain", "lowSimFallback"], 0.1),
+    );
 
     let semantic_gain = |left: i64, right: i64| -> f64 {
         if !semantic_enabled {
             return 1.0;
         }
-        let similarity = source.similarity(left, right);
+        let similarity = vectors.unit_vector(left).zip(vectors.unit_vector(right))
+            .map(|(a,b)| crate::memo_geometry::dot(a,b).clamp(-1.0,1.0))
+            .unwrap_or(low_fallback);
         if similarity < 0.15 {
             0.4 + similarity * 1.0
         } else {
@@ -750,16 +362,9 @@ fn build_fact_matrix(
     let pair_gains: HashMap<(i64, i64), f64> = if semantic_enabled {
         let pairs = semantic_pairs(rows);
         let available = std::thread::available_parallelism().map_or(1, usize::from);
-        let threads = configured_build_threads(
-            std::env::var("VCP_MEMO_BUILD_THREADS").ok().as_deref(),
-            available,
-        );
+        let threads = configured_build_threads(std::env::var("VCP_MEMO_BUILD_THREADS").ok().as_deref(), available);
         let gains = evaluate_pair_gains(&pairs, &semantic_gain, threads);
-        pairs
-            .into_iter()
-            .zip(gains)
-            .map(|((a, b), gain)| ((a.min(b), a.max(b)), gain))
-            .collect()
+        pairs.into_iter().zip(gains).map(|((a, b), gain)| ((a.min(b), a.max(b)), gain)).collect()
     } else {
         HashMap::new()
     };
@@ -781,8 +386,7 @@ fn build_fact_matrix(
                         continue;
                     }
                     let semantic = if semantic_enabled {
-                        let pair =
-                            (left.tag_id.min(right.tag_id), left.tag_id.max(right.tag_id));
+                        let pair = (left.tag_id.min(right.tag_id), left.tag_id.max(right.tag_id));
                         pair_gains[&pair]
                     } else {
                         1.0
@@ -791,8 +395,8 @@ fn build_fact_matrix(
                         let count = tags.len() as f64;
                         let phi_left =
                             0.9 - 0.4 * (left.position - 1).max(0) as f64 / (count - 1.0).max(1.0);
-                        let phi_right = 0.9
-                            - 0.4 * (right.position - 1).max(0) as f64 / (count - 1.0).max(1.0);
+                        let phi_right =
+                            0.9 - 0.4 * (right.position - 1).max(0) as f64 / (count - 1.0).max(1.0);
                         let delta = (right.position - left.position).max(1) as f64;
                         let distance = if distance_decay > 0.0 {
                             (-distance_decay * (delta - 1.0)).exp()
@@ -849,8 +453,6 @@ fn build_transport(
 
     let mut raw_rows: HashMap<i64, Vec<(i64, f64, bool)>> = HashMap::new();
     let mut target_inflow: HashMap<i64, f64> = HashMap::new();
-    // 确定性迭代：HashMap 随机迭代序会让 target_inflow 的 f64 累加序漂移（1-ulp），
-    // 污染下游 median/penalty/全部边权与 artifactSig。source 升序 + 边按 target 排序。
     let mut sources: Vec<_> = fact.keys().copied().collect();
     sources.sort_unstable();
     for source_id in sources {
@@ -883,9 +485,7 @@ fn build_transport(
         1.0
     } else {
         let middle = positive.len() / 2;
-        *positive
-            .select_nth_unstable_by(middle, |left, right| left.total_cmp(right))
-            .1
+        *positive.select_nth_unstable_by(middle, |left, right| left.total_cmp(right)).1
     };
     let smoothing = (median * smoothing_ratio).max(1e-9);
     let hub_penalty = |inflow: f64| -> f64 {
@@ -905,25 +505,19 @@ fn build_transport(
 
     let mut transport = HashMap::new();
     let mut wormholes = HashSet::new();
-    let mut raw_sources: Vec<i64> = raw_rows.keys().copied().collect();
-    raw_sources.sort_unstable();
-    for source in &raw_sources {
-        let edges = &raw_rows[source];
+    for (source, edges) in raw_rows {
         let mut adjusted = Vec::new();
         let mut total = 0.0;
         let mut wormhole_total = 0.0;
         for (target, conductance, wormhole) in edges {
-            let penalty = penalties
-                .get(target)
-                .copied()
-                .unwrap_or_else(|| hub_penalty(0.0));
+            let penalty = penalties.get(&target).copied().unwrap_or_else(|| hub_penalty(0.0));
             let value = conductance * penalty;
             if value > 0.0 && value.is_finite() {
                 total += value;
-                if *wormhole {
+                if wormhole {
                     wormhole_total += value;
                 }
-                adjusted.push((*target, value, *wormhole));
+                adjusted.push((target, value, wormhole));
             }
         }
         if total <= 0.0 {
@@ -935,7 +529,7 @@ fn build_transport(
             0.0
         };
         let main = outbound_mass - reserved;
-        let row = transport.entry(*source).or_insert_with(HashMap::new);
+        let row = transport.entry(source).or_insert_with(HashMap::new);
         for (target, value, wormhole) in adjusted {
             let normalized = main * value / total
                 + if wormhole && wormhole_total > 0.0 {
@@ -945,7 +539,7 @@ fn build_transport(
                 };
             row.insert(target, normalized);
             if wormhole {
-                wormholes.insert((*source, target));
+                wormholes.insert((source, target));
             }
         }
     }
@@ -998,11 +592,7 @@ fn build_provenance(
         if output.last().is_none_or(|(previous, _)| *previous != edge) {
             output.push((edge, Vec::new()));
         }
-        output
-            .last_mut()
-            .unwrap()
-            .1
-            .push(ProvenanceContribution { file_id, mass });
+        output.last_mut().unwrap().1.push(ProvenanceContribution { file_id, mass });
     }
     output.into_iter().collect()
 }
@@ -1067,10 +657,6 @@ fn build_native_artifact(
         })
         .collect();
     let max_inbound = inbound.values().copied().fold(0.0, f64::max);
-    // 上游 9aa1f67 :655-667：返回已 prepared() 的 artifact——行内按正权重降序重排
-    // （并列按 node_id 升序 tie-break）+ 物化 node_anchor_gain/edge_is_wormhole，
-    // payload 的 sharedTransport 直接从 targets/weights 序列化 ⇒ 行内降序。
-    // （P2-F「oracle 行序非降序证伪 prepared」是 174a5e1 时代实测，9aa1f67 已改。）
     Arc::new(NativeArtifact {
         node_ids,
         node_index,
@@ -1083,133 +669,186 @@ fn build_native_artifact(
         wormhole_edges: wormholes,
         provenance: native_provenance,
         ..NativeArtifact::default()
-    }
-    .prepared())
+    }.prepared())
 }
 
-fn artifact_payload(
-    artifact: &NativeArtifact,
-    provenance: &BTreeMap<(i64, i64), Vec<ProvenanceContribution>>,
-    metadata: &Value,
-) -> Value {
-    // 上游 9aa1f67 provenanceView.schema 已换代 file-mass-v2（[[fileId,mass]...] 二元组，
-    // v9.2 的四元组 diary_name/path 随 FileTag 字段删除一并退役）。
-    let provenance_edges: Vec<Value> = provenance
-        .iter()
-        .map(|((source, target), contributions)| {
-            json!([
-                format!("{}:{}", source, target),
-                contributions
-                    .iter()
-                    .map(|item| json!([item.file_id, item.mass]))
-                    .collect::<Vec<_>>()
-            ])
-        })
-        .collect();
-    let mut inbound: Vec<(i64, f64)> = artifact
-        .inbound
-        .iter()
-        .map(|(id, mass)| (*id, *mass))
-        .collect();
-    inbound.sort_unstable_by_key(|entry| entry.0);
-    let mut anchor_gain: Vec<(i64, f64)> = artifact
-        .anchor_gain
-        .iter()
-        .map(|(id, gain)| (*id, *gain))
-        .collect();
-    anchor_gain.sort_unstable_by_key(|entry| entry.0);
-    let mut wormhole_ids: Vec<(i64, i64)> =
-        artifact.wormhole_edges.iter().copied().collect();
-    wormhole_ids.sort_unstable();
-    let inbound: Vec<Value> = inbound.into_iter().map(|(id, mass)| json!([id, mass])).collect();
-    let anchor_gain: Vec<Value> = anchor_gain
-        .into_iter()
-        .map(|(id, gain)| json!([id, gain]))
-        .collect();
-    let wormholes: Vec<Value> = wormhole_ids
-        .into_iter()
-        .map(|(source, target)| json!(format!("{}:{}", source, target)))
-        .collect();
+/// `"source:target"`, the text `format!("{}:{}", source, target)` produced.
+struct EdgeKey(i64, i64);
 
-    json!({
-        "schema": PAYLOAD_SCHEMA,
-        "artifact": metadata,
-        "sharedTransport": {
-            "schema": "tagmemo-v10-alpha-csr-snapshot-v1",
-            "contentSig": metadata["graphGeneration"],
-            "nodeIds": artifact.node_ids,
-            "rowOffsets": artifact.row_offsets,
-            "targetIndices": artifact.targets,
-            "weights": artifact.weights
-        },
-        "provenanceView": {
-            "schema": "tagmemo-provenance-file-mass-v2",
-            "generation": metadata["provenanceGeneration"],
-            "edges": provenance_edges
-        },
-        "rawResidualRatioView": [],
-        "anchorGainView": anchor_gain,
-        "inboundMassView": inbound,
-        "wormholeView": wormholes
-    })
+impl Serialize for EdgeKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_str(&format_args!("{}:{}", self.0, self.1))
+    }
+}
+
+/// `[[fileId, mass], ...]` of one provenance edge.
+struct Contributions<'a>(&'a [ProvenanceContribution]);
+
+impl Serialize for Contributions<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(|item| (item.file_id, item.mass)))
+    }
+}
+
+/// `[["source:target", contributions], ...]` in provenance key order.
+struct ProvenanceEdges<'a>(&'a BTreeMap<(i64, i64), Vec<ProvenanceContribution>>);
+
+impl Serialize for ProvenanceEdges<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(|((source, target), contributions)| {
+            (EdgeKey(*source, *target), Contributions(contributions))
+        }))
+    }
+}
+
+struct ProvenanceView<'a> {
+    generation: &'a Value,
+    edges: ProvenanceEdges<'a>,
+}
+
+impl Serialize for ProvenanceView<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry("edges", &self.edges)?;
+        map.serialize_entry("generation", self.generation)?;
+        map.serialize_entry("schema", "tagmemo-provenance-file-mass-v2")?;
+        map.end()
+    }
+}
+
+struct SharedTransport<'a> {
+    content_sig: &'a Value,
+    artifact: &'a NativeArtifact,
+}
+
+impl Serialize for SharedTransport<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(6))?;
+        map.serialize_entry("contentSig", self.content_sig)?;
+        map.serialize_entry("nodeIds", &self.artifact.node_ids)?;
+        map.serialize_entry("rowOffsets", &self.artifact.row_offsets)?;
+        map.serialize_entry("schema", "tagmemo-v10-alpha-csr-snapshot-v1")?;
+        map.serialize_entry("targetIndices", &self.artifact.targets)?;
+        map.serialize_entry("weights", &self.artifact.weights)?;
+        map.end()
+    }
+}
+
+/// The persisted payload, serialised straight from the artifact instead of
+/// through a `serde_json::Value` tree. serde_json is built without
+/// `preserve_order`, so the tree wrote every object with its keys in sorted
+/// order; each `serialize_map` below writes its keys in that same order. All
+/// numbers and strings go through the same serializer as before, so the bytes
+/// are identical. Only the sorted (ID, value) lists are materialised.
+struct ArtifactPayload<'a> {
+    metadata: &'a Value,
+    artifact: &'a NativeArtifact,
+    provenance: &'a BTreeMap<(i64, i64), Vec<ProvenanceContribution>>,
+    anchor_gain: Vec<(i64, f64)>,
+    inbound: Vec<(i64, f64)>,
+    wormholes: Vec<EdgeKey>,
+    raw_residuals: Vec<(i64, f64)>,
+}
+
+impl Serialize for ArtifactPayload<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(8))?;
+        map.serialize_entry("anchorGainView", &self.anchor_gain)?;
+        map.serialize_entry("artifact", self.metadata)?;
+        map.serialize_entry("inboundMassView", &self.inbound)?;
+        map.serialize_entry("provenanceView", &ProvenanceView {
+            generation: &self.metadata["provenanceGeneration"],
+            edges: ProvenanceEdges(self.provenance),
+        })?;
+        map.serialize_entry("rawResidualRatioView", &self.raw_residuals)?;
+        map.serialize_entry("schema", PAYLOAD_SCHEMA)?;
+        map.serialize_entry("sharedTransport", &SharedTransport {
+            content_sig: &self.metadata["graphGeneration"],
+            artifact: self.artifact,
+        })?;
+        map.serialize_entry("wormholeView", &self.wormholes)?;
+        map.end()
+    }
+}
+
+fn artifact_payload<'a>(
+    artifact: &'a NativeArtifact,
+    provenance: &'a BTreeMap<(i64, i64), Vec<ProvenanceContribution>>,
+    metadata: &'a Value,
+) -> ArtifactPayload<'a> {
+    // Map keys are unique, so ascending ID is a total order.
+    let mut inbound: Vec<(i64, f64)> =
+        artifact.inbound.iter().map(|(id, mass)| (*id, *mass)).collect();
+    inbound.sort_unstable_by_key(|entry| entry.0);
+    let mut anchor_gain: Vec<(i64, f64)> =
+        artifact.anchor_gain.iter().map(|(id, gain)| (*id, *gain)).collect();
+    anchor_gain.sort_unstable_by_key(|entry| entry.0);
+    let mut wormhole_ids: Vec<_> = artifact.wormhole_edges.iter().copied().collect();
+    wormhole_ids.sort_unstable();
+    ArtifactPayload {
+        metadata,
+        artifact,
+        provenance,
+        anchor_gain,
+        inbound,
+        wormholes: wormhole_ids.into_iter().map(|(source, target)| EdgeKey(source, target)).collect(),
+        raw_residuals: Vec::new(),
+    }
 }
 
 fn run_build(
+    dimension: usize,
     runtime: &MemoRuntime,
     db_path: &str,
     input_json: &str,
-    dimension: usize,
 ) -> std::result::Result<NativeMemoArtifactBuildResult, String> {
     let started = Instant::now();
+    let mut handoff = crate::storage::memo_workspace_slot(db_path).and_then(|slot| slot.take());
     let input: BuildInput = serde_json::from_str(input_json)
         .map_err(|error| format!("invalid native artifact build JSON: {}", error))?;
     if input.model_sig.trim().is_empty() {
         return Err("native artifact build requires modelSig".to_string());
     }
 
-    // rebuild 前置：把库带到 geometry_schema_v1 世界（上游 openAndInitStore 迁移的
-    // builder 侧等价——清 stale 几何资产，见 migrate_geometry_assets 注释）。
-    migrate_geometry_assets(db_path)?;
-
-    let readonly = open_readonly(db_path)?;
-    let mode = read_fact_matrix_mode(&input.effective_config)?;
-    let rows = load_file_tags(&readonly)?;
-    let (anchor_gain, _raw_residuals, residual_sig) =
-        load_anchor_gains(&readonly, &input.model_sig, mode)?;
-    // vectors 档（缺省）：每个 Tag 向量在快照内读+单位化一次（memo_geometry 的
-    // UnitVectorWorkspace，与 geometry 预计算同读法）；semantic 关闭时空工作区，
-    // 无向量 SQL。pairwise 显式兼容档：语义源 = tag_pair_similarity 表。
-    let (vectors, pairwise) = match mode {
-        FactMatrixMode::Vectors => (
-            if semantic_gain_enabled(&input.effective_config) {
+    let snapshot_gate = crate::publication_gate::acquire_read(db_path, &["*".into()])?;
+    let (rows, fact, anchor_gain, raw_residuals, residual_sig, database_generation, dependencies) =
+        with_registered_read_transaction(db_path, |readonly| {
+            let rows = load_file_tags(readonly)?;
+            let (anchor_gain, raw_residuals, residual_sig) = load_anchor_gains(readonly, &input.model_sig)?;
+            // Each Tag vector is read and normalised once per snapshot into the
+            // memory-mapped f64 workspace that geometry precompute also uses, instead
+            // of once per file; no vector SQL when semantic gain is disabled.
+            let vectors = if semantic_gain_enabled(&input.effective_config) {
                 let ids = cooccurrence_tag_ids(&rows);
-                crate::memo_geometry::UnitVectorWorkspace::build(&readonly, &ids, dimension)?
+                let key = crate::memo_geometry::workspace::SnapshotKey::capture(
+                    readonly, db_path, &input.model_sig, dimension)?;
+                match handoff.take().and_then(|pending| pending.reuse(&key, &ids)) {
+                    Some(workspace) => workspace,
+                    None => crate::memo_geometry::UnitVectorWorkspace::build(readonly, &ids, dimension)?,
+                }
             } else {
                 crate::memo_geometry::UnitVectorWorkspace::empty(dimension)
-            },
-            HashMap::new(),
-        ),
-        FactMatrixMode::Pairwise => (
-            crate::memo_geometry::UnitVectorWorkspace::empty(dimension),
-            load_pairwise(&readonly, &input.model_sig)?,
-        ),
-    };
-    let semantic_source = match mode {
-        FactMatrixMode::Vectors => SemanticSource::Vectors {
-            vectors: &vectors,
-            low_fallback: low_sim_fallback(&input.effective_config),
-        },
-        FactMatrixMode::Pairwise => SemanticSource::Pairwise {
-            table: &pairwise,
-            low_fallback: low_sim_fallback(&input.effective_config),
-        },
-    };
-    let fact = build_fact_matrix(&rows, &semantic_source, &anchor_gain, &input.effective_config)?;
-    drop(semantic_source);
-    drop(vectors);
-    drop(pairwise);
-    let load_ms = started.elapsed().as_secs_f64() * 1000.0;
-
+            };
+            drop(handoff.take());
+            let fact = build_fact_matrix(&rows, &vectors, &anchor_gain, &input.effective_config)?;
+            drop(vectors);
+            let database_generation = database_generation(readonly)?;
+            let dependencies = crate::storage::DerivedDependencies::capture(
+                readonly, crate::storage::MEMO_ARTIFACT_DEPENDENCIES,
+            )?;
+            Ok((
+                rows,
+                fact,
+                anchor_gain,
+                raw_residuals,
+                residual_sig,
+                database_generation,
+                dependencies,
+            ))
+        })?;
+    drop(snapshot_gate);
+    let load_ms = started.elapsed().as_secs_f64()*1000.0;
+    // Fact edge accumulation already completed inside the frozen SQL snapshot.
     let (transport, wormholes) = build_transport(&fact, &anchor_gain, &input.effective_config);
     drop(fact);
     let provenance = build_provenance(&rows, &input.effective_config);
@@ -1246,8 +885,6 @@ fn run_build(
         }
     }
     let provenance_generation = format!("{:x}", provenance_hasher.finalize())[..40].to_owned();
-    let database_generation = database_generation(&readonly)?;
-    drop(readonly);
     let config_json = serde_json::to_string(&input.effective_config)
         .map_err(|error| format!("encode effective config failed: {}", error))?;
     let config_hash = hash_text(&config_json, 32);
@@ -1258,22 +895,25 @@ fn run_build(
         ),
         24,
     );
+    let mut residual_view: Vec<(i64,f64)> = raw_residuals.into_iter().collect();
+    residual_view.sort_unstable_by_key(|entry|entry.0);
+    let residual_digest = sha256_hex(&serde_json::to_vec(&residual_view).map_err(|e|e.to_string())?);
     let artifact_sig = hash_text(
         &format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|residual-view-v1:{}",
             ALGORITHM_VERSION,
             source_artifact_sig,
             graph_digest,
             provenance_generation,
             database_generation,
-            config_hash
+            config_hash,
+            residual_digest
         ),
         48,
     );
 
     let native = build_native_artifact(&transport, inbound, anchor_gain, wormholes, &provenance);
     drop(transport);
-    let graph_ms = started.elapsed().as_secs_f64() * 1000.0 - load_ms;
     let published_at = now_ms();
     let metadata = json!({
         "schema": "tagmemo-v10-alpha-artifact-v1",
@@ -1290,16 +930,15 @@ fn run_build(
         "maxInbound": native.max_inbound,
         "effectiveConfig": input.effective_config
     });
-    // 注：artifact payload 的 metadata **不加任何键** —— diff-runner 对 payload 做全量深比对，
-    // 多一个键即记「缺侧」（实测 2.0 metadata 13 键 vs 我方 13 键；曾加 2 个诊断键 ⇒ 缺侧）。
-    // schema-v2 兜底标记改由 pipeline metadata 的 diagnostics 面外露（见 memo_pipeline.rs）。
-    let payload = artifact_payload(&native, &provenance, &metadata);
+    let graph_ms = started.elapsed().as_secs_f64()*1000.0-load_ms;
+    let mut payload = artifact_payload(&native, &provenance, &metadata);
+    payload.raw_residuals = residual_view;
     let raw = serde_json::to_vec(&payload)
         .map_err(|error| format!("encode native artifact payload failed: {}", error))?;
     drop(payload);
     drop(provenance);
     let checksum = sha256_hex(&raw);
-    let encode_ms = started.elapsed().as_secs_f64() * 1000.0 - load_ms - graph_ms;
+    let encode_ms = started.elapsed().as_secs_f64()*1000.0-load_ms-graph_ms;
     let raw_bytes = raw.len() as u32;
     let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
     encoder
@@ -1311,14 +950,28 @@ fn run_build(
 
     drop(raw);
     let compressed_bytes = compressed.len() as u32;
-    let compression_ms = started.elapsed().as_secs_f64() * 1000.0 - load_ms - graph_ms - encode_ms;
-    let mut writable = open_readwrite(db_path)?;
-    let transaction = writable
-        .transaction()
-        .map_err(|error| format!("begin native artifact transaction failed: {}", error))?;
-    transaction
-        .execute(
-            "INSERT INTO rivermemo_artifacts (\
+    let compression_ms = started.elapsed().as_secs_f64()*1000.0-load_ms-graph_ms-encode_ms;
+    // 只在最终提交和内存发布窗口持门禁，耗时图构建与压缩不阻塞查询。
+    let _publication_guard = crate::publication_gate::acquire(db_path, &[String::from("*")])?;
+    let source_generation = database_generation.parse::<u64>()
+        .map_err(|error| format!("Invalid artifact source generation: {}", error))?;
+    let artifact_sig_for_write = artifact_sig.clone();
+    let source_artifact_sig_for_write = source_artifact_sig.clone();
+    let graph_digest_for_write = graph_digest.clone();
+    let database_generation_for_write = database_generation.clone();
+    let provenance_generation_for_write = provenance_generation.clone();
+    let model_sig_for_write = input.model_sig.clone();
+    let config_hash_for_write = config_hash.clone();
+    let checksum_for_write = checksum.clone();
+    let native_for_write = native.clone();
+    let dependencies_for_write = dependencies.clone();
+
+    with_registered_write(db_path, move |transaction| {
+        crate::storage::ensure_generation(transaction, source_generation)?;
+        dependencies_for_write.ensure_current(transaction)?;
+        transaction
+            .execute(
+                "INSERT INTO rivermemo_artifacts (\
              artifact_sig, schema_version, algorithm_version, source_v9_artifact_sig, \
              source_graph_generation, model_sig, config_hash, database_generation, \
              provenance_generation, payload_codec, payload_checksum, payload, status, \
@@ -1330,32 +983,65 @@ fn run_build(
              status='ready', error_message=NULL, updated_at=excluded.updated_at, \
              published_at=excluded.published_at, node_count=excluded.node_count, \
              edge_count=excluded.edge_count",
-            params![
-                artifact_sig,
-                PAYLOAD_SCHEMA,
-                ALGORITHM_VERSION,
-                source_artifact_sig,
-                graph_digest,
-                input.model_sig,
-                config_hash,
-                database_generation,
-                provenance_generation,
-                PAYLOAD_CODEC,
-                checksum,
-                compressed,
-                native.node_ids.len() as i64,
-                native.targets.len() as i64,
-                published_at
-            ],
-        )
-        .map_err(|error| format!("persist native artifact failed: {}", error))?;
-    transaction
-        .commit()
-        .map_err(|error| format!("commit native artifact failed: {}", error))?;
-    drop(writable);
+                params![
+                    artifact_sig_for_write,
+                    PAYLOAD_SCHEMA,
+                    ALGORITHM_VERSION,
+                    source_artifact_sig_for_write,
+                    graph_digest_for_write,
+                    model_sig_for_write,
+                    config_hash_for_write,
+                    database_generation_for_write,
+                    provenance_generation_for_write,
+                    PAYLOAD_CODEC,
+                    checksum_for_write,
+                    compressed,
+                    native_for_write.node_ids.len() as i64,
+                    native_for_write.targets.len() as i64,
+                    published_at
+                ],
+            )
+            .map_err(|error| format!("persist native artifact failed: {}", error))?;
+        dependencies_for_write.persist_for_artifact(transaction, &artifact_sig_for_write)?;
+        // The generation/dependency CAS above guarantees this graph includes every
+        // committed change. Only a successful publication resets the durable budget.
+        transaction.execute_batch(
+            "INSERT INTO kbm_runtime_meta(key,value)
+             VALUES ('memo_training_tag_count',(SELECT CAST(COUNT(*) AS TEXT) FROM tags))
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+             DELETE FROM kbm_memo_changed_tags;"
+        ).map_err(|e| format!("publish Memo training baseline failed: {e}"))?;
 
-    // native 已 prepared（上游 :1019 同形状直接 clone 发布；prepared 幂等有测试覆盖）。
+        Ok(crate::storage::WriteReceipt {
+            operation: "publish_rivermemo_artifact".to_string(),
+            database_generation: 0,
+            facts_changed: false,
+        })
+    })
+    .map_err(|error| {
+        format!(
+            "persist native artifact through Write Actor failed: {}",
+            error
+        )
+    })?;
+
+    with_registered_read_transaction(db_path, |connection| {
+        crate::storage::ensure_generation(connection, source_generation)?;
+        dependencies.ensure_current(connection)
+    })?;
     let generation = runtime.publish(&artifact_sig, native.clone())?;
+    drop(_publication_guard);
+    // Optional fields are built outside the exclusive publication gate.
+    // The persisted cosine artifact is already published; a field failure is
+    // explicitly partial success, not a rollback of that durable publication.
+    for preset in input.warped_presets {
+        let _field_gate=crate::publication_gate::acquire_read(db_path,&["*".into()])?;
+        with_registered_read_transaction(db_path, |connection| {
+            crate::warped_tag_field::load_or_build(runtime,connection,&artifact_sig,
+                &native,dimension,preset).map(|_|())
+        }).map_err(|error|format!(
+            "MEMO_OPTIONAL_FIELD_FAILED: artifact {artifact_sig} already published; {error}"))?;
+    }
     Ok(NativeMemoArtifactBuildResult {
         success: true,
         artifact_sig,
@@ -1369,20 +1055,18 @@ fn run_build(
         persisted: true,
         resident: true,
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
-        phase_summary: format!(
-            "load={load_ms:.3};graph={graph_ms:.3};encode={encode_ms:.3};compress={compression_ms:.3};publish={:.3}",
-            started.elapsed().as_secs_f64() * 1000.0 - load_ms - graph_ms - encode_ms - compression_ms
-        ),
+        phase_summary: format!("load={load_ms:.3};graph={graph_ms:.3};encode={encode_ms:.3};compress={compression_ms:.3};publish={:.3}",
+            started.elapsed().as_secs_f64()*1000.0-load_ms-graph_ms-encode_ms-compression_ms),
         raw_bytes,
         compressed_bytes,
     })
 }
 
 pub struct NativeMemoArtifactBuildTask {
+    dimension: usize,
     runtime: Arc<MemoRuntime>,
     db_path: String,
     input_json: String,
-    dimension: usize,
 }
 
 impl Task for NativeMemoArtifactBuildTask {
@@ -1390,8 +1074,7 @@ impl Task for NativeMemoArtifactBuildTask {
     type JsValue = NativeMemoArtifactBuildResult;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        run_build(&self.runtime, &self.db_path, &self.input_json, self.dimension)
-            .map_err(Error::from_reason)
+        run_build(self.dimension, &self.runtime, &self.db_path, &self.input_json).map_err(Error::from_reason)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -1400,304 +1083,669 @@ impl Task for NativeMemoArtifactBuildTask {
 }
 
 pub(crate) fn rebuild_with_runtime(
+    lifecycle: &Arc<crate::task_lifecycle::TaskLifecycle>,
+    dimension: usize,
     runtime: Arc<MemoRuntime>,
     db_path: String,
     input_json: String,
-    dimension: usize,
-) -> AsyncTask<NativeMemoArtifactBuildTask> {
-    AsyncTask::new(NativeMemoArtifactBuildTask {
+) -> AsyncTask<crate::task_lifecycle::TrackedTask<NativeMemoArtifactBuildTask>> {
+    AsyncTask::new(crate::task_lifecycle::TrackedTask::new(lifecycle, NativeMemoArtifactBuildTask {
+        dimension,
         runtime,
         db_path,
         input_json,
-        dimension,
-    })
+    }))
+}
+
+
+#[cfg(test)]
+mod streamed_payload_tests {
+    use super::*;
+
+    /// The previous encoding: a `serde_json::Value` tree, then `to_vec`.
+    fn tree_payload(
+        artifact: &NativeArtifact,
+        provenance: &BTreeMap<(i64, i64), Vec<ProvenanceContribution>>,
+        metadata: &Value,
+    ) -> Vec<u8> {
+        let provenance_edges: Vec<Value> = provenance
+            .iter()
+            .map(|((source, target), contributions)| {
+                json!([
+                    format!("{}:{}", source, target),
+                    contributions
+                        .iter()
+                        .map(|item| json!([item.file_id, item.mass]))
+                        .collect::<Vec<_>>()
+                ])
+            })
+            .collect();
+        let mut inbound: Vec<Value> = artifact
+            .inbound
+            .iter()
+            .map(|(id, mass)| json!([id, mass]))
+            .collect();
+        inbound.sort_by_key(|v| v[0].as_i64().unwrap_or(0));
+        let mut anchor_gain: Vec<Value> = artifact
+            .anchor_gain
+            .iter()
+            .map(|(id, gain)| json!([id, gain]))
+            .collect();
+        anchor_gain.sort_by_key(|v| v[0].as_i64().unwrap_or(0));
+        let mut wormhole_ids: Vec<_> = artifact.wormhole_edges.iter().copied().collect();
+        wormhole_ids.sort_unstable();
+        let wormholes: Vec<Value> = wormhole_ids
+            .iter()
+            .map(|(source, target)| json!(format!("{}:{}", source, target)))
+            .collect();
+
+        serde_json::to_vec(&json!({
+            "schema": PAYLOAD_SCHEMA,
+            "artifact": metadata,
+            "sharedTransport": {
+                "schema": "tagmemo-v10-alpha-csr-snapshot-v1",
+                "contentSig": metadata["graphGeneration"],
+                "nodeIds": artifact.node_ids,
+                "rowOffsets": artifact.row_offsets,
+                "targetIndices": artifact.targets,
+                "weights": artifact.weights
+            },
+            "provenanceView": {
+                "schema": "tagmemo-provenance-file-mass-v2",
+                "generation": metadata["provenanceGeneration"],
+                "edges": provenance_edges
+            },
+            "rawResidualRatioView": [],
+            "anchorGainView": anchor_gain,
+            "inboundMassView": inbound,
+            "wormholeView": wormholes
+        }))
+        .unwrap()
+    }
+
+    fn streamed_payload(
+        artifact: &NativeArtifact,
+        provenance: &BTreeMap<(i64, i64), Vec<ProvenanceContribution>>,
+        metadata: &Value,
+    ) -> Vec<u8> {
+        serde_json::to_vec(&artifact_payload(artifact, provenance, metadata)).unwrap()
+    }
+
+    /// Floats whose shortest text takes every branch of the formatter, plus
+    /// values the tree turned into `null`.
+    const AWKWARD: [f64; 14] = [
+        0.1 + 0.2, 1.0, -0.0, 0.0, 5e-324, 1e-310, 1e21, 1e-7, 123456789.0,
+        f64::MAX, f64::MIN_POSITIVE, f64::NAN, f64::INFINITY, f64::NEG_INFINITY,
+    ];
+
+    #[test]
+    fn streamed_payload_has_the_bytes_of_the_value_tree() {
+        let ids: Vec<i64> = vec![1, 2, 3, 40, 512, 9_007_199_254_740_993, i64::MAX];
+        let artifact = NativeArtifact {
+            node_ids: ids.clone(),
+            row_offsets: vec![0, 3, 3, 7, 9, 11, 14, 14],
+            targets: (0..14).map(|index| (index * 5) % ids.len()).collect(),
+            weights: AWKWARD.to_vec(),
+            inbound: (0..200_i64).map(|id| (id * 7919 % 1000 - 300, AWKWARD[id as usize % 14])).collect(),
+            anchor_gain: (0..200_i64).map(|id| (id * 104_729 % 997, 0.5 + id as f64 / 3.0)).collect(),
+            wormhole_edges: [(3, 1), (-4, 2), (1, 3), (1, 2), (i64::MAX, i64::MIN)].into_iter().collect(),
+            ..NativeArtifact::default()
+        };
+        let mut provenance = BTreeMap::new();
+        for source in -3..12_i64 {
+            for target in [source - 1, source + 2, 900] {
+                let contributions = (0..(source + 3) as usize % 5)
+                    .map(|index| ProvenanceContribution {
+                        file_id: index as i64 * 31 + target,
+                        mass: AWKWARD[(index + source as usize % 7) % 14],
+                    })
+                    .collect();
+                provenance.insert((source, target), contributions);
+            }
+        }
+        let metadata = json!({
+            "schema": "tagmemo-v10-alpha-artifact-v1",
+            "graphGeneration": "graph",
+            "provenanceGeneration": "provenance",
+            "maxInbound": 0.1 + 0.2,
+            "effectiveConfig": {
+                "zeta": [1, -1, 2.5, 1e300, -0.0, true, null],
+                "Alpha": {"b": "quote \" backslash \\ newline \n tab \t 合成 \u{1}", "a": {}},
+                "_": [],
+                "a": u64::MAX,
+            }
+        });
+        let streamed = streamed_payload(&artifact, &provenance, &metadata);
+        assert_eq!(String::from_utf8(streamed.clone()).unwrap(),
+            String::from_utf8(tree_payload(&artifact, &provenance, &metadata)).unwrap());
+        // Non-finite weights and masses were written as `null`; they still are.
+        let text = std::str::from_utf8(&streamed).unwrap();
+        assert!(text.contains(",null,") && text.contains(",null]"));
+    }
+
+    #[test]
+    fn empty_artifact_and_provenance_keep_the_tree_bytes() {
+        let empty = NativeArtifact::default();
+        let provenance = BTreeMap::new();
+        for metadata in [json!({}), json!({"graphGeneration": "g", "provenanceGeneration": "p"}), Value::Null] {
+            let streamed = streamed_payload(&empty, &provenance, &metadata);
+            assert_eq!(streamed, tree_payload(&empty, &provenance, &metadata));
+        }
+        let mut one_empty_edge = BTreeMap::new();
+        one_empty_edge.insert((1, 2), Vec::new());
+        let metadata = json!({});
+        assert_eq!(streamed_payload(&empty, &one_empty_edge, &metadata),
+            tree_payload(&empty, &one_empty_edge, &metadata));
+        assert_eq!(
+            String::from_utf8(streamed_payload(&empty, &provenance, &metadata)).unwrap(),
+            r#"{"anchorGainView":[],"artifact":{},"inboundMassView":[],"provenanceView":{"edges":[],"generation":null,"schema":"tagmemo-provenance-file-mass-v2"},"rawResidualRatioView":[],"schema":"rivermemo-persisted-artifact-v2","sharedTransport":{"contentSig":null,"nodeIds":[],"rowOffsets":[],"schema":"tagmemo-v10-alpha-csr-snapshot-v1","targetIndices":[],"weights":[]},"wormholeView":[]}"#
+        );
+    }
 }
 
 #[cfg(test)]
-mod tests {
+mod fact_dependency_tests {
     use super::*;
-
-    fn synthetic_rows() -> Vec<FileTag> {
-        // 三个 file，各 2-3 tag，跨 file 复现 tag 对（制造同 key 多次累加）。
-        vec![
-            FileTag { file_id: 1, tag_id: 10, position: 1 },
-            FileTag { file_id: 1, tag_id: 20, position: 2 },
-            FileTag { file_id: 1, tag_id: 30, position: 3 },
-            FileTag { file_id: 2, tag_id: 20, position: 1 },
-            FileTag { file_id: 2, tag_id: 10, position: 2 },
-            FileTag { file_id: 3, tag_id: 10, position: 1 },
-            FileTag { file_id: 3, tag_id: 20, position: 2 },
-        ]
-    }
-
-    fn config() -> Value {
-        json!({})
-    }
-
-    fn memory_db() -> Connection {
-        Connection::open_in_memory().unwrap()
-    }
-
-    fn canonical_transport(transport: &HashMap<i64, HashMap<i64, f64>>) -> Vec<(i64, Vec<(i64, f64)>)> {
-        let mut rows: Vec<(i64, Vec<(i64, f64)>)> = transport
-            .iter()
-            .map(|(source, edges)| {
-                let mut ordered: Vec<(i64, f64)> =
-                    edges.iter().map(|(target, weight)| (*target, *weight)).collect();
-                ordered.sort_by_key(|item| item.0);
-                (*source, ordered)
-            })
-            .collect();
-        rows.sort_by_key(|item| item.0);
-        rows
-    }
+    use crate::storage::{SqliteStorageEngine, StorageOptions, WriteReceipt};
 
     #[test]
-    fn stable_sums_matches_entry_accumulation_bits() {
-        // stable_sums（sort + 原地压缩，首加法 +0.0 起）与 HashMap entry 直加
-        // 在同 key 多值场景下必须位级一致（0.0+v == v，IEEE）。
-        let entries = vec![
-            ((7i64, 9i64), 0.1f64),
-            ((3, 5), 0.25),
-            ((7, 9), 0.2),
-            ((3, 5), 1.0 / 3.0),
-            ((7, 9), 0.30000000000000004),
-        ];
-        let mut baseline: HashMap<(i64, i64), f64> = HashMap::new();
-        for (key, value) in entries.iter() {
-            *baseline.entry(*key).or_default() += *value;
-        }
-        for (key, sum) in stable_sums(entries) {
-            assert_eq!(sum.to_bits(), baseline[&key].to_bits(), "key {:?}", key);
-        }
-    }
-
-    #[test]
-    fn transport_is_insensitive_to_hashmap_iteration_order() {
-        let anchor = HashMap::new();
-        let config = config();
-        // 两份等价 fact（构造时插入序不同）→ transport 规范形必须一致。
-        let mut fact_a: HashMap<i64, HashMap<i64, f64>> = HashMap::new();
-        fact_a.insert(10, HashMap::from([(20, 0.5), (30, 1.5)]));
-        fact_a.insert(20, HashMap::from([(10, 0.7)]));
-        let mut fact_b: HashMap<i64, HashMap<i64, f64>> = HashMap::new();
-        fact_b.insert(20, HashMap::from([(10, 0.7)]));
-        fact_b.insert(10, HashMap::from([(30, 1.5), (20, 0.5)]));
-        let (transport_a, _) = build_transport(&fact_a, &anchor, &config);
-        let (transport_b, _) = build_transport(&fact_b, &anchor, &config);
-        assert_eq!(canonical_transport(&transport_a), canonical_transport(&transport_b));
-    }
-
-    #[test]
-    fn fact_matrix_mode_config_parsing() {
-        assert!(matches!(
-            read_fact_matrix_mode(&json!({})),
-            Ok(FactMatrixMode::Vectors)
+    fn published_snapshot_survives_tag_changes_and_cold_restore() {
+        let root = std::env::temp_dir().join(format!(
+            "kbm-artifact-facts-{}-{}", std::process::id(), now_ms()
         ));
-        assert!(matches!(
-            read_fact_matrix_mode(&json!({"factMatrixMode": "vectors"})),
-            Ok(FactMatrixMode::Vectors)
-        ));
-        assert!(matches!(
-            read_fact_matrix_mode(&json!({"factMatrixMode": "pairwise"})),
-            Ok(FactMatrixMode::Pairwise)
-        ));
-        assert!(read_fact_matrix_mode(&json!({"factMatrixMode": "bogus"})).is_err());
-    }
-
-    #[test]
-    fn vectors_mode_uses_unit_dot_instead_of_pairwise_table() {
-        let rows = synthetic_rows();
-        let anchor = HashMap::new();
-        let config = json!({
-            "orderedCooccurrence": {"semanticGainEnabled": true, "semanticGainPeak": 0.65, "semanticGainSigma": 0.25}
-        });
-        // tag 10 与 20 同向（dot≈1）、与 30 正交（dot≈0）。
-        let unit = |angle: f64| -> Vec<f64> {
-            let mut v = vec![angle.cos(), angle.sin()];
-            let norm = (v[0] * v[0] + v[1] * v[1]).sqrt();
-            v.iter_mut().for_each(|x| *x /= norm);
-            v
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("test.sqlite").to_string_lossy().into_owned();
+        let (storage, _) = SqliteStorageEngine::open_and_init(&db, StorageOptions::default()).unwrap();
+        storage.submit_write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO files(id,path,diary_name,checksum,mtime,size) VALUES (1,'tagged.txt','test','h',1,1);
+                 INSERT INTO tags(id,name,vector) VALUES (1,'a',X'0000803f00000000'),(2,'b',X'000000000000803f');
+                 INSERT INTO file_tags VALUES (1,1,1),(1,2,2);"
+            ).map_err(|error| error.to_string())?;
+            Ok(WriteReceipt { operation: "fixture".into(), database_generation: 0, facts_changed: true })
+        }).unwrap();
+        let runtime = MemoRuntime::new();
+        let built = run_build(2, &runtime, &db, r#"{"modelSig":"test","effectiveConfig":{}}"#).unwrap();
+        let repeated = run_build(2, &runtime, &db, r#"{"modelSig":"test","effectiveConfig":{}}"#).unwrap();
+        assert_eq!(built.graph_generation,repeated.graph_generation);
+        assert_eq!(built.provenance_generation,repeated.provenance_generation);
+        assert_eq!(built.artifact_sig,repeated.artifact_sig);
+        let config_hash = hash_text("{}", 32);
+        let mut manifest = crate::knowledge_runtime::NativeMemoManifestLookupTask {
+            db_path: db.clone(), model_sig: "test".into(), config_hash,
         };
-        let vectors: HashMap<i64, Vec<f64>> =
-            HashMap::from([(10, unit(0.0)), (20, unit(0.0)), (30, unit(std::f64::consts::FRAC_PI_2))]);
-        let vectors_source = SemanticSource::Vectors { vectors: &vectors, low_fallback: 0.1 };
-        let fact = build_fact_matrix(&rows, &vectors_source, &anchor, &config).unwrap();
-        // 同向对的边权 = 纯 phi 结构（curve(≈1) = 0.5+0.8*exp(-(1-0.65)^2/(2*0.0625))）。
-        let aligned = fact[&10][&20];
-        // 正交对 curve(0)=0.5+0.8*exp(-0.65^2/0.125)。
-        let orthogonal = fact[&10][&30];
-        assert!(aligned > orthogonal, "aligned {} vs orthogonal {}", aligned, orthogonal);
-        // 空 pairwise 表（上游迁移后世界）→ similarity 全落 low_fallback=0.1 → curve=0.5。
-        let empty: HashMap<(i64, i64), f64> = HashMap::new();
-        let pairwise_source = SemanticSource::Pairwise { table: &empty, low_fallback: 0.1 };
-        let fact_pairwise = build_fact_matrix(&rows, &pairwise_source, &anchor, &config).unwrap();
-        assert!(fact_pairwise[&10][&20] != fact[&10][&20]);
-    }
-
-    #[test]
-    fn pairwise_mode_matches_legacy_entry_accumulation() {
-        // pairwise 显式兼容档与 v9.2 的逐边算式必须位等价（单 file 双 tag，
-        // 方向唯一、phi/curve 可手工展开）。
-        let rows = vec![
-            FileTag { file_id: 1, tag_id: 10, position: 1 },
-            FileTag { file_id: 1, tag_id: 20, position: 2 },
-        ];
-        let anchor = HashMap::new();
-        let config = json!({"orderedCooccurrence": {"semanticGainEnabled": true}});
-        let table: HashMap<(i64, i64), f64> = HashMap::from([((10, 20), 0.8)]);
-        let source = SemanticSource::Pairwise { table: &table, low_fallback: 0.1 };
-        let fact = build_fact_matrix(&rows, &source, &anchor, &config).unwrap();
-        // phi(position=1,count=2)=0.9；phi(position=2)=0.9-0.4*1/1=0.5；base=0.45。
-        // curve(0.8)=0.5+0.8*exp(-((0.8-0.65)^2)/(2*0.25^2))（峰值 0.65/σ0.25 缺省）。
-        let curve = 0.5 + 0.8 * (-((0.8 - 0.65f64).powi(2)) / (2.0 * 0.25 * 0.25)).exp();
-        let forward = 0.9f64 * 0.5 * 1.0 * curve;
-        // reverse_gain 缺省 0.42 → clamp(0.25,0.70) 不变；backward=min(0.45*0.42*curve, forward*0.95)。
-        let backward = (0.9f64 * 0.5 * 0.42 * curve).min(forward * 0.95);
-        assert_eq!(fact[&10][&20].to_bits(), forward.to_bits());
-        assert_eq!(fact[&20][&10].to_bits(), backward.to_bits());
-    }
-
-    #[test]
-    fn semantic_pairs_first_occurrence_order() {
-        let rows = synthetic_rows();
-        let pairs = semantic_pairs(&rows);
-        // 首次出现序：file1 的 (10,20)(10,30)(20,30) 之后 file2/file3 的对都已 seen。
-        assert_eq!(pairs, vec![(10, 20), (10, 30), (20, 30)]);
-        let ids = cooccurrence_tag_ids(&rows);
-        assert_eq!(ids, vec![10, 20, 30]);
-        // 窗口界外（1 tag / >100 tags）不参与。
-        let single = vec![FileTag { file_id: 9, tag_id: 99, position: 1 }];
-        assert!(semantic_pairs(&single).is_empty());
-        assert!(cooccurrence_tag_ids(&single).is_empty());
-    }
-
-    #[test]
-    fn anchor_signature_requires_geometry_row_and_matching_facts() {
-        let connection = memory_db();
-        connection
-            .execute_batch(
-                "CREATE TABLE tag_intrinsic_residuals(tag_id INTEGER, model_sig TEXT, v9_anchor_gain REAL, residual_energy REAL, raw_residual_ratio REAL, artifact_sig TEXT);
-                 CREATE TABLE tagmemo_artifacts(asset_type TEXT, model_sig TEXT, status TEXT, artifact_sig TEXT, graph_generation TEXT, updated_at INTEGER);
-                 CREATE TABLE kbm_runtime_meta(key TEXT PRIMARY KEY, value TEXT);
-                 INSERT INTO tag_intrinsic_residuals VALUES (10, 'm', 1.2, 1.2, 0.3, 'sig-intrinsic');
-                 INSERT INTO tagmemo_artifacts VALUES ('unified_geometry', 'm', 'ready', 'sig-geometry', 'facts:41', 1);
-                 INSERT INTO kbm_runtime_meta VALUES ('memo_tag_facts', '40');",
-            )
-            .unwrap();
-        // facts 指纹不匹配 → 硬拒。
-        let err = load_anchor_gains(&connection, "m", FactMatrixMode::Vectors).unwrap_err();
-        assert!(err.contains("DERIVED_DEPENDENCY_CONFLICT"), "{}", err);
-        connection
-            .execute("UPDATE kbm_runtime_meta SET value='41' WHERE key='memo_tag_facts'", [])
-            .unwrap();
-        let (gains, raw, signature) =
-            load_anchor_gains(&connection, "m", FactMatrixMode::Vectors).unwrap();
-        assert_eq!(signature, "sig-geometry");
-        assert_eq!(gains[&10], 1.2);
-        assert_eq!(raw[&10], 0.3);
-        // pairwise 档不读 unified_geometry：signature 取 intrinsic 行。
-        let (_, _, pairwise_sig) =
-            load_anchor_gains(&connection, "m", FactMatrixMode::Pairwise).unwrap();
-        assert_eq!(pairwise_sig, "sig-intrinsic");
-    }
-
-    #[test]
-    fn workspace_source_matches_in_memory_vectors_bits() {
-        // 上游 bounded_workspace_tests 的可移植子集：tags 表建 2 维 f32 LE blob，
-        // UnitVectorWorkspace::build 与 HashMap 单位向量作为 SemanticSource 必须
-        // 产出位级相同的 fact matrix（同一 normalize 口径）。
-        let rows: Vec<_> = (1..=50)
-            .flat_map(|file_id| {
-                (1..=3).map(move |position| FileTag {
-                    file_id,
-                    tag_id: file_id + position,
-                    position,
-                })
-            })
-            .collect();
-        let connection = memory_db();
-        connection
-            .execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY, vector BLOB)")
-            .unwrap();
-        for id in 1..=53_i64 {
-            let x = id as f32 * 0.013;
-            let bytes: Vec<u8> = [x.cos(), x.sin()]
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect();
-            connection
-                .execute("INSERT INTO tags VALUES (?1,?2)", params![id, bytes])
-                .unwrap();
-        }
-        let ids = cooccurrence_tag_ids(&rows);
-        let workspace = crate::memo_geometry::UnitVectorWorkspace::build(&connection, &ids, 2).unwrap();
-        // 内存版 HashMap：f32→f64 + normalize（与 workspace 同口径）。
-        let mut in_memory: HashMap<i64, Vec<f64>> = HashMap::new();
-        for id in &ids {
-            let bytes: Vec<u8> = connection
-                .query_row("SELECT vector FROM tags WHERE id=?1", [id], |row| {
-                    row.get::<_, Vec<u8>>(0)
-                })
-                .unwrap();
-            let mut vector: Vec<f64> = bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64)
-                .collect();
-            let norm = (vector[0] * vector[0] + vector[1] * vector[1]).sqrt();
-            if norm > 1e-12 {
-                vector.iter_mut().for_each(|v| *v /= norm);
-                in_memory.insert(*id, vector);
-            }
-        }
-        let config = json!({"orderedCooccurrence": {"semanticGainEnabled": true}});
-        let anchor = HashMap::new();
-        let ws_source = SemanticSource::Vectors { vectors: &workspace, low_fallback: 0.1 };
-        let mapped = build_fact_matrix(&rows, &ws_source, &anchor, &config).unwrap();
-        let mem_source = SemanticSource::Vectors { vectors: &in_memory, low_fallback: 0.1 };
-        let heap = build_fact_matrix(&rows, &mem_source, &anchor, &config).unwrap();
-        assert_eq!(mapped.len(), heap.len());
-        for (source, edges) in &heap {
-            for (target, weight) in edges {
-                assert_eq!(
-                    mapped[source][target].to_bits(),
-                    weight.to_bits(),
-                    "edge {}→{}",
-                    source,
-                    target
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn semantic_gain_formula_anchors() {
-        let vectors: HashMap<i64, Vec<f64>> = HashMap::new();
-        // 缺向量（低相似度臂）→ low_fallback=0.1 < 0.15 → semantic=0.4+0.1*1.0=0.5。
-        let rows = vec![
-            FileTag { file_id: 1, tag_id: 1, position: 1 },
-            FileTag { file_id: 1, tag_id: 2, position: 2 },
-        ];
-        let config = json!({"orderedCooccurrence": {"semanticGainEnabled": true}});
-        let source = SemanticSource::Vectors { vectors: &vectors, low_fallback: 0.1 };
-        let fact = build_fact_matrix(&rows, &source, &HashMap::new(), &config).unwrap();
-        // phi(position=1,count=2)=0.9、phi(position=2)=0.5 → base=0.45；
-        // forward = base * forward_gain(1.0) * semantic(0.5) = 0.225。
-        let expected = 0.9f64 * 0.5 * 1.0 * 0.5;
-        assert_eq!(fact[&1][&2].to_bits(), expected.to_bits());
-    }
-
-    #[test]
-    fn provenance_stable_sums_keep_file_order_and_edge_order() {
-        let rows = synthetic_rows();
-        let config = json!({});
-        let provenance = build_provenance(&rows, &config);
-        // BTreeMap 键序 = (source,target) 升序；每边 contributions 沿 file 出现序。
-        let keys: Vec<(i64, i64)> = provenance.keys().copied().collect();
-        let mut sorted_keys = keys.clone();
-        sorted_keys.sort();
-        assert_eq!(keys, sorted_keys);
-        // file1 与 file3 都贡献 (10,20)：mass 相同（position 结构同）→ 稳定求和。
-        assert_eq!(provenance[&(10, 20)].len(), 3);
+        storage.submit_write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO files(path,diary_name,checksum,mtime,size) VALUES ('plain.txt','test','plain',1,1);"
+            ).map_err(|error| error.to_string())?;
+            Ok(WriteReceipt { operation: "ordinary".into(), database_generation: 0, facts_changed: true })
+        }).unwrap();
+        runtime.clear().unwrap();
+        assert_ne!(manifest.compute().unwrap(), "null");
+        with_registered_read_transaction(&db, |connection| {
+            let loaded=crate::rivermemo_topology_v3::load_artifact_with_connection(
+                &runtime, connection, &built.artifact_sig,
+            )?;
+            assert_eq!(loaded.provenance.get(&(1,2)),Some(&vec![(1,1.0)]));
+            assert_eq!(loaded.provenance.get(&(2,1)),Some(&vec![(1,0.35)]));
+            Ok(())
+        }).unwrap();
+        storage.submit_write(|tx| {
+            tx.execute("UPDATE tags SET vector=X'000000000000803f' WHERE id=1", [])
+                .map_err(|error| error.to_string())?;
+            Ok(WriteReceipt { operation: "tag-change".into(), database_generation: 0, facts_changed: true })
+        }).unwrap();
+        runtime.clear().unwrap();
+        assert_ne!(manifest.compute().unwrap(), "null");
+        with_registered_read_transaction(&db, |connection| {
+            crate::rivermemo_topology_v3::load_artifact_with_connection(
+                &runtime, connection, &built.artifact_sig,
+            ).map(|_| ())
+        }).unwrap();
+        let status: Value = serde_json::from_str(&manifest.compute().unwrap()).unwrap();
+        assert_eq!(status["trainingTagCount"], 2);
+        assert_eq!(status["changedTagCount"], 1);
+        storage.submit_write(|tx| {
+            tx.execute_batch(
+                "UPDATE file_tags SET position=3 WHERE tag_id=2;
+                 DELETE FROM file_tags WHERE tag_id=1;"
+            ).map_err(|e| e.to_string())?;
+            Ok(WriteReceipt { operation: "relation-change".into(), database_generation: 0, facts_changed: true })
+        }).unwrap();
+        let status: Value = serde_json::from_str(&manifest.compute().unwrap()).unwrap();
+        assert_eq!(status["changedTagCount"], 2, "count unique Tags, not mutations");
+        with_registered_read_transaction(&db, |connection| {
+            crate::rivermemo_topology_v3::load_artifact_with_connection(
+                &runtime, connection, &built.artifact_sig,
+            ).map(|_| ())
+        }).unwrap();
+        storage.submit_write(|tx| {
+            tx.execute("UPDATE kbm_runtime_meta SET value='0' WHERE key='memo_tag_facts'", [])
+                .map_err(|e| e.to_string())?;
+            Ok(WriteReceipt { operation: "rollback-fixture".into(), database_generation: 0, facts_changed: false })
+        }).unwrap();
+        assert_eq!(manifest.compute().unwrap(), "null", "rollback must not reuse a future graph");
+        let error = with_registered_read_transaction(&db, |connection| {
+            crate::rivermemo_topology_v3::load_artifact_with_connection(
+                &runtime, connection, &built.artifact_sig,
+            ).map(|_| ())
+        }).unwrap_err();
+        assert!(error.contains("DERIVED_DEPENDENCY_CONFLICT"));
+        storage.submit_write(|tx| {
+            tx.execute_batch(
+                "UPDATE kbm_runtime_meta SET value='99999' WHERE key='memo_tag_facts';
+                 DELETE FROM kbm_artifact_dependencies WHERE dependency_key='memo_tag_facts';"
+            ).map_err(|e| e.to_string())?;
+            Ok(WriteReceipt { operation: "missing-dependency".into(), database_generation: 0, facts_changed: false })
+        }).unwrap();
+        assert_eq!(manifest.compute().unwrap(), "null");
+        assert!(with_registered_read_transaction(&db, |connection| {
+            crate::rivermemo_topology_v3::load_artifact_with_connection(
+                &runtime, connection, &built.artifact_sig,
+            ).map(|_| ())
+        }).unwrap_err().contains("DERIVED_DEPENDENCY_CONFLICT"));
+        storage.shutdown().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+
+#[cfg(test)]
+mod cold_restore_float_tests {
+    use super::*;
+    use crate::storage::{SqliteStorageEngine, StorageOptions, WriteReceipt};
+
+    /// Every float a cold load reads from the payload, labelled by where it is.
+    fn float_bits(artifact: &NativeArtifact) -> Vec<(String, u64)> {
+        let mut out: Vec<(String, u64)> = artifact.weights.iter().enumerate()
+            .map(|(cursor, weight)| (format!("weight[{cursor}]"), weight.to_bits())).collect();
+        out.push(("maxInbound".into(), artifact.max_inbound.to_bits()));
+        for (name, map) in [("inbound", &artifact.inbound), ("anchorGain", &artifact.anchor_gain)] {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_unstable_by_key(|(id, _)| **id);
+            out.extend(entries.into_iter().map(|(id, value)| (format!("{name}[{id}]"), value.to_bits())));
+        }
+        let mut edges: Vec<_> = artifact.provenance.iter().collect();
+        edges.sort_unstable_by_key(|(edge, _)| **edge);
+        for ((source, target), rows) in edges {
+            out.extend(rows.iter().map(|(file_id, mass)| (format!("provenance[{source}:{target}][{file_id}]"), mass.to_bits())));
+        }
+        out
+    }
+
+    /// The payload stores edge weights, inbound masses, anchor gains and
+    /// provenance masses as JSON text. A cold load must read back the bits the
+    /// build published, so that a restored graph answers exactly like the
+    /// freshly built one; serde_json needs `float_roundtrip` for that (without
+    /// it about one float in nine comes back one unit in the last place off).
+    #[test]
+    fn restored_artifact_has_published_float_bits() {
+        let root = std::env::temp_dir().join(format!(
+            "kbm-artifact-floats-{}-{}", std::process::id(), now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("test.sqlite").to_string_lossy().into_owned();
+        let (storage, _) = SqliteStorageEngine::open_and_init(&db, StorageOptions::default()).unwrap();
+        storage.submit_write(|tx| {
+            for id in 1..=40_i64 {
+                let vector: Vec<u8> = (0..4_i64)
+                    .flat_map(|axis| (((id * 7 + axis * 3) as f32) * 0.37).sin().to_le_bytes())
+                    .collect();
+                tx.execute("INSERT INTO tags(id,name,vector) VALUES (?1,?2,?3)",
+                    params![id, format!("t{id}"), vector]).map_err(|error| error.to_string())?;
+            }
+            for file_id in 1..=60_i64 {
+                tx.execute("INSERT INTO files(id,path,diary_name,checksum,mtime,size) VALUES (?1,?2,'test','h',1,1)",
+                    params![file_id, format!("f{file_id}.txt")]).map_err(|error| error.to_string())?;
+                for position in 1..=5_i64 {
+                    tx.execute("INSERT INTO file_tags VALUES (?1,?2,?3)",
+                        params![file_id, (file_id * 3 + position * position) % 40 + 1, position])
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Ok(WriteReceipt { operation: "fixture".into(), database_generation: 0, facts_changed: true })
+        }).unwrap();
+        let runtime = MemoRuntime::new();
+        let built = run_build(4, &runtime, &db, r#"{"modelSig":"test","effectiveConfig":{}}"#).unwrap();
+        let load = || with_registered_read_transaction(&db, |connection| {
+            crate::rivermemo_topology_v3::load_artifact_with_connection(&runtime, connection, &built.artifact_sig)
+        });
+        let published = load().unwrap();
+        runtime.clear().unwrap();
+        let restored = load().unwrap();
+        assert!(!Arc::ptr_eq(&published, &restored), "the second load must decode the stored payload");
+        assert_eq!(published.node_ids, restored.node_ids);
+        assert_eq!(published.row_offsets, restored.row_offsets);
+        assert_eq!(published.targets, restored.targets);
+        let (expected, actual) = (float_bits(&published), float_bits(&restored));
+        assert!(published.weights.len() >= 200 && expected.len() >= 1000);
+        assert_eq!(expected.iter().map(|(label, _)| label).collect::<Vec<_>>(),
+            actual.iter().map(|(label, _)| label).collect::<Vec<_>>());
+        let differing: Vec<&str> = expected.iter().zip(&actual)
+            .filter(|(left, right)| left.1 != right.1).map(|(left, _)| left.0.as_str()).collect();
+        assert!(differing.is_empty(), "{} of {} floats changed bits on a cold load, e.g. {:?}",
+            differing.len(), expected.len(), &differing[..differing.len().min(4)]);
+        storage.shutdown().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bounded_workspace_tests {
+    use super::*;
+
+    struct NoVectors;
+    impl UnitVectors for NoVectors {
+        fn unit_vector(&self, _: i64) -> Option<&[f64]> {
+            panic!("semantic gain disabled must not read vectors")
+        }
+    }
+
+    #[test]
+    fn mapped_workspace_matches_in_memory_vectors_bits() {
+        // Consecutive files share three Tags, so most pairs recur across files.
+        let rows: Vec<_> = (1..=300).flat_map(|file_id| {
+            (1..=4).map(move |position| FileTag {
+                file_id, tag_id: file_id + position, position,
+            })
+        }).collect();
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE tags(id INTEGER PRIMARY KEY, vector BLOB)").unwrap();
+        for id in 1..=304_i64 {
+            let x = id as f32 * 0.013;
+            let bytes: Vec<u8> = [x.cos(), x.sin()].iter().flat_map(|v| v.to_le_bytes()).collect();
+            connection.execute("INSERT INTO tags VALUES (?1,?2)", params![id, bytes]).unwrap();
+        }
+        connection.execute("UPDATE tags SET vector=zeroblob(8) WHERE id=7", []).unwrap();
+        let ids = cooccurrence_tag_ids(&rows);
+        assert_eq!(ids.len(), 303);
+        let workspace = crate::memo_geometry::UnitVectorWorkspace::build(&connection, &ids, 2).unwrap();
+        let (in_memory, _) = crate::memo_geometry::read_unit_vectors(&connection, &ids, 2).unwrap();
+        let config = json!({"orderedCooccurrence":{"semanticGainEnabled":true}});
+        let mapped = build_fact_matrix(&rows, &workspace, &HashMap::new(), &config).unwrap();
+        let heap = build_fact_matrix(&rows, &in_memory, &HashMap::new(), &config).unwrap();
+        assert_eq!(mapped.len(), heap.len());
+        for (source, edges) in &heap {
+            assert_eq!(mapped[source].len(), edges.len());
+            for (target, weight) in edges {
+                assert_eq!(mapped[source][target].to_bits(), weight.to_bits());
+            }
+        }
+        let plain = build_fact_matrix(&rows, &NoVectors, &HashMap::new(), &json!({})).unwrap();
+        assert!(!plain.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sorted_contribution_tests {
+    use super::*;
+    fn baseline_add(matrix: &mut HashMap<i64, HashMap<i64, f64>>, source: i64, target: i64, weight: f64) {
+        if source != target && weight.is_finite() && weight > 0.0 {
+            *matrix.entry(source).or_default().entry(target).or_default() += weight;
+        }
+    }
+fn baseline_fact(
+    rows: &[FileTag],
+    vectors: &dyn UnitVectors,
+    anchor_gain: &HashMap<i64, f64>,
+    config: &Value,
+) -> std::result::Result<HashMap<i64, HashMap<i64, f64>>, String> {
+    let ordered = config.get("orderedCooccurrence").unwrap_or(&Value::Null);
+    let forward_gain = number(ordered, &["forwardGain"], 1.0).max(0.0);
+    let reverse_gain = number(ordered, &["reverseGain"], 0.42).clamp(
+        number(ordered, &["minReverseGain"], 0.25),
+        number(ordered, &["maxReverseGain"], 0.70),
+    );
+    let distance_decay = number(ordered, &["distanceDecay"], 0.0).max(0.0);
+    let reverse_guard = number(ordered, &["reverseInversionGuard"], 0.95).clamp(0.0, 1.0);
+    let reverse_anchor_enabled = boolean(ordered, &["reverseAnchorBoost"], false);
+    let reverse_anchor_max = number(ordered, &["reverseAnchorMax"], 1.5).max(1.0);
+    let semantic_enabled = semantic_gain_enabled(config);
+    let semantic_peak = number(
+        ordered,
+        &["semanticGainPeak"],
+        number(ordered, &["semanticGain", "peak"], 0.65),
+    );
+    let semantic_sigma = number(
+        ordered,
+        &["semanticGainSigma"],
+        number(ordered, &["semanticGain", "sigma"], 0.25),
+    )
+    .max(0.001);
+    let low_fallback = number(
+        ordered,
+        &["semanticGainLowSimFallback"],
+        number(ordered, &["semanticGain", "lowSimFallback"], 0.1),
+    );
+
+    let semantic_gain = |left: i64, right: i64| -> f64 {
+        if !semantic_enabled {
+            return 1.0;
+        }
+        let similarity = vectors.unit_vector(left).zip(vectors.unit_vector(right))
+            .map(|(a,b)| crate::memo_geometry::dot(a,b).clamp(-1.0,1.0))
+            .unwrap_or(low_fallback);
+        if similarity < 0.15 {
+            0.4 + similarity * 1.0
+        } else {
+            0.5 + 0.8
+                * (-((similarity - semantic_peak).powi(2))
+                    / (2.0 * semantic_sigma * semantic_sigma))
+                    .exp()
+        }
+    };
+
+    // One gain per unordered Tag pair. `dot` multiplies the same two vectors in
+    // the same index order whichever comes first, so the stored value has the
+    // bits every later file would compute. Bounded by the number of fact pairs.
+    let mut pair_gains: HashMap<(i64, i64), f64> = HashMap::new();
+    let mut matrix = HashMap::new();
+    let mut offset = 0usize;
+    while offset < rows.len() {
+        let file_id = rows[offset].file_id;
+        let mut end = offset + 1;
+        while end < rows.len() && rows[end].file_id == file_id {
+            end += 1;
+        }
+        let tags = &rows[offset..end];
+        if tags.len() >= 2 && tags.len() <= 100 {
+            for left_index in 0..tags.len() {
+                for right_index in (left_index + 1)..tags.len() {
+                    let left = &tags[left_index];
+                    let right = &tags[right_index];
+                    if left.tag_id == right.tag_id {
+                        continue;
+                    }
+                    let semantic = if semantic_enabled {
+                        let pair = (left.tag_id.min(right.tag_id), left.tag_id.max(right.tag_id));
+                        *pair_gains.entry(pair)
+                            .or_insert_with(|| semantic_gain(left.tag_id, right.tag_id))
+                    } else {
+                        1.0
+                    };
+                    if left.position > 0 && right.position > 0 {
+                        let count = tags.len() as f64;
+                        let phi_left =
+                            0.9 - 0.4 * (left.position - 1).max(0) as f64 / (count - 1.0).max(1.0);
+                        let phi_right =
+                            0.9 - 0.4 * (right.position - 1).max(0) as f64 / (count - 1.0).max(1.0);
+                        let delta = (right.position - left.position).max(1) as f64;
+                        let distance = if distance_decay > 0.0 {
+                            (-distance_decay * (delta - 1.0)).exp()
+                        } else {
+                            1.0
+                        };
+                        let base = phi_left * phi_right * distance;
+                        let forward = base * forward_gain * semantic;
+                        let mut dynamic_reverse = reverse_gain;
+                        if reverse_anchor_enabled {
+                            dynamic_reverse *= anchor_gain
+                                .get(&left.tag_id)
+                                .copied()
+                                .unwrap_or(1.0)
+                                .min(reverse_anchor_max);
+                        }
+                        dynamic_reverse = dynamic_reverse.clamp(0.25, 0.70);
+                        let backward =
+                            (base * dynamic_reverse * semantic).min(forward * reverse_guard);
+                        baseline_add(&mut matrix, left.tag_id, right.tag_id, forward);
+                        baseline_add(&mut matrix, right.tag_id, left.tag_id, backward);
+                    } else {
+                        let weight = 0.7 * 0.7 * semantic;
+                        baseline_add(&mut matrix, left.tag_id, right.tag_id, weight);
+                        baseline_add(&mut matrix, right.tag_id, left.tag_id, weight);
+                    }
+                }
+            }
+        }
+        offset = end;
+    }
+    Ok(matrix)
+}
+
+fn baseline_provenance(
+    rows: &[FileTag],
+    config: &Value,
+) -> BTreeMap<(i64, i64), Vec<ProvenanceContribution>> {
+    let ordered = config.get("orderedCooccurrence").unwrap_or(&Value::Null);
+    let forward_gain = number(ordered, &["forwardGain"], 1.0).max(0.0);
+    let reverse_gain = number(ordered, &["reverseGain"], 0.35).max(0.0);
+    let distance_decay = number(ordered, &["distanceDecay"], 0.08).max(0.0);
+    let mut aggregated: BTreeMap<(i64, i64, i64), f64> = BTreeMap::new();
+
+    let mut offset = 0usize;
+    while offset < rows.len() {
+        let file_id = rows[offset].file_id;
+        let mut end = offset + 1;
+        while end < rows.len() && rows[end].file_id == file_id {
+            end += 1;
+        }
+        let tags = &rows[offset..end];
+        if tags.len() >= 2 && tags.len() <= 100 {
+            for left_index in 0..tags.len() {
+                for right_index in (left_index + 1)..tags.len() {
+                    let left = &tags[left_index];
+                    let right = &tags[right_index];
+                    if left.tag_id == right.tag_id {
+                        continue;
+                    }
+                    let delta = (right.position - left.position).max(1) as f64;
+                    let distance = (-distance_decay * (delta - 1.0).max(0.0)).exp();
+                    for (source, target, mass) in [
+                        (left.tag_id, right.tag_id, forward_gain * distance),
+                        (right.tag_id, left.tag_id, reverse_gain * distance),
+                    ] {
+                        *aggregated.entry((source, target, file_id)).or_default() += mass;
+                    }
+                }
+            }
+        }
+        offset = end;
+    }
+
+    let mut output: BTreeMap<(i64, i64), Vec<ProvenanceContribution>> = BTreeMap::new();
+    for ((source, target, file_id), mass) in aggregated {
+        output
+            .entry((source, target))
+            .or_default()
+            .push(ProvenanceContribution { file_id, mass });
+    }
+    output
+}
+
+
+    #[test]
+    fn stable_sums_preserve_order_and_initial_positive_zero() {
+        let input = vec![(2, -0.0), (1, 1e16), (1, -1e16), (2, 2.0), (1, 1.0)];
+        let result = stable_sums(input);
+        assert_eq!(result, vec![(1, 1.0), (2, 2.0)]);
+        assert_eq!(stable_sums(vec![(1, -0.0)])[0].1.to_bits(), 0.0f64.to_bits());
+        assert!(stable_sums::<i64>(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn repeated_tags_files_positions_and_excluded_files_match_baseline_bits() {
+        let mut rows = Vec::new();
+        for file_id in 1..=32 {
+            for (i, tag_id) in [3, 1, 3, 2, 1, 4].into_iter().enumerate() {
+                rows.push(FileTag { file_id, tag_id, position: if file_id % 3 == 0 { 0 } else { i as i64 + 1 } });
+            }
+        }
+        rows.extend((0..101).map(|i| FileTag { file_id: 33, tag_id: 1000+i, position: i+1 }));
+        rows.push(FileTag { file_id: 34, tag_id: 9999, position: 1 });
+        let vectors: HashMap<i64, Vec<f64>> = [(1, vec![1.0, 0.0]), (2, vec![0.0, 1.0]),
+            (3, vec![0.6, 0.8]), (4, vec![-1.0, 0.0])].into_iter().collect();
+        for config in [json!({}), json!({"orderedCooccurrence":{"semanticGainEnabled":true,"reverseAnchorBoost":true,"distanceDecay":0.08}}),
+                       json!({"orderedCooccurrence":{"forwardGain":0.0,"reverseGain":0.0}})] {
+            let anchors = [(1, 1.3), (2, 0.5)].into_iter().collect();
+            let actual = build_fact_matrix(&rows, &vectors, &anchors, &config).unwrap();
+            let expected = baseline_fact(&rows, &vectors, &anchors, &config).unwrap();
+            assert_eq!(actual.len(), expected.len());
+            for (source, edges) in &expected {
+                assert_eq!(actual[source].len(), edges.len());
+                for (target, weight) in edges { assert_eq!(actual[source][target].to_bits(), weight.to_bits()); }
+            }
+            let actual = build_provenance(&rows, &config);
+            let expected = baseline_provenance(&rows, &config);
+            assert_eq!(actual.len(), expected.len());
+            for (edge, values) in &expected {
+                assert_eq!(actual[edge].len(), values.len());
+                for (a,b) in actual[edge].iter().zip(values) {
+                    assert_eq!(a.file_id,b.file_id); assert_eq!(a.mass.to_bits(),b.mass.to_bits());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod parallel_gain_tests {
+    use super::*;
+    #[test]
+    fn thread_setting_defaults_and_invalid_values() {
+        for text in [None, Some(""), Some("0"), Some("-1"), Some("oops"), Some("99999999999999999999999999")] {
+            assert_eq!(configured_build_threads(text, 20), 8);
+            assert_eq!(configured_build_threads(text, 2), 2);
+        }
+        assert_eq!(configured_build_threads(Some("1"), 20), 1);
+        assert_eq!(configured_build_threads(Some("2"), 20), 2);
+        assert_eq!(configured_build_threads(Some("8"), 20), 8);
+        assert_eq!(configured_build_threads(None, 0), 1);
+    }
+    #[test]
+    fn first_operand_order_duplicates_and_file_limits() {
+        let mut rows = vec![FileTag{file_id:1,tag_id:3,position:1},FileTag{file_id:1,tag_id:1,position:2},
+            FileTag{file_id:1,tag_id:3,position:3},FileTag{file_id:2,tag_id:1,position:1},
+            FileTag{file_id:2,tag_id:3,position:2},FileTag{file_id:3,tag_id:9,position:1}];
+        rows.extend((0..101).map(|i|FileTag{file_id:4,tag_id:100+i,position:i}));
+        assert_eq!(semantic_pairs(&rows), vec![(3,1)]);
+        assert!(semantic_pairs(&[]).is_empty());
+    }
+    #[test]
+    fn parallel_gains_match_sequential_bits_at_one_two_eight_threads() {
+        let pairs: Vec<_> = (1..=1200).map(|i|(i,i+1)).collect();
+        let gain = |a:i64,b:i64| {
+            let left: Vec<_> = (0..3072).map(|i|((a+i) as f64*0.013).sin()).collect();
+            let right: Vec<_> = (0..3072).map(|i|((b+i) as f64*0.017).cos()).collect();
+            crate::memo_geometry::dot(&left,&right)
+        };
+        let expected: Vec<_> = pairs.iter().map(|&(a,b)|gain(a,b).to_bits()).collect();
+        for n in [1,2,8] {
+            let actual: Vec<_> = evaluate_pair_gains(&pairs,&gain,n).into_iter().map(f64::to_bits).collect();
+            assert_eq!(actual,expected);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "memo_workspace_build_tests.rs"]
+mod workspace_build_tests;
+
+
+#[cfg(test)]
+#[path = "warped_lifecycle_tests.rs"]
+mod warped_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "memo_local_reuse_tests.rs"]
+mod local_reuse_tests;
