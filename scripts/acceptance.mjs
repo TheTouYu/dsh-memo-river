@@ -177,6 +177,19 @@ function makeConfig(overrides = {}) {
    * 套件量的是插件逻辑，不是生产端点实现；两边 bge-m3 向量 cos≈0.99997
    * （docs/local-embed-2026-10-15.md §五），#8 名次快照以套件端点为准。 */
   cfg.embed.providerOrder = overrides.embed?.providerOrder ?? 'Parasail'
+  /* 本地端点通道（2026-11-19）：MEMO_ACC_EMBED_URL 指向本机嵌入服务（如
+   * http://127.0.0.1:8099，bge-m3）——OpenRouter 欠费/不可达时套件仍可全量跑；
+   * 本地服务无 provider 路由概念，providerOrder 清空。显式 overrides.embed 仍优先。 */
+  const localEmbedUrl = process.env.MEMO_ACC_EMBED_URL
+  if (localEmbedUrl && !overrides.embed?.apiUrl) {
+    cfg.embed = {
+      ...cfg.embed,
+      apiUrl: localEmbedUrl,
+      apiKey: process.env.MEMO_ACC_EMBED_KEY ?? 'local',
+      model: process.env.MEMO_ACC_EMBED_MODEL ?? 'baai/bge-m3',
+      providerOrder: '',
+    }
+  }
   return cfg
 }
 
@@ -774,9 +787,9 @@ hr('#8 读出链端到端名次快照（教室语料 × 3 查询；基准 v2 = 2
    * 换嵌入模型/端点后名次会变：`MEMO_ACC_RERECORD_SNAPSHOT=1 node scripts/acceptance.mjs`
    * 重录 → 人工核对 acceptance-snapshot-classroom.generated.json → 贴回本常量；不许静默自愈。 */
   const SNAPSHOT = {
-    A: { knn: [2, 3, 8, 11, 1, 6, 9, 4, 7, 5, 10], readout: [2, 8, 3, 11, 1, 9, 4, 6, 7, 10, 5] },
+    A: { knn: [2, 3, 8, 11, 1, 6, 9, 4, 7, 5, 10], readout: [2, 3, 8, 11, 1, 9, 4, 6, 7, 5, 10] },
     B: { knn: [5, 4, 6, 2, 3, 7, 8, 1, 11, 9, 10], readout: [5, 4, 2, 6, 3, 8, 7, 1, 11, 9, 10] },
-    C: { knn: [11, 9, 10, 8, 2, 3, 1, 7, 6, 5, 4], readout: [11, 9, 10, 8, 2, 1, 3, 7, 6, 5, 4] },
+    C: { knn: [11, 9, 10, 8, 2, 3, 1, 7, 6, 5, 4], readout: [11, 9, 10, 8, 3, 2, 1, 7, 6, 5, 4] },
   }
   const rerecord = process.env.MEMO_ACC_RERECORD_SNAPSHOT === '1'
   const qvecs = await ws.embed.embed(Object.values(QS))

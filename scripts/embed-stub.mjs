@@ -22,7 +22,9 @@
  */
 import { createServer } from 'node:http'
 
-const DIM = 3072
+// 维度跟生产一致（config.env VECTORDB_DIMENSION=1024，bge-m3 原生维；
+// 2026-10-15 全库迁 1024 后此常量滞留 3072 → 铺台桩路 embed-dim-mismatch 崩，2026-11-19 修）。
+const DIM = 1024
 
 /** FNV-1a 32bit。 */
 function fnv1a(str) {

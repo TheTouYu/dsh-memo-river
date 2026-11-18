@@ -48,26 +48,19 @@ export interface NativeVexusIndex {
     queryVector: Float32Array,
     ghostVectors: Float32Array,
   ): Promise<MemoPipelineResult>
-  rerankMemoDtsc(dbPath: string, artifactSig: string, inputJson: string): Promise<string>
+  rerankMemoDtsc?(dbPath: string, artifactSig: string, inputJson: string): Promise<string>
   rerankRivermemoTopologyV3(dbPath: string, artifactSig: string, inputJson: string): Promise<string>
-  /** EPA 基底：Rust 侧只读计算（暂存内存）→ publishEpaBasisCache 短写落库。 */
-  computeEpaBasis(dbPath: string, clusterCount: number, maxBasisDim: number): Promise<unknown>
-  publishEpaBasisCache(dbPath: string): unknown
-  /** V7/V9.1 矩阵内生残差预计算。 */
-  computeIntrinsicResiduals(
-    dbPath: string,
-    maxSvdRank?: number | null,
-    minNeighbors?: number | null,
-    modelSig?: string | null,
-    effectiveConfigJson?: string | null,
-  ): Promise<unknown>
-  /** V8.2 Tag 成对语义距离预计算（增量）。 */
-  computePairwiseSimilarities(
-    dbPath: string,
-    modelSig: string,
-    minSimilarity?: number | null,
-    fullRebuild?: boolean | null,
-  ): Promise<unknown>
+  /** P4/V5：统一几何任务（AGS 锥几何 + EPA 基底缓存 + 内生残差 + 锥诊断一体产出）。
+   * 取代 P3 的 computeEpaBasis/publishEpaBasisCache/computeIntrinsicResiduals 三连
+   * （上游 e22aede 已全部退役，VexusIndex 原型面只剩 computeMemoGeometry）。 */
+  computeMemoGeometry(dbPath: string, modelSig: string, configJson: string): Promise<{
+    success: boolean
+    artifactSig: string
+    algorithmVersion: string
+    computedCount?: number
+    skippedCount?: number
+    kEff?: number
+  }>
   memoRuntimeStats?(): unknown
   clearMemoRuntime?(): void
   stats?(): unknown
@@ -75,6 +68,9 @@ export interface NativeVexusIndex {
 
 export interface NativeKnowledgeRuntime {
   registerDiaryIndex(diaryName: string, diaryIndex: NativeVexusIndex): void
+  /** P4/ABI2：把 dbPath 注册进 Rust 侧 storage registry（openAndInitStore）。
+   * 上游 2.0+ 所有库访问走注册制，未注册返回 KNOWLEDGE_STORE_NOT_REGISTERED。 */
+  openAndInitStore?(dbPath: string, optionsJson: string): unknown
   unregisterDiaryIndex?(diaryName: string): void
   listDiaryIndices?(): unknown
   stats?(): unknown
@@ -299,6 +295,26 @@ export class MemoEngine {
     const store = this.options.store
 
     const tagIndex = new mod.VexusIndex(dim, 512)
+    // P4/ABI2：注册必须在 recoverFromSqlite **之前**——V5（2.0+）的检索恢复本身
+    // 走 storage registry（with_registered_read_transaction），未注册一律
+    // KNOWLEDGE_STORE_NOT_REGISTERED。options 形态照抄上游 KnowledgeBaseManager.js:440-455。
+    // v9.2 旧内核没有 openAndInitStore（typeof 守卫跳过），其 recover 免注册直查，两代兼容。
+    let runtime: NativeKnowledgeRuntime | null = null
+    if (typeof mod.NativeKnowledgeRuntime === 'function') {
+      const candidate = new mod.NativeKnowledgeRuntime(tagIndex)
+      if (typeof candidate.openAndInitStore === 'function') {
+        candidate.openAndInitStore(
+          store.dbPath,
+          JSON.stringify({
+            readPoolSize: 4,
+            mmapSize: 64 * 1024 * 1024,
+            busyTimeoutMs: 10000,
+            schemaVersion: 2,
+          }),
+        )
+      }
+      runtime = candidate
+    }
     await this.withNative(() => tagIndex.recoverFromSqlite(store.dbPath, 'tags', null))
 
     const diaryIndex = new mod.VexusIndex(dim, 128)
@@ -313,8 +329,7 @@ export class MemoEngine {
     this.diaryIndex = diaryIndex
     this.loadedChunkIds = ids
 
-    if (typeof mod.NativeKnowledgeRuntime === 'function') {
-      const runtime = new mod.NativeKnowledgeRuntime(tagIndex)
+    if (runtime) {
       runtime.registerDiaryIndex(this.options.diaryName, diaryIndex)
       this.runtime = runtime
     } else {
@@ -412,42 +427,30 @@ export class MemoEngine {
         }
 
     if (!unchanged || force) {
-      // EPA 基底：先只读计算，再短租约发布
+      // P4/V5：统一几何任务一体产出（EPA 基底缓存 + 内生残差 + 锥诊断）。
+      // 旧三连 computeEpaBasis/publishEpaBasisCache/computeIntrinsicResiduals 与
+      // computePairwiseSimilarities 已随上游 e22aede 退役（VexusIndex 原型面不再导出）。
+      // 配置形态照抄上游 TagMemoEngine.js:240（kb.geometry 优先，缺省回退 intrinsicResidual）。
+      const kb = this.kbm as { geometry?: unknown; intrinsicResidual?: unknown }
+      const geometryConfig = JSON.stringify(kb.geometry ?? kb.intrinsicResidual ?? {})
       try {
-        const epa = (await this.withNative(() => ti.computeEpaBasis(dbPath, 64, 64))) as {
-          basisCount?: number
+        const geo = await this.withNative(() =>
+          ti.computeMemoGeometry(dbPath, modelSig, geometryConfig),
+        )
+        const ok = geo?.success !== false
+        assets.epaBasis = { ok, basisCount: geo?.kEff ?? 0, error: ok ? null : 'geometry-failed' }
+        assets.residuals = {
+          ok,
+          computed: geo?.computedCount ?? 0,
+          skipped: geo?.skippedCount ?? 0,
+          error: ok ? null : 'geometry-failed',
         }
-        const published = this.tagIndex.publishEpaBasisCache(dbPath) as { success?: boolean; basisCount?: number }
-        assets.epaBasis = {
-          ok: published?.success !== false,
-          basisCount: published?.basisCount ?? epa?.basisCount ?? 0,
-          error: published?.success === false ? 'publish-failed' : null,
-        }
+        assets.pairwise = { ok: true, stored: 0, error: null } // V5 退役（vectors 档唯一路径）
       } catch (e) {
-        assets.epaBasis = { ok: false, basisCount: 0, error: String((e as Error)?.message ?? e) }
-      }
-      // 内生残差（V7/V9.1）
-      try {
-        const res = (await this.withNative(() =>
-          ti.computeIntrinsicResiduals(dbPath, null, null, modelSig, null),
-        )) as {
-          computedCount?: number
-          skippedCount?: number
-        }
-        assets.residuals = { ok: true, computed: res?.computedCount ?? 0, skipped: res?.skippedCount ?? 0, error: null }
-      } catch (e) {
-        assets.residuals = { ok: false, computed: 0, skipped: 0, error: String((e as Error)?.message ?? e) }
-      }
-      // Tag 成对语义距离（V8.2，增量）
-      try {
-        const pair = (await this.withNative(() =>
-          ti.computePairwiseSimilarities(dbPath, modelSig, null, false),
-        )) as {
-          storedCount?: number
-        }
-        assets.pairwise = { ok: true, stored: pair?.storedCount ?? 0, error: null }
-      } catch (e) {
-        assets.pairwise = { ok: false, stored: 0, error: String((e as Error)?.message ?? e) }
+        const message = String((e as Error)?.message ?? e)
+        assets.epaBasis = { ok: false, basisCount: 0, error: message }
+        assets.residuals = { ok: false, computed: 0, skipped: 0, error: message }
+        assets.pairwise = { ok: true, stored: 0, error: null }
       }
     }
 
@@ -504,7 +507,8 @@ export class MemoEngine {
     return { metadata, enhancedVector: result.enhancedVector, elapsedMs: Date.now() - t0 }
   }
 
-  /** ③-a DTSC 读出。 */
+  /** ③-a DTSC 读出（P4/V5：上游已删除 dtsc 模块，内核不再导出此方法——
+   * 保留调用面给旧 mode 参数一个清晰报错，而不是 "not a function"）。 */
   async rerankDtsc(
     observationHandle: string,
     queryGeometryState: unknown,
@@ -512,10 +516,14 @@ export class MemoEngine {
   ): Promise<Record<string, unknown>> {
     if (!this.tagIndex || !this.artifact) throw new Error('artifact-not-ready')
     const ti = this.tagIndex
+    if (typeof ti.rerankMemoDtsc !== 'function') {
+      throw new Error('dtsc-readout-retired: 上游 V5（e22aede）已删除 dtsc 模块，请用 mode=topology_v3')
+    }
     const activeSig = this.artifact.artifactSig
+    const rerankMemoDtsc = ti.rerankMemoDtsc.bind(ti)
     const raw = await this.gate(() =>
       this.withNative(() =>
-        ti.rerankMemoDtsc(
+        rerankMemoDtsc(
           this.options.store.dbPath,
           activeSig,
           JSON.stringify({
