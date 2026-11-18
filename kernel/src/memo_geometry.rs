@@ -38,11 +38,20 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-const ALGORITHM: &str = "unified_geometry_ags_t4_cached_reorth";
+#[path = "memo_local_reuse.rs"]
+mod local_reuse;
+
+const ALGORITHM: &str = "unified_geometry_cone_t6_ags_selected_qr_nnls";
+const LOCAL_MAX_NEIGHBORS: f64 = 96.0;
+const LOCAL_MAX_BASIS: f64 = 24.0;
+const GLOBAL_STAR_NEIGHBORS: f64 = 48.0;
 
 pub(crate) struct AgsTrace {
     pub(crate) picked: Vec<(i64, f64)>,
     pub(crate) basis: Vec<Vec<f64>>,
+    /// Unconstrained Explain residual norm; read only by test invariants.
+    /// Production residuals come from the NNLS cone solve, not from AGS.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) residual_norm: Option<f64>,
 }
 
@@ -285,14 +294,19 @@ fn direct_axes_core(
                 continue;
             }
             active[write_pos] = i;
+            write_pos += 1;
+            // Eligibility is local to this round: another selected axis may
+            // change this candidate's conditional target projection.
+            if target.is_some() && signed.abs() < min_gain {
+                continue;
+            }
             let score = signed.abs() * orth * candidates[i].prior;
             if best.as_ref().is_none_or(|(j, old)| {
                 score > *old || (score == *old && candidates[i].id < candidates[*j].id)
             }) {
                 best = Some((i, score));
-                best_pos = write_pos;
+                best_pos = write_pos - 1;
             }
-            write_pos += 1;
         }
         active.truncate(write_pos);
         let Some((i, _)) = best else { break };
@@ -318,6 +332,11 @@ fn direct_axes_core(
         let coefficient = target.map(|t| dot(t, &axis));
         let gain = coefficient.map_or(norm, f64::abs);
         if gain < min_gain {
+            // Reorthogonalization can move an estimated Explain gain below
+            // the threshold. Reject this winner, not all remaining candidates.
+            if target.is_some() {
+                continue;
+            }
             break;
         }
         if let Some(coefficient) = coefficient {
@@ -635,6 +654,98 @@ struct LocalResult {
     status: &'static str,
     count: usize,
     residual: f64,
+    gain: Option<f64>,
+    selected_ids: Vec<i64>,
+    diagnostics: Option<crate::memo_nnls::Diagnostics>,
+}
+
+type Edge = (i64, usize, f64);
+type Adjacency = BTreeMap<i64, BTreeMap<i64, f64>>;
+
+fn prepare_neighbors(ids: &[i64], vectors: &UnitVectorWorkspace, mut adjacency: Adjacency,
+                     max_keep: usize) -> (Vec<usize>, Vec<Edge>, Vec<f64>) {
+    // Pre-truncated, pre-sorted Slot-CSR: filter invalid vectors and truncate to `max_keep` once!
+    let mut offsets = vec![0];
+    let mut edges: Vec<(i64, usize, f64)> = Vec::new();
+    let mut support = Vec::with_capacity(ids.len());
+    let cmp_edge = |a: &(i64, usize, f64), b: &(i64, usize, f64)| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0));
+    for id in ids {
+        let neighbors = adjacency.remove(id).unwrap_or_default();
+        support.push(neighbors.values().sum::<f64>());
+        if vectors.contains_key(id) {
+            let mut valid_edges: Vec<(i64, usize, f64)> = neighbors
+                .into_iter()
+                .filter_map(|(nid, w)| vectors.slot(&nid).map(|slot| (nid, slot, w)))
+                .collect();
+            if valid_edges.len() > max_keep {
+                valid_edges.select_nth_unstable_by(max_keep - 1, cmp_edge);
+                valid_edges.truncate(max_keep);
+            }
+            valid_edges.sort_unstable_by(cmp_edge);
+            edges.extend(valid_edges);
+        }
+        offsets.push(edges.len());
+    }
+    (offsets, edges, support)
+}
+
+struct LocalSolver {
+    min_neighbors: usize,
+    max_basis: usize,
+    min_gain: f64,
+}
+
+impl LocalSolver {
+    fn solve(&self, id: &i64, vectors: &UnitVectorWorkspace, neighbors: &[Edge],
+             weight: &impl Fn(f64) -> f64) -> std::result::Result<LocalResult, String> {
+        let mut result = LocalResult {
+            id:*id,status:"failed",count:0,residual:1.0,
+            gain:None,selected_ids:Vec::new(),diagnostics:None,
+        };
+        let Some(target_slot) = vectors.slot(id) else { return Ok(result) };
+        let target = vectors.get_by_slot(target_slot);
+        let neighbor_vecs: Vec<&[f64]> = neighbors.iter().map(|&(_, slot, _)| vectors.get_by_slot(slot)).collect();
+        let raw_dots = dot_neighbors(target, &neighbor_vecs);
+        let mut candidates = Vec::with_capacity(neighbors.len());
+        let mut refs = Vec::with_capacity(neighbors.len());
+        let mut diagonal = Vec::with_capacity(neighbors.len());
+        let mut correlations = Vec::with_capacity(neighbors.len());
+        for (&(nid, slot, w), (&v, raw_dot)) in neighbors.iter().zip(neighbor_vecs.iter().zip(raw_dots)) {
+            let sim = raw_dot.clamp(-1.0, 1.0);
+            let semantic = weight(sim);
+            if semantic > 0.0 {
+                candidates.push(AgsCandidate { id: nid, prior: w.ln_1p() * semantic });
+                refs.push(v);
+                diagonal.push(vectors.norm_by_slot(slot));
+                correlations.push(raw_dot);
+            }
+        }
+        result.count = candidates.len();
+        if result.count < self.min_neighbors { result.status="insufficient_neighbors"; return Ok(result); }
+        let trace = direct_axes_core(
+            AgsTarget::Explain(target),
+            &candidates,
+            &refs,
+            Some(&diagonal),
+            Some(&correlations),
+            self.max_basis,
+            self.min_gain,
+            false,
+        );
+        // Preserve original generator identities. Never constrain Q-axis
+        // coefficients or claim optimality over unselected neighbors.
+        let selected: Vec<_> = trace.picked.iter().map(|(selected_id, _)| {
+            let slot = candidates.iter().position(|c| c.id == *selected_id)
+                .expect("AGS returned an unknown candidate");
+            (*selected_id, refs[slot])
+        }).collect();
+        let cone = crate::memo_nnls::solve_qr_f64(target, &selected)
+            .map_err(|error| format!("Local Cone-AGS Tag {id}: {error}"))?;
+        result.residual=cone.diagnostics.residual_ratio.sqrt().clamp(0.0,1.0);
+        result.selected_ids=selected.iter().map(|(id,_)|*id).collect();
+        result.diagnostics=Some(cone.diagnostics);
+        result.status="computed"; Ok(result)
+    }
 }
 
 impl GeometryTask {
@@ -646,16 +757,32 @@ impl GeometryTask {
         let config: Value = serde_json::from_str(&self.config_json).map_err(|e| e.to_string())?;
         let local = config.get("local").unwrap_or(&config);
         let global = config.get("global").unwrap_or(&Value::Null);
-        let max_neighbors = number(local, "maxNeighbors", 48.0, 1.0, 256.0) as usize;
+        let max_neighbors = number(local, "maxNeighbors", LOCAL_MAX_NEIGHBORS, 1.0, 256.0) as usize;
         let min_neighbors = number(local, "minNeighbors", 3.0, 1.0, 256.0) as usize;
-        let max_basis = number(local, "maxBasis", 4.0, 1.0, 32.0) as usize;
+        let max_basis = number(local, "maxBasis", LOCAL_MAX_BASIS, 1.0, 32.0) as usize;
         let min_gain = number(local, "minGain", 0.015, 0.0, 1.0);
         let decay = number(local, "positionDecay", 0.15, 0.0, 4.0);
         let k_max = number(global, "kMax", 32.0, 1.0, 128.0) as usize;
         let k_sem = number(global, "kSem", 8.0, 1.0, k_max as f64) as usize;
+        // Global theme geometry must not inherit the Local Explain budget.
+        let star_neighbors = number(global, "starNeighbors", GLOBAL_STAR_NEIGHBORS, 1.0, 256.0) as usize;
+        let max_keep = max_neighbors.max(star_neighbors);
+        let gate = local.get("semanticGate").unwrap_or(local);
+        let gate_enabled = gate
+            .get("enabled")
+            .or_else(|| gate.get("semanticEnabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let peak = number(gate, "peak", number(local, "semanticPeak", 0.65, -1.0, 1.0), -1.0, 1.0);
+        let sigma = number(gate, "sigma", number(local, "semanticSigma", 0.25, 0.02, 2.0), 0.02, 2.0);
+        let floor = number(gate, "floor", number(local, "semanticFloor", 0.35, 0.0, 1.0), 0.0, 1.0);
+        let hard_floor = number(gate, "hardFloor", number(local, "semanticHardFloor", -1.0, -1.0, 1.0), -1.0, 1.0);
+        let solver = LocalSolver { min_neighbors, max_basis, min_gain };
+        let semantic_gain = |sim| semantic_weight(sim, gate_enabled, peak, sigma, floor, hard_floor);
         let mut signature_config = config.clone();
         if let Some(object) = signature_config.as_object_mut() {
             object.remove("forceRecompute");
+            object.remove("reuseAppendOnly");
         }
         let config_hash = hash(signature_config.to_string().as_bytes());
 
@@ -673,6 +800,22 @@ impl GeometryTask {
             )
             .unwrap_or_else(|_| "0".to_string());
         let graph_generation = format!("facts:{facts}");
+        let force = config
+            .get("forceRecompute")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let append = !force && config.get("reuseAppendOnly").and_then(Value::as_bool) == Some(true);
+        let file_ids = local_reuse::files(&read_connection).map_err(|e| e.to_string())?;
+        let file_events = local_reuse::file_events(&read_connection);
+        let previous = if append {
+            local_reuse::Previous::load(&read_connection, &self.model_sig, &config_hash, &file_ids, file_events)
+        } else {
+            None
+        };
+        let mut prior_digest = Sha256::new();
+        let mut targets = std::collections::HashSet::new();
+        let mut added_members = 0i64;
+        let mut consistent = true;
         {
             let mut statement = read_connection
                 .prepare("SELECT id,name,vector_version FROM tags ORDER BY id")
@@ -688,10 +831,16 @@ impl GeometryTask {
                 .map_err(|e| e.to_string())?;
             for row in rows {
                 let (id, name, version) = row.map_err(|e| e.to_string())?;
-                digest.update(id.to_le_bytes());
-                digest.update(version.to_le_bytes());
-                digest.update((name.len() as u64).to_le_bytes());
-                digest.update(name.as_bytes());
+                let feed = |d: &mut Sha256| {
+                    d.update(id.to_le_bytes());
+                    d.update(version.to_le_bytes());
+                    d.update((name.len() as u64).to_le_bytes());
+                    d.update(name.as_bytes());
+                };
+                feed(&mut digest);
+                if previous.as_ref().is_some_and(|p| p.rows.contains_key(&id)) {
+                    feed(&mut prior_digest);
+                }
                 ids.push(id);
                 names.insert(id, name);
             }
@@ -725,9 +874,21 @@ impl GeometryTask {
                 let fid: i64 = row.get(0).map_err(|e| e.to_string())?;
                 let id: i64 = row.get(1).map_err(|e| e.to_string())?;
                 let pos: i64 = row.get(2).map_err(|e| e.to_string())?;
-                digest.update(fid.to_le_bytes());
-                digest.update(id.to_le_bytes());
-                digest.update(pos.to_le_bytes());
+                let feed = |d: &mut Sha256| {
+                    d.update(fid.to_le_bytes());
+                    d.update(id.to_le_bytes());
+                    d.update(pos.to_le_bytes());
+                };
+                feed(&mut digest);
+                if let Some(prior) = &previous {
+                    if prior.baseline.files.binary_search(&fid).is_ok() {
+                        feed(&mut prior_digest);
+                    } else {
+                        consistent &= file_ids.binary_search(&fid).is_ok() && names.contains_key(&id);
+                        targets.insert(id);
+                        added_members += 1;
+                    }
+                }
                 if file != Some(fid) {
                     flush(&tags, &mut adjacency);
                     tags.clear();
@@ -740,21 +901,10 @@ impl GeometryTask {
             }
             flush(&tags, &mut adjacency);
         }
-        let content = format!("{:x}", digest.finalize());
-        let signature = hash(
-            format!(
-                "{}|{}|{}|{}|{}",
-                ALGORITHM, self.dimensions, self.model_sig, config_hash, content
-            )
-            .as_bytes(),
-        );
-        let force = config
-            .get("forceRecompute")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let cached: Option<Value> = if force {
-            None
-        } else {
+        let sign = |d: Sha256| hash(format!("{}|{}|{}|{}|{:x}",
+            ALGORITHM, self.dimensions, self.model_sig, config_hash, d.finalize()).as_bytes());
+        let signature = sign(digest);
+        let cached: Option<Value> = if !force && !append {
             use rusqlite::OptionalExtension;
             let raw: Option<String> = read_connection
                 .query_row(
@@ -768,6 +918,8 @@ impl GeometryTask {
                 .map_err(|e| e.to_string())?;
             raw.and_then(|s| serde_json::from_str::<Value>(&s).ok())
                 .filter(|v| v["artifactSig"].as_str() == Some(signature.as_str()))
+        } else {
+            None
         };
         if let Some(cache) = &cached {
             // 缓存命中不装工作区（上游同：empty workspace）。
@@ -792,90 +944,46 @@ impl GeometryTask {
         drop(read_connection);
         let load_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-        // ── 预截断预排序 Slot-CSR（上游 08c155d：过滤无效向量、截断到 max_keep 各一次）──
-        let star_neighbors = number(global, "starNeighbors", max_neighbors as f64, 1.0, 256.0) as usize;
-        let max_keep = max_neighbors.max(star_neighbors);
-        let mut offsets = vec![0];
-        let mut edges: Vec<(i64, usize, f64)> = Vec::new();
-        let mut support = Vec::with_capacity(ids.len());
-        let cmp_edge = |a: &(i64, usize, f64), b: &(i64, usize, f64)| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0));
-        for id in &ids {
-            let neighbors = adjacency.remove(id).unwrap_or_default();
-            support.push(neighbors.values().sum::<f64>());
-            if vectors.contains_key(id) {
-                let mut valid_edges: Vec<(i64, usize, f64)> = neighbors
-                    .into_iter()
-                    .filter_map(|(nid, w)| vectors.slot(&nid).map(|slot| (nid, slot, w)))
-                    .collect();
-                if valid_edges.len() > max_keep {
-                    valid_edges.select_nth_unstable_by(max_keep - 1, cmp_edge);
-                    valid_edges.truncate(max_keep);
-                }
-                valid_edges.sort_unstable_by(cmp_edge);
-                edges.extend(valid_edges);
-            }
-            offsets.push(edges.len());
-        }
-        drop(adjacency);
-        let gate = local.get("semanticGate").unwrap_or(local);
-        let gate_enabled = gate
-            .get("enabled")
-            .or_else(|| gate.get("semanticEnabled"))
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        let peak = number(gate, "peak", number(local, "semanticPeak", 0.65, -1.0, 1.0), -1.0, 1.0);
-        let sigma = number(gate, "sigma", number(local, "semanticSigma", 0.25, 0.02, 2.0), 0.02, 2.0);
-        let floor = number(gate, "floor", number(local, "semanticFloor", 0.35, 0.0, 1.0), 0.0, 1.0);
-        let hard_floor = number(gate, "hardFloor", number(local, "semanticHardFloor", -1.0, -1.0, 1.0), -1.0, 1.0);
-        // 局部相位（上游 par_iter：每 id 独立闭包无归约，我方串行 map 位级等价）。
+        // ── Append-only 增量复用（上游 e22aede）：先前行仅在输入完全连续时存活 ──
+        // 只有纯文件新增才够格；先前签名已校验全部原 id/版本/有序成员关系（含超长文件），
+        // facts 差值否决中间任何编辑（含删除重插）。
+        let rows = previous.filter(|p| {
+            consistent && sign(prior_digest) == p.baseline.signature
+                && facts.parse::<i64>().ok().and_then(|n| n.checked_sub(p.facts))
+                    == Some(ids.len() as i64 - p.rows.len() as i64 + added_members)
+                && ids.iter().all(|id| match p.rows.get(id) {
+                    Some(row) => vectors.contains_key(id) == (row.status != "failed"),
+                    None => targets.contains(id),
+                })
+        })
+        .map(|p| p.rows)
+        .unwrap_or_default();
+        let mut rows = rows;
+        rows.retain(|id, _| !targets.contains(id));
+        let reused = rows.len();
+
+        // ── 预截断预排序 Slot-CSR（上游 08c155d，e22aede 提为函数）──
+        let (offsets, edges, support) = prepare_neighbors(&ids, &vectors, adjacency, max_keep);
+        // 局部相位（上游 par_iter filter_map：复用行跳过重解；我方串行位级等价）。
         let results: Vec<LocalResult> = ids
             .iter()
             .enumerate()
-            .map(|(i, id)| {
-                let mut result = LocalResult { id: *id, status: "failed", count: 0, residual: 1.0 };
-                let Some(target_slot) = vectors.slot(id) else { return result };
-                let target = vectors.get_by_slot(target_slot);
+            .filter_map(|(i, id)| {
+                if rows.contains_key(id) {
+                    return None;
+                }
                 let end = offsets[i + 1].min(offsets[i] + max_neighbors);
-                let neighbors = &edges[offsets[i]..end];
-                let neighbor_vecs: Vec<&[f64]> =
-                    neighbors.iter().map(|&(_, slot, _)| vectors.get_by_slot(slot)).collect();
-                let raw_dots = dot_neighbors(target, &neighbor_vecs);
-                let mut candidates = Vec::with_capacity(neighbors.len());
-                let mut refs = Vec::with_capacity(neighbors.len());
-                let mut diagonal = Vec::with_capacity(neighbors.len());
-                let mut correlations = Vec::with_capacity(neighbors.len());
-                for (&(nid, slot, w), (&v, raw_dot)) in
-                    neighbors.iter().zip(neighbor_vecs.iter().zip(raw_dots))
-                {
-                    let sim = raw_dot.clamp(-1.0, 1.0);
-                    let semantic = semantic_weight(sim, gate_enabled, peak, sigma, floor, hard_floor);
-                    if semantic > 0.0 {
-                        candidates.push(AgsCandidate { id: nid, prior: w.ln_1p() * semantic });
-                        refs.push(v);
-                        diagonal.push(vectors.norm_by_slot(slot));
-                        correlations.push(raw_dot);
-                    }
-                }
-                result.count = candidates.len();
-                if result.count < min_neighbors {
-                    result.status = "insufficient_neighbors";
-                    return result;
-                }
-                let trace = direct_axes_core(
-                    AgsTarget::Explain(target),
-                    &candidates,
-                    &refs,
-                    Some(&diagonal),
-                    Some(&correlations),
-                    max_basis,
-                    min_gain,
-                    false,
-                );
-                result.residual = trace.residual_norm.unwrap_or(1.0).clamp(0.0, 1.0);
-                result.status = "computed";
-                result
+                Some(solver.solve(id, &vectors, &edges[offsets[i]..end], &semantic_gain))
             })
-            .collect();
+            .collect::<std::result::Result<Vec<_>, String>>()?;
+        let results = if reused > 0 {
+            rows.extend(results.into_iter().map(|row| (row.id, row)));
+            ids.iter()
+                .map(|id| rows.remove(id).expect("local row for each Tag"))
+                .collect()
+        } else {
+            results
+        };
         let local_ms = started.elapsed().as_secs_f64() * 1000.0 - load_ms;
 
         // ── 全局 Span 相：星团中心化 + 膝点截断 ──
@@ -932,15 +1040,7 @@ impl GeometryTask {
                     .iter()
                     .zip(neighbor_vecs.iter().zip(raw_dots))
                     .filter_map(|(&(nid, _, w), (&v, raw_dot))| {
-                        let weight = w.ln_1p()
-                            * semantic_weight(
-                                raw_dot.clamp(-1.0, 1.0),
-                                gate_enabled,
-                                peak,
-                                sigma,
-                                floor,
-                                hard_floor,
-                            );
+                        let weight = w.ln_1p() * semantic_gain(raw_dot.clamp(-1.0, 1.0));
                         (weight > 0.0).then_some((v, weight))
                     })
                     .collect();
@@ -1029,6 +1129,20 @@ impl GeometryTask {
         let gamma = number(anchor, "gamma", number(local, "v9AnchorGamma", 1.0, 0.1, 8.0), 0.1, 8.0);
         let low = number(anchor, "min", number(local, "v9AnchorMin", 0.5, 0.0, 4.0), 0.0, 4.0);
         let high = number(anchor, "max", number(local, "v9AnchorMax", 2.0, 0.0, 8.0), 0.0, 8.0);
+        // Separate from EPA: local diagnostics do not change Global math fields.
+        // This single snapshot is replaced atomically with residuals and metadata.
+        let cone_diagnostics = json!({
+            "schema": "memo-local-cone-diagnostics-v1",
+            "artifactSig": signature, "algorithmVersion": ALGORITHM,
+            "dictionary": "ags-selected-original-tag-columns",
+            "maxNeighbors": max_neighbors, "maxSelectedColumns": max_basis,
+            "rows": results.iter().map(|r| json!({
+                "tagId": r.id, "status": r.status, "neighborCount": r.count,
+                "selectedTagIds": r.selected_ids, "nnls": r.diagnostics,
+            })).collect::<Vec<_>>(),
+        })
+        .to_string();
+        let diagnostics_hash = hash(cone_diagnostics.as_bytes());
 
         // ── 写相：单事务（keepalive 由 open_readwrite 保证，BUG-0930 契约）──
         let mut write_connection = open_readwrite(&self.db_path)?;
@@ -1039,7 +1153,16 @@ impl GeometryTask {
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS kbm_runtime_meta(key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL); \
                  INSERT OR IGNORE INTO kbm_runtime_meta(key,value) VALUES \
-                 ('schema_version','1'),('database_generation','0'),('derived_geometry','0');",
+                 ('schema_version','1'),('database_generation','0'),('derived_geometry','0'),('memo_file_events','0'); \
+                 CREATE TRIGGER IF NOT EXISTS trg_memo_file_insertion AFTER INSERT ON files BEGIN \
+                   UPDATE kbm_runtime_meta SET value=CAST(value AS INTEGER)+1 WHERE key='memo_file_events'; \
+                 END; \
+                 CREATE TRIGGER IF NOT EXISTS trg_memo_file_id AFTER UPDATE OF id ON files WHEN OLD.id IS NOT NEW.id BEGIN \
+                   UPDATE kbm_runtime_meta SET value=CAST(value AS INTEGER)+1 WHERE key='memo_file_events'; \
+                 END; \
+                 CREATE TRIGGER IF NOT EXISTS trg_memo_file_deletion AFTER DELETE ON files BEGIN \
+                   UPDATE kbm_runtime_meta SET value=CAST(value AS INTEGER)+1 WHERE key='memo_file_events'; \
+                 END;",
             )
             .map_err(|e| e.to_string())?;
         // execute_batch 不支持参数绑定，memo_tag_facts 单独带参写入。
@@ -1071,7 +1194,9 @@ impl GeometryTask {
                 .map_err(|e| e.to_string())?;
             for r in results {
                 if r.status == "computed" {
-                    let gain = (base + scale * r.residual.powf(gamma)).clamp(low.min(high), low.max(high));
+                    let gain = r
+                        .gain
+                        .unwrap_or_else(|| (base + scale * r.residual.powf(gamma)).clamp(low.min(high), low.max(high)));
                     values
                         .execute(params![r.id, gain, r.count as i64, r.residual, self.model_sig, signature, ALGORITHM, config_hash])
                         .map_err(|e| e.to_string())?;
@@ -1093,6 +1218,12 @@ impl GeometryTask {
             .map_err(|e| e.to_string())?;
         transaction
             .execute(
+                "INSERT OR REPLACE INTO kv_store(key,value) VALUES ('memo_local_cone_diagnostics',?1)",
+                params![cone_diagnostics],
+            )
+            .map_err(|e| e.to_string())?;
+        transaction
+            .execute(
                 "INSERT OR REPLACE INTO tagmemo_artifacts \
                  (artifact_sig,asset_type,model_sig,graph_generation,algorithm_version,config_hash,effective_config,status,created_at,updated_at) \
                  VALUES (?1,'unified_geometry',?2,?7,?3,?4,?5,'ready',?6,?6)",
@@ -1104,6 +1235,8 @@ impl GeometryTask {
                 "DELETE FROM tagmemo_artifacts WHERE asset_type='unified_geometry' AND artifact_sig!=?1",
                 params![signature],
             )
+            .map_err(|e| e.to_string())?;
+        local_reuse::publish(&transaction, &signature, file_ids, file_events, diagnostics_hash)
             .map_err(|e| e.to_string())?;
         transaction
             .execute(
@@ -1130,7 +1263,7 @@ impl GeometryTask {
             coverage,
             elapsed_ms: elapsed,
             phase_summary: format!(
-                "load={load_ms:.3};local={local_ms:.3};global={global_ms:.3};coverage={coverage_ms:.3};delete={delete_ms:.3};insert={insert_ms:.3};metadata={metadata_ms:.3}"
+                "load={load_ms:.3};local={local_ms:.3};localReused={reused};global={global_ms:.3};coverage={coverage_ms:.3};delete={delete_ms:.3};insert={insert_ms:.3};metadata={metadata_ms:.3}"
             ),
         })
     }
@@ -1150,6 +1283,82 @@ impl Task for GeometryTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explain_filters_low_gain_before_prior_competition_and_reconsiders() {
+        let target = [1.0, 0.0];
+        let low = [0.01, (1.0_f64 - 0.0001).sqrt()];
+        let useful = [0.6, 0.8];
+        let candidates = [
+            AgsCandidate { id: 1, prior: 1000.0 },
+            AgsCandidate { id: 2, prior: 1.0 },
+        ];
+        let refs: [&[f64]; 2] = [&low, &useful];
+        let trace = anchored_gs(AgsTarget::Explain(&target), &candidates, &refs, 2, 0.015);
+        assert_eq!(trace.picked.iter().map(|p| p.0).collect::<Vec<_>>(), vec![2, 1]);
+        assert!(trace.residual_norm.unwrap() < 1e-12);
+        // Exercise production's cached diagonal/correlation path as well.
+        let diag: Vec<_> = refs.iter().map(|v| dot(v, v)).collect();
+        let corr = dot_neighbors(&target, &refs);
+        let cached = direct_axes_core(AgsTarget::Explain(&target), &candidates,
+            &refs, Some(&diag), Some(&corr), 2, 0.015, false);
+        assert_eq!(trace.picked, cached.picked);
+        assert_eq!(trace.residual_norm, cached.residual_norm);
+    }
+
+    #[test]
+    fn explain_gain_boundary_negative_projection_and_id_tie() {
+        let target = [0.125, 0.0];
+        let vectors: [&[f64]; 2] = [&[-1.0, 0.0], &[1.0, 0.0]];
+        let candidates = [
+            AgsCandidate { id: 9, prior: 1.0 },
+            AgsCandidate { id: 3, prior: 1.0 },
+        ];
+        let trace = anchored_gs(AgsTarget::Explain(&target), &candidates, &vectors, 2, 0.125);
+        assert_eq!(trace.picked, vec![(3, 0.125)]);
+        let negative = anchored_gs(AgsTarget::Explain(&target), &candidates[..1], &vectors[..1], 2, 0.125);
+        assert_eq!(negative.picked, vec![(9, 0.125)]);
+        let stopped = anchored_gs(AgsTarget::Explain(&target), &candidates, &vectors, 2, 0.126);
+        assert!(stopped.picked.is_empty());
+        assert_eq!(stopped.residual_norm, Some(0.125));
+    }
+
+    #[test]
+    fn span_keeps_winner_based_min_gain_stop() {
+        // Span must retain its old score/winner/threshold order, even when
+        // another candidate would independently exceed the norm threshold.
+        let candidates = [
+            AgsCandidate { id: 1, prior: 1000.0 },
+            AgsCandidate { id: 2, prior: 1.0 },
+        ];
+        let vectors: [&[f64]; 2] = [&[0.01, 0.0], &[0.0, 0.2]];
+        let trace = anchored_gs(AgsTarget::Span, &candidates, &vectors, 2, 0.015);
+        assert!(trace.picked.is_empty());
+        assert!(trace.basis.is_empty());
+    }
+
+    #[test]
+    fn local_budget_24_axes_and_96_candidates_preserves_global_defaults() {
+        let vectors: Vec<Vec<f64>> = (0..96).map(|i| {
+            let mut v = vec![0.0; 96]; v[i] = 1.0; v
+        }).collect();
+        let refs: Vec<_> = vectors.iter().map(Vec::as_slice).collect();
+        let candidates: Vec<_> = (0..96).map(|id| AgsCandidate { id, prior: 1.0 }).collect();
+        let target = vec![1.0 / 96.0_f64.sqrt(); 96];
+        let short = anchored_gs(AgsTarget::Explain(&target), &candidates, &refs, 4, 0.015);
+        let long = anchored_gs(AgsTarget::Explain(&target), &candidates, &refs, LOCAL_MAX_BASIS as usize, 0.015);
+        assert_eq!(long.picked.len(), 24);
+        assert_eq!(short.picked, long.picked[..4]);
+        assert!((short.residual_norm.unwrap().powi(2) - 92.0 / 96.0).abs() < 1e-12);
+        assert!((long.residual_norm.unwrap().powi(2) - 72.0 / 96.0).abs() < 1e-12);
+        assert_eq!(LOCAL_MAX_NEIGHBORS, 96.0);
+        assert_eq!(GLOBAL_STAR_NEIGHBORS, 48.0);
+        let config: Value = serde_json::from_str(include_str!("../../rag_params.json")).unwrap();
+        let geometry = &config["KnowledgeBaseManager"]["geometry"];
+        assert_eq!(geometry["local"]["maxNeighbors"], 96);
+        assert_eq!(geometry["local"]["maxBasis"], 24);
+        assert_eq!(geometry["global"]["starNeighbors"], 48);
+    }
 
     #[test]
     fn prefix_nested_and_orthogonal() {
@@ -1451,6 +1660,8 @@ mod task_tests {
         connection
             .execute_batch(
                 "CREATE TABLE tags(id INTEGER PRIMARY KEY, name TEXT, vector BLOB, vector_version INTEGER NOT NULL DEFAULT 1); \
+                 CREATE TABLE files(id INTEGER PRIMARY KEY); \
+                 INSERT INTO files(id) VALUES (1); \
                  CREATE TABLE file_tags(file_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, position INTEGER NOT NULL DEFAULT 0); \
                  CREATE TABLE kv_store(key TEXT PRIMARY KEY, value TEXT); \
                  CREATE TABLE tagmemo_artifacts(artifact_sig TEXT PRIMARY KEY, asset_type TEXT, model_sig TEXT, graph_generation TEXT, algorithm_version TEXT, config_hash TEXT, effective_config TEXT, status TEXT DEFAULT 'ready', created_at INTEGER, updated_at INTEGER); \
@@ -1488,9 +1699,64 @@ mod task_tests {
             config_json: r#"{"forceRecompute":true,"global":{"minSupport":0,"residualExponent":0,"kSem":2}}"#.into(),
         };
         let first = task.run().unwrap();
-        assert_eq!(first.algorithm_version, "unified_geometry_ags_t4_cached_reorth");
+        assert_eq!(first.algorithm_version, "unified_geometry_cone_t6_ags_selected_qr_nnls");
         assert_eq!(first.vector_fallback_count, 6);
         assert!(first.k_eff > 0);
+        // 局部锥诊断快照与残差表逐行对得上（上游 e22aede task_tests 断言块，
+        // storage::with_registered_read 适配为我方 Connection::open 只读）。
+        {
+            let connection = Connection::open(&db).unwrap();
+            let raw: String = connection
+                .query_row(
+                    "SELECT value FROM kv_store WHERE key='memo_local_cone_diagnostics'",
+                    [], |row| row.get(0),
+                )
+                .unwrap();
+            let diagnostics: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(diagnostics["artifactSig"].as_str(), Some(first.artifact_sig.as_str()));
+            assert_eq!(diagnostics["algorithmVersion"].as_str(), Some(ALGORITHM));
+            let mut vectors = HashMap::new();
+            {
+                let mut statement = connection.prepare("SELECT id,vector FROM tags ORDER BY id").unwrap();
+                let rows = statement
+                    .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)))
+                    .unwrap();
+                for row in rows {
+                    let (id, bytes) = row.unwrap();
+                    let mut v: Vec<f64> = bytes
+                        .chunks_exact(4)
+                        .map(|b| f32::from_le_bytes(b.try_into().unwrap()) as f64)
+                        .collect();
+                    normalize(&mut v);
+                    vectors.insert(id, v);
+                }
+            }
+            for row in diagnostics["rows"].as_array().unwrap() {
+                assert_eq!(row["status"], "computed");
+                let id = row["tagId"].as_i64().unwrap();
+                let selected: Vec<_> = row["selectedTagIds"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| {
+                        let id = value.as_i64().unwrap();
+                        (id, vectors[&id].as_slice())
+                    })
+                    .collect();
+                let reference = crate::memo_nnls::solve_f64(&vectors[&id], &selected).unwrap();
+                let (residual, gain, signature): (f64, f64, String) = connection
+                    .query_row(
+                        "SELECT raw_residual_ratio,v9_anchor_gain,artifact_sig FROM tag_intrinsic_residuals WHERE tag_id=?1",
+                        [id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .unwrap();
+                assert_eq!(signature, first.artifact_sig);
+                assert!((residual - reference.diagnostics.residual_ratio.sqrt()).abs() < 2e-8);
+                assert!((gain - (0.75 + 1.25 * residual).clamp(0.5, 2.0)).abs() < 1e-12);
+                assert!(row["nnls"]["dualViolation"].as_f64().unwrap() <= 2e-8);
+            }
+        }
         assert!(first.coverage.windows(2).all(|w| w[0] <= w[1]));
         assert!(first.coverage.iter().all(|c| *c <= 1.0));
         // 第二次同 force 跑：签名与缓存逐字节一致（去掉 timestamp）。
