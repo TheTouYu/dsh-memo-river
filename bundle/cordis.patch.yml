@@ -60,14 +60,14 @@
                   # 3.8e-4~7.3e-4（逐位不可复现，见 scripts/probe-embed-provider-routing.mjs）。
                   # 本地端点（Windows 8091 / Linux 8099）不吃这个键。
                   embed:
-                    apiUrl: !!js process.platform === 'win32' ? 'http://127.0.0.1:8091' : 'http://127.0.0.1:8099'
+                    apiUrl: !!js "process.platform === 'win32' ? 'http://127.0.0.1:8091' : 'http://127.0.0.1:8099'"
                     apiKey: 'local'
-                    model: !!js process.platform === 'win32' ? 'Qwen3-Embedding-0.6B' : 'baai/bge-m3'
+                    model: !!js "process.platform === 'win32' ? 'Qwen3-Embedding-0.6B' : 'baai/bge-m3'"
                     dimension: 1024
-                    fallbackApiUrl: !!js process.platform === 'win32' ? '' : 'https://openrouter.ai/api'
-                    fallbackApiKey: !!js process.platform === 'win32' ? '' : (process.env.TAG_EMBED_KEY || '')
-                    fallbackModel: !!js process.platform === 'win32' ? '' : 'baai/bge-m3'
-                    fallbackProviderOrder: !!js process.platform === 'win32' ? '' : 'Parasail'
+                    fallbackApiUrl: !!js "process.platform === 'win32' ? '' : 'https://openrouter.ai/api'"
+                    fallbackApiKey: !!js "process.platform === 'win32' ? '' : (process.env.TAG_EMBED_KEY || '')"
+                    fallbackModel: !!js "process.platform === 'win32' ? '' : 'baai/bge-m3'"
+                    fallbackProviderOrder: !!js "process.platform === 'win32' ? '' : 'Parasail'"
                   inject:
                     gate: true
                     k: 3
@@ -84,14 +84,14 @@
                     embedTimeoutMs: 15000
                   native:
                     kernel: 'reimpl'
-                    vcpRoot: !!js process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river' : '/home/h/app/VCPToolBox'
+                    vcpRoot: !!js "process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river' : '/home/h/app/VCPToolBox'"
 
           - id: tool-bash
             name: '@deepseek-ai/dsh-tool-bash'
-            disabled: !!js process.platform === 'win32'
+            disabled: !!js "process.platform === 'win32'"
           - id: tool-pwsh
             name: '@deepseek-ai/dsh-tool-pwsh'
-            disabled: !!js process.platform !== 'win32'
+            disabled: !!js "process.platform !== 'win32'"
           - id: tool-fs
             name: '@deepseek-ai/dsh-tool-fs'
             config:
@@ -108,7 +108,7 @@
             name: '@deepseek-ai/dsh-skill-filesystem'
             config:
               customSkillDirs:
-                - !!js process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('@deepseek-ai/dsh-agent-preset/package.json')), 'skills')
+                - !!js "process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('@deepseek-ai/dsh-agent-preset/package.json')), 'skills')"
           - id: tool-skill
             name: '@deepseek-ai/dsh-tool-skill'
           - id: command-goal
