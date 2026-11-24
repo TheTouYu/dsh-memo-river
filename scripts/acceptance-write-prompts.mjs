@@ -56,8 +56,8 @@ const execStub = (cwd) => ({ agent: { session: { id: 'write-prompts-acceptance',
 
 /* ── 前置：自建自净 /tmp 工作区 ── */
 const paths = workspacePaths(CWD, BUCKET)
-rmSync(CWD, { recursive: true, force: true })
-rmSync(paths.root, { recursive: true, force: true })
+safeRm(CWD)
+safeRm(paths.root)
 mkdirSync(CWD, { recursive: true })
 
 hr(`票 12 写侧提示词 · acceptance-write-prompts（工作区 ${CWD}）`)
@@ -168,11 +168,13 @@ const exec = (args) => writeTool.execute(args, execStub(CWD))
   ])
 }
 
-rmSync(CWD, { recursive: true, force: true })
-rmSync(paths.root, { recursive: true, force: true })
+safeRm(CWD)
+safeRm(paths.root)
 server.close()
 
 hr('结果')
 const pass = results.filter((r) => r.pass).length
 line(`${pass}/${results.length} PASS`)
 process.exit(pass === results.length ? 0 : 1)
+
+import { safeRm } from './safe-rm.mjs'

@@ -20,7 +20,7 @@ import { KnowledgeStore } from '../lib/store.js'
 
 /* 仓库根按脚本自身位置解析（迁移后仓库不在 /home/h/app/dsh-memo-river 了）。 */
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const VCP = '/home/h/app/VCPToolBox'
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const RIVER_SRC = join(VCP, 'dailynote', '教室建模归档')
 const ISLAND_SRC = join(ROOT, '.selftest', 'island-corpus')
 const ISLAND_STAGE = join(ROOT, '.selftest', 'island-corpus')
@@ -42,7 +42,7 @@ const run = async (args) => {
 for (const ws of [WS_RIVER, WS_ISLAND, WS_WRITE]) {
   const paths = workspacePaths(ws.cwd, ws.bucket)
   if (existsSync(paths.root)) {
-    rmSync(paths.root, { recursive: true, force: true })
+    safeRm(paths.root)
     console.log(`清理 ${paths.root}`)
   }
   mkdirSync(ws.cwd, { recursive: true })
@@ -95,3 +95,5 @@ await run(['scripts/import-dailynote.mjs', '--force', '--src', ISLAND_SRC, '--cw
 console.log('\n✅ 三个工作区已就绪')
 
 try { await stub?.stop() } catch { /* 已关 */ }
+
+import { safeRm } from './safe-rm.mjs'

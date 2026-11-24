@@ -124,7 +124,7 @@ hr(`票 11 委托写入引导 · acceptance-delegation-guidance`)
   check('G-6', '只读红线：scan/coldTagSuggest 不改目录（文件数与 mtime 逐项不变）', t6, [
     `files=${after.length}`,
   ])
-  rmSync(dir, { recursive: true, force: true })
+  safeRm(dir)
 }
 
 hr(`结果：${pass}/${pass + fail} PASS`)
@@ -135,3 +135,5 @@ function hr(title) {
   console.log(title)
   console.log('═'.repeat(96))
 }
+
+import { safeRm } from './safe-rm.mjs'

@@ -30,7 +30,7 @@ const { resolveEmbed } = await import('../lib/workspace.js')
 const { workspacePaths } = await import('../lib/runtime.js')
 const { EmbedClient, WRITE_EMBED_OPTIONS, WRITE_EMBED_TIMEOUT_MS, WRITE_EMBED_RETRIES } = await import('../lib/embed.js')
 
-const VCP = '/home/h/app/VCPToolBox'
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const config = ConfigSchema({ bucket: '', native: { vcpRoot: VCP } })
 const paths = workspacePaths(join(tmpdir(), 'memo-river-embedlat-probe'), '')
 let resolved = resolveEmbed(config, paths)
@@ -317,4 +317,6 @@ if (single.length) {
   console.log(`单文本（注入形态）全样本：p99=${Math.round(p)}ms → 超 3s 概率约 ${(over(single, INJECT_BUDGET_MS) / single.length * 100).toFixed(1)}%`)
 }
 for (const c of [c1, c2]) { try { await c.flushCache() } catch { /* 收尾尽力而为 */ } }
-rmSync(TMP, { recursive: true, force: true })
+safeRm(TMP)
+
+import { safeRm } from './safe-rm.mjs'

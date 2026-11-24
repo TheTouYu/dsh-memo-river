@@ -224,7 +224,7 @@ const buildQueryField = (texts, lookback) => {
 }
 
 /* ════════ ③ 嵌入（resolveEmbed 同款回退链） ════════ */
-const { loadEnvFile } = await import(join(LIB, 'runtime.js'))
+const { loadEnvFile } = await import(pathToFileURL(join(LIB, 'runtime.js')).href)
 const env = loadEnvFile(`${VCP_ROOT}/config.env`, {})
 const EMBED_CFG = {
   apiUrl: env.API_URL ?? '',
@@ -310,15 +310,15 @@ for (const suffix of ['.json', '.bin']) {
   if (existsSync(src)) cpSync(src, embCacheCopy.replace(/\.json$/, suffix))
 }
 // 当 oracle 用：生产缓存的键集合（走新载入器，兼容 .bin / 旧 JSON）
-const { loadEmbCacheEntries } = await import(join(LIB, 'emb-cache.js'))
+const { loadEmbCacheEntries } = await import(pathToFileURL(join(LIB, 'emb-cache.js')).href)
 const prodCacheKeys = existsSync(PROD_EMB_CACHE)
   ? new Set(loadEmbCacheEntries(PROD_EMB_CACHE, EMBED_CFG.dimension).keys())
   : new Set()
 
-const { KnowledgeStore } = await import(join(LIB, 'store.js'))
-const { EmbedClient, cosine } = await import(join(LIB, 'embed.js'))
-const { MemoEngine } = await import(join(LIB, 'native.js'))
-const { recall } = await import(join(LIB, 'recall.js'))
+const { KnowledgeStore } = await import(pathToFileURL(join(LIB, 'store.js')).href)
+const { EmbedClient, cosine } = await import(pathToFileURL(join(LIB, 'embed.js')).href)
+const { MemoEngine } = await import(pathToFileURL(join(LIB, 'native.js')).href)
+const { recall } = await import(pathToFileURL(join(LIB, 'recall.js')).href)
 const embed = new EmbedClient({ ...EMBED_CFG, cachePath: embCacheCopy })
 
 /* ════════ ④ 夜语料重建 ════════ */
@@ -746,6 +746,10 @@ if (!args.includes('--keep')) {
   try {
     embed.close?.()
   } catch {}
-  rmSync(work, { recursive: true, force: true })
+  safeRm(work)
   if (!quiet) console.error('[6/6] /tmp 工作目录已清理（--keep 保留）')
 }
+
+import { pathToFileURL } from 'node:url'
+
+import { safeRm } from './safe-rm.mjs'

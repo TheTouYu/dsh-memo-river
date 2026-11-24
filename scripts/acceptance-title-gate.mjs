@@ -25,7 +25,7 @@ import { workspacePaths } from '../lib/runtime.js'
 await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；每次重铺）
 
 
-const ROOT = new URL('..', import.meta.url).pathname
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const CWD = join(tmpdir(), `memo-river-title-${process.pid}`)
 const BUCKET = '标题闸门测试'
 const TAGS = '标题闸门, 写入测试, 种子语料'
@@ -63,8 +63,8 @@ const execStub = (cwd) => ({ agent: { session: { id: 'title-gate-acceptance', he
 
 /* ── 前置：自建自净 /tmp 工作区（嵌入离线：vcpRoot 指向不存在路径 → config.env 不存在 → 不可调用） ── */
 const paths = workspacePaths(CWD, BUCKET)
-rmSync(CWD, { recursive: true, force: true })
-rmSync(paths.root, { recursive: true, force: true })
+safeRm(CWD)
+safeRm(paths.root)
 mkdirSync(CWD, { recursive: true })
 
 hr(`票 02 标题闸门 · acceptance-title-gate（工作区 ${CWD}）`)
@@ -178,11 +178,15 @@ try {
   ])
 } finally {
   ws.store.close?.()
-  rmSync(CWD, { recursive: true, force: true })
-  rmSync(paths.root, { recursive: true, force: true })
+  safeRm(CWD)
+  safeRm(paths.root)
 }
 
 hr('结果')
 const failed = results.filter((r) => !r.pass)
 line(`${results.length - failed.length}/${results.length} PASS${failed.length ? `；FAIL：${failed.map((f) => f.id).join(', ')}` : ''}`)
 process.exit(failed.length ? 1 : 0)
+
+import { fileURLToPath } from 'node:url'
+
+import { safeRm } from './safe-rm.mjs'

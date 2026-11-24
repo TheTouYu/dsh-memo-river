@@ -22,8 +22,8 @@ import { workspacePaths } from '../lib/runtime.js'
 await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；每次重铺）
 
 
-const ROOT = new URL('..', import.meta.url).pathname
-const VCP = '/home/h/app/VCPToolBox'
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 // 写入测试桶：草稿与体检日志都落在这里，不碰河流语料的对照基准
 const WS = join(ROOT, '.selftest', '教室建模写入测试')
 const BUCKET = '教室建模写入测试'
@@ -245,3 +245,5 @@ const pass = results.filter((r) => r.pass).length
 for (const r of results) line(`  ${r.pass ? '✅' : '❌'}  ${r.id}  ${r.title}`)
 line(`\n  通过 ${pass}/${results.length}`)
 process.exit(pass === results.length ? 0 : 1)
+
+import { fileURLToPath } from 'node:url'

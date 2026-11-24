@@ -16,8 +16,8 @@ import { join } from 'node:path'
 import { apply, Config as ConfigSchema } from '../lib/index.js'
 import { BLOCK_CLOSE } from '../lib/render.js'
 
-const ROOT = new URL('..', import.meta.url).pathname
-const VCP = '/home/h/app/VCPToolBox'
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const WS_RIVER = join(ROOT, '.selftest', '教室建模归档')
 const BUCKET_RIVER = '教室建模归档'
 const ITER = Number(process.argv[2] ?? 6)
@@ -110,3 +110,5 @@ for (let i = 1; i <= ITER; i++) {
 }
 console.log(`\n结果：${ITER} 迭代，并发==串行 破坏 ${flips}/${ITER} ｜ 用时 ${((Date.now() - t0) / 1000).toFixed(1)}s`)
 console.log(`（构建核对请另行 grep -c SPLIT-BATCH lib/recall.js）`)
+
+import { fileURLToPath } from 'node:url'

@@ -93,15 +93,15 @@ console.log(`stub 嵌入端点 http://127.0.0.1:${PORT}/v1/embeddings`)
 /* ── 准备桶副本 ── */
 function setupBucket(name, cacheFrom) {
   const wsDir = join(SCRATCH, 'ws', name)
-  rmSync(wsDir, { recursive: true, force: true })
+  safeRm(wsDir)
   mkdirSync(wsDir, { recursive: true })
   return wsDir
 }
 
-const { Config } = await import(join(LIB, 'config.js'))
-const { workspacePaths } = await import(join(LIB, 'runtime.js'))
-const { acquireWorkspace } = await import(join(LIB, 'workspace.js'))
-const { writeDiaryCore } = await import(join(LIB, 'tools.js'))
+const { Config } = await import(pathToFileURL(join(LIB, 'config.js')).href)
+const { workspacePaths } = await import(pathToFileURL(join(LIB, 'runtime.js')).href)
+const { acquireWorkspace } = await import(pathToFileURL(join(LIB, 'workspace.js')).href)
+const { writeDiaryCore } = await import(pathToFileURL(join(LIB, 'tools.js')).href)
 const { DatabaseSync } = await import('node:sqlite')
 
 function configFor() {
@@ -116,7 +116,7 @@ function configFor() {
 /** 把 genshin 真库拷成某个 cwd 的桶；可选把真缓存按形态放进桶。整桶先清空（幂等复跑）。 */
 function seedBucket(cwd, cacheMode) {
   const paths = workspacePaths(cwd, 'whaleprobe')
-  rmSync(paths.root, { recursive: true, force: true }) // 桶根也清（否则上一跑的 .bin/.md 残留）
+  safeRm(paths.root) // 桶根也清（否则上一跑的 .bin/.md 残留）
   mkdirSync(paths.root, { recursive: true })
   cpSync(GENSHIN_DB, paths.dbPath)
   for (const s of ['-wal', '-shm']) if (existsSync(`${GENSHIN_DB}${s}`)) cpSync(`${GENSHIN_DB}${s}`, `${paths.dbPath}${s}`)
@@ -218,3 +218,7 @@ for (const [k, v] of Object.entries(out)) {
 console.log(`本进程 VmHWM=${hwmMb().toFixed(0)}MB`)
 server.close()
 process.exit(0)
+
+import { pathToFileURL } from 'node:url'
+
+import { safeRm } from './safe-rm.mjs'

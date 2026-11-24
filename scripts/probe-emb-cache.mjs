@@ -12,14 +12,27 @@
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync, copyFileSync, existsSync, readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const ROOT = '/home/h/dsh-plugins/dsh-memo-river/.scratch/whale-fix'
-const LIB = '/home/h/dsh-plugins/dsh-memo-river/lib'
-const { EmbCache, embCacheBinPath, scanLegacyJson } = await import(join(LIB, 'emb-cache.js'))
-const { EmbedClient } = await import(join(LIB, 'embed.js'))
+// 平台可移植：工作根走 os.tmpdir()（PROBE_ROOT 可覆盖）；LIB 从脚本自身位置解析。
+const ROOT = process.env.PROBE_ROOT || join(tmpdir(), 'memo-emb-probe')
+const LIB = process.env.PROBE_LIB || fileURLToPath(new URL('../lib', import.meta.url))
+const LIB_ENTRY = pathToFileURL(join(LIB, 'emb-cache.js')).href
+const { EmbCache, embCacheBinPath, scanLegacyJson } = await import(LIB_ENTRY)
+const { EmbedClient } = await import(pathToFileURL(join(LIB, 'embed.js')).href)
 
-const hwmMb = () => Math.round(Number(/VmHWM:\s+(\d+)/.exec(readFileSync('/proc/self/status', 'utf8'))[1]) / 1024)
-const rssMb = () => Math.round(Number(/VmRSS:\s+(\d+)/.exec(readFileSync('/proc/self/status', 'utf8'))[1]) / 1024)
+/** Linux 才有 /proc/self/status；其它平台返回 null（相关判据自动跳过而不是假红）。 */
+const procKb = (key) => {
+  try {
+    const m = new RegExp(`${key}:\\s+(\\d+)`).exec(readFileSync('/proc/self/status', 'utf8'))
+    return m ? Math.round(Number(m[1]) / 1024) : null
+  } catch {
+    return null
+  }
+}
+const hwmMb = () => procKb('VmHWM')
+const rssMb = () => procKb('VmRSS')
 let pass = 0
 let fail = 0
 const ok = (name, cond, extra = '') => {
@@ -36,7 +49,7 @@ const ok = (name, cond, extra = '') => {
 console.log('\n[A] 旧 JSON 透明迁移')
 {
   const dir = join(ROOT, 'a')
-  rmSync(dir, { recursive: true, force: true })
+  safeRm(dir)
   mkdirSync(dir, { recursive: true })
   const jsonPath = join(dir, 'emb-cache.json')
   const dim = 8
@@ -62,7 +75,7 @@ console.log('\n[A] 旧 JSON 透明迁移')
 console.log('\n[B] 追加写 + 去抖 + 重载读回')
 {
   const dir = join(ROOT, 'b')
-  rmSync(dir, { recursive: true, force: true })
+  safeRm(dir)
   mkdirSync(dir, { recursive: true })
   const jsonPath = join(dir, 'emb-cache.json')
   const dim = 4
@@ -86,7 +99,7 @@ console.log('\n[B] 追加写 + 去抖 + 重载读回')
 console.log('\n[C] 预算逐出（LRU）')
 {
   const dir = join(ROOT, 'c')
-  rmSync(dir, { recursive: true, force: true })
+  safeRm(dir)
   mkdirSync(dir, { recursive: true })
   const jsonPath = join(dir, 'emb-cache.json')
   const dim = 8 // 32B/条
@@ -103,7 +116,7 @@ console.log('\n[C] 预算逐出（LRU）')
 console.log('\n[D] 尾部截断自愈')
 {
   const dir = join(ROOT, 'd')
-  rmSync(dir, { recursive: true, force: true })
+  safeRm(dir)
   mkdirSync(dir, { recursive: true })
   const jsonPath = join(dir, 'emb-cache.json')
   const dim = 4
@@ -128,7 +141,7 @@ console.log('\n[D] 尾部截断自愈')
   c1.dispose(); c2.dispose(); c3.dispose()
   // 畸形文件 → 改名留政
   const dir2 = join(ROOT, 'd2')
-  rmSync(dir2, { recursive: true, force: true })
+  safeRm(dir2)
   mkdirSync(dir2, { recursive: true })
   const bad = join(dir2, 'emb-cache.bin')
   writeFileSync(bad, Buffer.from('not-a-cache-file-at-all-really'))
@@ -145,7 +158,7 @@ console.log('\n[D] 尾部截断自愈')
 console.log('\n[G] 无头记录日志 → 补头自愈')
 {
   const dir = join(ROOT, 'g')
-  rmSync(dir, { recursive: true, force: true })
+  safeRm(dir)
   mkdirSync(dir, { recursive: true })
   const jsonPath = join(dir, 'emb-cache.json')
   const binPath = embCacheBinPath(jsonPath)
@@ -178,7 +191,7 @@ console.log('\n[G] 无头记录日志 → 补头自愈')
 console.log('\n[H] EEXIST 但无头（并发 writeFile 的 0 字节窗口）')
 {
   const dir = join(ROOT, 'h')
-  rmSync(dir, { recursive: true, force: true })
+  safeRm(dir)
   mkdirSync(dir, { recursive: true })
   const jsonPath = join(dir, 'emb-cache.json')
   const binPath = embCacheBinPath(jsonPath)
@@ -200,7 +213,7 @@ console.log('\n[H] EEXIST 但无头（并发 writeFile 的 0 字节窗口）')
   ok('两边的条目都在（重写前先并入）', c2.get('我先') !== undefined && c2.get('别人的')?.[0] === 7, `size=${c2.size}`)
   // 0 字节窗口
   const dir2 = join(ROOT, 'h2')
-  rmSync(dir2, { recursive: true, force: true })
+  safeRm(dir2)
   mkdirSync(dir2, { recursive: true })
   const j2 = join(dir2, 'emb-cache.json')
   const c3 = new EmbCache({ cachePath: j2, dimension: dim, debounceMs: 60_000 })
@@ -216,7 +229,7 @@ console.log('\n[H] EEXIST 但无头（并发 writeFile 的 0 字节窗口）')
 console.log('\n[I] 落盘前验头：文件被外部删除 / 0 字节中间态')
 {
   const dir = join(ROOT, 'i')
-  rmSync(dir, { recursive: true, force: true })
+  safeRm(dir)
   mkdirSync(dir, { recursive: true })
   const jsonPath = join(dir, 'emb-cache.json')
   const binPath = embCacheBinPath(jsonPath)
@@ -232,7 +245,7 @@ console.log('\n[I] 落盘前验头：文件被外部删除 / 0 字节中间态')
   ok('文件被删后落盘仍有头', after.subarray(0, 4).toString('ascii') === 'MREC', `首 4B=${after.subarray(0, 4).toString('hex')}`)
   const c2 = new EmbCache({ cachePath: jsonPath, dimension: dim })
   ok('删前删后条目都在', c2.get('落盘前') !== undefined && c2.get('删后续写') !== undefined, `size=${c2.size}`)
-  rmSync(dir, { recursive: true, force: true }) // 连目录一起删（模拟桶根 rmSync）
+  safeRm(dir) // 连目录一起删（模拟桶根 rmSync）
   c1.set('目录也没了', Float32Array.from([3, 3, 3, 3]))
   await c1.flushNow()
   const after2 = readFileSync(binPath)
@@ -241,7 +254,7 @@ console.log('\n[I] 落盘前验头：文件被外部删除 / 0 字节中间态')
   ok('目录重建后条目可读', c3.get('目录也没了')?.[0] === 3, `size=${c3.size}`)
   // 0 字节中间态不应被改名留证（那是别人正在 create）
   const dir2 = join(ROOT, 'i2')
-  rmSync(dir2, { recursive: true, force: true })
+  safeRm(dir2)
   mkdirSync(dir2, { recursive: true })
   const j2 = join(dir2, 'emb-cache.json')
   writeFileSync(embCacheBinPath(j2), Buffer.alloc(0))
@@ -258,7 +271,7 @@ console.log('\n[I] 落盘前验头：文件被外部删除 / 0 字节中间态')
 console.log('\n[J] 退出兜底 flushSync（子进程真 exit）')
 {
   const dir = join(ROOT, 'j')
-  rmSync(dir, { recursive: true, force: true })
+  safeRm(dir)
   mkdirSync(dir, { recursive: true })
   const jsonPath = join(dir, 'emb-cache.json')
   const binPath = embCacheBinPath(jsonPath)
@@ -269,7 +282,7 @@ console.log('\n[J] 退出兜底 flushSync（子进程真 exit）')
     [
       '-e',
       `(async () => {
-        const { EmbCache } = await import('${join(LIB, 'emb-cache.js')}');
+        const { EmbCache } = await import('${LIB_ENTRY}');
         const c = new EmbCache({ cachePath: ${JSON.stringify(jsonPath)}, dimension: ${dim}, debounceMs: 60000 });
         c.set('退出兜底', Float32Array.from([8, 8, 8, 8]));
         process.exit(0);
@@ -289,7 +302,7 @@ console.log('\n[J] 退出兜底 flushSync（子进程真 exit）')
     [
       '-e',
       `(async () => {
-        const { EmbCache } = await import('${join(LIB, 'emb-cache.js')}');
+        const { EmbCache } = await import('${LIB_ENTRY}');
         const c = new EmbCache({ cachePath: ${JSON.stringify(jsonPath)}, dimension: ${dim}, debounceMs: 60000 });
         c.set('删后退出', Float32Array.from([9, 9, 9, 9]));
         process.exit(0);
@@ -309,7 +322,7 @@ console.log('\n[J] 退出兜底 flushSync（子进程真 exit）')
 console.log('\n[E] 跳闸退避（死端点）')
 {
   const dir = join(ROOT, 'e')
-  rmSync(dir, { recursive: true, force: true })
+  safeRm(dir)
   mkdirSync(dir, { recursive: true })
   const logs = []
   const client = new EmbedClient({
@@ -346,13 +359,16 @@ ok('第一次真实失败耗时（对照）>1ms', true)
 console.log('\n[F] 真桶迁移实测（genshin 116MB）')
 {
   // 夹具源：优先原 JSON；清淤后已改名则回退 .precompact-* / .bak 留证件（取最新）
-  const bucketDir = '/home/h/.dsh/memo-river/4bde2299850f027e'
+  const bucketDir = process.env.PROBE_BUCKET || ''
+  if (!bucketDir || !existsSync(bucketDir)) {
+    console.log('  SKIP 未提供 PROBE_BUCKET（真桶迁移段需要一份旧 JSON 缓存；Linux 生产机才跑）')
+  } else {
   const src = existsSync(`${bucketDir}/emb-cache.json`)
     ? `${bucketDir}/emb-cache.json`
     : (readdirSync(bucketDir).filter((f) => f.startsWith('emb-cache.json.') && !f.endsWith('.bin')).sort().map((f) => join(bucketDir, f)).pop()
       ?? (() => { throw new Error('找不到 genshin 桶旧 JSON 缓存（原文件/.precompact/.bak 都不在）') })())
   const dir = join(ROOT, 'f')
-  rmSync(dir, { recursive: true, force: true })
+  safeRm(dir)
   mkdirSync(dir, { recursive: true })
   const jsonPath = join(dir, 'emb-cache.json')
   const t0 = Date.now()
@@ -368,7 +384,7 @@ console.log('\n[F] 真桶迁移实测（genshin 116MB）')
   const loadMs = Date.now() - t1
   const after = rssMb()
   ok('迁移条目数合理', cache.size > 0, `size=${cache.size}`)
-  ok('峰值 RSS 增量 < 300MB', hwmMb() < 900, `VmHWM=${hwmMb()}MB RSS=${before}→${after}MB`)
+  ok('峰值 RSS 增量 < 300MB', hwmMb() === null || hwmMb() < 900, `VmHWM=${hwmMb() ?? 'n/a'}MB RSS=${before ?? 'n/a'}→${after ?? 'n/a'}MB`)
   ok('迁移耗时 < 10s', loadMs < 10_000, `${loadMs}ms`)
   const bin = embCacheBinPath(jsonPath)
   const binMb = statSync(bin).size / 1048576
@@ -377,7 +393,11 @@ console.log('\n[F] 真桶迁移实测（genshin 116MB）')
   // <15MB 只在已清淤语料（≤~1200 条）上成立——那是 compact 脚本的职责，运行时迁移不逐出。
   ok('bin 体积 < 30MB（未清淤全量）', binMb < 30, `${jsonMb.toFixed(1)}MB JSON → ${binMb.toFixed(2)}MB bin`)
   cache.dispose()
-  console.log(`     拷贝 ${copyMs}ms / 载入 ${loadMs}ms / 条目 ${cache.size} / HWM ${hwmMb()}MB`)
+  console.log(`     拷贝 ${copyMs}ms / 载入 ${loadMs}ms / 条目 ${cache.size} / HWM ${hwmMb() ?? 'n/a'}MB`)
+  }
 }
 console.log(`\n=== ${pass} pass / ${fail} fail ===`)
 process.exit(fail === 0 ? 0 : 1)
+
+
+import { safeRm } from './safe-rm.mjs'

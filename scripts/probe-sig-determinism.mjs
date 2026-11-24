@@ -32,10 +32,10 @@ if (!existsSync(SRC_DB)) {
 
 async function runSet(label, count) {
   const cwd = join(tmpdir(), `probe-sig-${process.pid}-${label}`)
-  rmSync(cwd, { recursive: true, force: true })
+  safeRm(cwd)
   mkdirSync(cwd, { recursive: true })
   const paths = workspacePaths(cwd, BUCKET)
-  rmSync(paths.root, { recursive: true, force: true })
+  safeRm(paths.root)
   mkdirSync(paths.root, { recursive: true })
   copyFileSync(SRC_DB, join(paths.root, 'knowledge_base.sqlite'))
 
@@ -54,8 +54,8 @@ async function runSet(label, count) {
     }
   }
   releaseAllWorkspaces()
-  rmSync(cwd, { recursive: true, force: true })
-  rmSync(paths.root, { recursive: true, force: true })
+  safeRm(cwd)
+  safeRm(paths.root)
   return sigs
 }
 
@@ -68,7 +68,7 @@ if (childMode) {
   console.log(`源库: ${SRC_DB}`)
   runSet('main', 6).then(async (mainSigs) => {
     const children = [1, 2].map((n) =>
-      spawnSync(process.execPath, [new URL(import.meta.url).pathname, '--child'], { encoding: 'utf8', timeout: 120_000 })
+      spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--child'], { encoding: 'utf8', timeout: 120_000 })
     )
     let childSigs = []
     children.forEach((r, i) => {
@@ -92,3 +92,5 @@ if (childMode) {
     }
   }).catch((e) => { console.error(`FATAL ${e}`); process.exit(1) })
 }
+
+import { safeRm } from './safe-rm.mjs'

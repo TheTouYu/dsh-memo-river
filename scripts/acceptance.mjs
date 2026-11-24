@@ -27,8 +27,8 @@ import { BLOCK_CLOSE, BLOCK_OPEN } from '../lib/render.js'
 await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；每次重铺）
 
 
-const ROOT = new URL('..', import.meta.url).pathname
-const VCP = '/home/h/app/VCPToolBox'
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const WS_RIVER = join(ROOT, '.selftest', '教室建模归档')
 const WS_ISLAND = join(ROOT, '.selftest', '教室建模孤岛')
 const WS_WRITE = join(ROOT, '.selftest', '教室建模写入测试')
@@ -572,8 +572,8 @@ hr('#6 写入契约（memo_write 拒绝条件不静默）')
   // （node:sqlite 与 Rust 侧对同一库双开时的 -shm 竞态；2026-09-12 实测：
   // 残留态 3/3 崩、抹掉后连跑 + 15 连写全绿，与数据规模无关）。
   const writePaths = workspacePaths(WS_WRITE, BUCKET_WRITE)
-  rmSync(writePaths.root, { recursive: true, force: true })
-  rmSync(WS_WRITE, { recursive: true, force: true })
+  safeRm(writePaths.root)
+  safeRm(WS_WRITE)
   mkdirSync(WS_WRITE, { recursive: true })
   const ws = acquireWorkspace(WS_WRITE, config)
   const writeTool = h.registered.tools.find((t) => (t.name ?? t.definition?.name) === 'memo_write') ?? h.registered.tools[3]
@@ -621,8 +621,8 @@ hr('#11 闭环：空库(0 篇) → memo_write 写一篇 → 被动注入把它�
   // 独立临时工作区：从**空库**开始，跑完即删——可重复，且不污染其它判据。
   const LOOP_CWD = join(tmpdir(), `memo-river-loop-${process.pid}`)
   const loopPaths = workspacePaths(LOOP_CWD, '闭环测试')
-  rmSync(LOOP_CWD, { recursive: true, force: true })
-  rmSync(loopPaths.root, { recursive: true, force: true })
+  safeRm(LOOP_CWD)
+  safeRm(loopPaths.root)
   mkdirSync(LOOP_CWD, { recursive: true })
 
   const ws = acquireWorkspace(LOOP_CWD, makeConfig({ bucket: '闭环测试' }))
@@ -749,8 +749,8 @@ hr('#11 闭环：空库(0 篇) → memo_write 写一篇 → 被动注入把它�
     ],
   )
 
-  rmSync(loopPaths.root, { recursive: true, force: true })
-  rmSync(LOOP_CWD, { recursive: true, force: true })
+  safeRm(loopPaths.root)
+  safeRm(LOOP_CWD)
 }
 
 /* ══════════════════════ #8 与原生直跑一致 ══════════════════════ */
@@ -830,8 +830,8 @@ hr('#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ a
   // 独立临时工作区：种子词汇 → 造两篇草稿（一篇可批、一篇不可批）→ 三条路径
   const DRAFT_CWD = join(tmpdir(), `memo-river-draft-${process.pid}`)
   const draftPaths = workspacePaths(DRAFT_CWD, '草稿测试')
-  rmSync(DRAFT_CWD, { recursive: true, force: true })
-  rmSync(draftPaths.root, { recursive: true, force: true })
+  safeRm(DRAFT_CWD)
+  safeRm(draftPaths.root)
   mkdirSync(DRAFT_CWD, { recursive: true })
 
   const ws = acquireWorkspace(DRAFT_CWD, makeConfig({ bucket: '草稿测试' }))
@@ -888,8 +888,8 @@ hr('#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ a
   )
   const EMPTY_CWD = join(tmpdir(), `memo-river-draft-empty-${process.pid}`)
   const emptyPaths = workspacePaths(EMPTY_CWD, '草稿测试空桶')
-  rmSync(EMPTY_CWD, { recursive: true, force: true })
-  rmSync(emptyPaths.root, { recursive: true, force: true })
+  safeRm(EMPTY_CWD)
+  safeRm(emptyPaths.root)
   mkdirSync(EMPTY_CWD, { recursive: true })
   const wsEmpty = acquireWorkspace(EMPTY_CWD, makeConfig({ bucket: '草稿测试空桶' }))
   await wsEmpty.readSync(() => wsEmpty.store.counts()) // 建库建表：桶要能被 listBuckets / discard 扫到
@@ -946,10 +946,10 @@ hr('#14 草稿队列：列队 → 一键批准入库（Tag ∩ 词汇表）→ a
     ],
   )
 
-  rmSync(draftPaths.root, { recursive: true, force: true })
-  rmSync(DRAFT_CWD, { recursive: true, force: true })
-  rmSync(emptyPaths.root, { recursive: true, force: true })
-  rmSync(EMPTY_CWD, { recursive: true, force: true })
+  safeRm(draftPaths.root)
+  safeRm(DRAFT_CWD)
+  safeRm(emptyPaths.root)
+  safeRm(EMPTY_CWD)
 }
 
 /* ══════════════════════ #15–#18 自主态节律注入（PLAN-2026-09-13 第一刀） ══════════════════════ */
@@ -1177,8 +1177,8 @@ hr('#19 近因保底：k-limit 挤掉最近日记时保留一席；关掉开关�
   // k=2 时纯分数序 = 两篇旧的入选；开 recencyFloorDays 后今天的日记挤掉分数最低席。
   const FLOOR_CWD = join(tmpdir(), `memo-river-floor-${process.pid}`)
   const floorPaths = workspacePaths(FLOOR_CWD, '近因保底测试')
-  rmSync(FLOOR_CWD, { recursive: true, force: true })
-  rmSync(floorPaths.root, { recursive: true, force: true })
+  safeRm(FLOOR_CWD)
+  safeRm(floorPaths.root)
   mkdirSync(FLOOR_CWD, { recursive: true })
   const wsFloor = acquireWorkspace(FLOOR_CWD, makeConfig({ bucket: '近因保底测试' }))
   const writeTool = h.registered.tools.find((t) => (t.name ?? t.definition?.name) === 'memo_write')
@@ -1223,8 +1223,8 @@ hr('#19 近因保底：k-limit 挤掉最近日记时保留一席；关掉开关�
     ],
   )
   wsFloor.store.close?.()
-  rmSync(FLOOR_CWD, { recursive: true, force: true })
-  rmSync(floorPaths.root, { recursive: true, force: true })
+  safeRm(FLOOR_CWD)
+  safeRm(floorPaths.root)
 }
 
 hr('#20 写入节律提醒：有未入河进展+冷却过 → 注入提醒；同回合不重复；memo_write 观测重置时钟')
@@ -1276,8 +1276,8 @@ hr('#21 写入去重闸门：近重复日记被拒并指认孪生篇；不同内
   // 独立临时桶：先写 A，再写近重复 A'（拒绝），再写不同主题 B（放行），最后关闸重写 A'（放行）。
   const DEDUP_CWD = join(tmpdir(), `memo-river-dedup-${process.pid}`)
   const dedupPaths = workspacePaths(DEDUP_CWD, '写入去重测试')
-  rmSync(DEDUP_CWD, { recursive: true, force: true })
-  rmSync(dedupPaths.root, { recursive: true, force: true })
+  safeRm(DEDUP_CWD)
+  safeRm(dedupPaths.root)
   mkdirSync(DEDUP_CWD, { recursive: true })
   const wsDedup = acquireWorkspace(DEDUP_CWD, makeConfig({ bucket: '写入去重测试' }))
   const writeTool21 = h.registered.tools.find((t) => (t.name ?? t.definition?.name) === 'memo_write')
@@ -1314,8 +1314,8 @@ hr('#21 写入去重闸门：近重复日记被拒并指认孪生篇；不同内
   )
   const offPasses = ApOff.includes('已写入') && !ApOff.includes('被拒绝')
   wsDedup.store.close?.()
-  rmSync(DEDUP_CWD, { recursive: true, force: true })
-  rmSync(dedupPaths.root, { recursive: true, force: true })
+  safeRm(DEDUP_CWD)
+  safeRm(dedupPaths.root)
   check(
     21,
     '写入去重：近重复被拒（near-duplicate-diary+指认孪生）；不同主题放行；dedupCosine=0 关闸放行',
@@ -1478,8 +1478,8 @@ hr('#25 近因保底·写入时间戳：同日平局由写入时刻决胜（票0
   // 已入选的部署记录 → 保底短路，会议纪要永远进不来；新实现按 files.updated_at 决胜。
   const TS_CWD = join(tmpdir(), `memo-river-tswrite-${process.pid}`)
   const tsPaths = workspacePaths(TS_CWD, '时间戳保底测试')
-  rmSync(TS_CWD, { recursive: true, force: true })
-  rmSync(tsPaths.root, { recursive: true, force: true })
+  safeRm(TS_CWD)
+  safeRm(tsPaths.root)
   mkdirSync(TS_CWD, { recursive: true })
   const wsTs = acquireWorkspace(TS_CWD, makeConfig({ bucket: '时间戳保底测试' }))
   const writeTool = h.registered.tools.find((t) => (t.name ?? t.definition?.name) === 'memo_write')
@@ -1555,8 +1555,8 @@ hr('#27 空桶注入留痕：inject-skip reason=empty-corpus 落桶日志且带 
 {
   const E_CWD = join(tmpdir(), `memo-river-empty-${process.pid}`)
   const ePaths = workspacePaths(E_CWD, '空桶测试')
-  rmSync(E_CWD, { recursive: true, force: true })
-  rmSync(ePaths.root, { recursive: true, force: true })
+  safeRm(E_CWD)
+  safeRm(ePaths.root)
   mkdirSync(E_CWD, { recursive: true })
   const h27 = createMockCtx()
   apply(h27.ctx, makeConfig({ bucket: '空桶测试' }))
@@ -1701,8 +1701,8 @@ hr('#31 压缩后查询锚：注入选材取压缩后首段内容而非摘要摊
 {
   const CA_CWD = join(tmpdir(), `memo-river-canchor-${process.pid}`)
   const caPaths = workspacePaths(CA_CWD, '压缩锚测试')
-  rmSync(CA_CWD, { recursive: true, force: true })
-  rmSync(caPaths.root, { recursive: true, force: true })
+  safeRm(CA_CWD)
+  safeRm(caPaths.root)
   mkdirSync(CA_CWD, { recursive: true })
   acquireWorkspace(CA_CWD, makeConfig({ bucket: '压缩锚测试' }))
   const wTool = h.registered.tools.find((t) => (t.name ?? t.definition?.name) === 'memo_write')
@@ -1935,8 +1935,8 @@ hr('#35 草稿队列可见性：nudge 带队列数与最老年龄；面板常显
   const H = 3_600_000
   const NQ_CWD = join(tmpdir(), `memo-river-nudge-queue-${process.pid}`)
   const nq = workspacePaths(NQ_CWD, '草稿队列可见性测试')
-  rmSync(NQ_CWD, { recursive: true, force: true })
-  rmSync(nq.root, { recursive: true, force: true })
+  safeRm(NQ_CWD)
+  safeRm(nq.root)
   mkdirSync(nq.pendingDir, { recursive: true })
   const now35 = Date.now()
   const mk35 = (name, ageH) => {
@@ -2005,8 +2005,8 @@ hr('#35 草稿队列可见性：nudge 带队列数与最老年龄；面板常显
     ],
   )
   h35.dispose()
-  rmSync(NQ_CWD, { recursive: true, force: true })
-  rmSync(nq.root, { recursive: true, force: true })
+  safeRm(NQ_CWD)
+  safeRm(nq.root)
 }
 
 /* ══════════════════════ #36 票06 守护循环草稿预审三态 ══════════════════════ */
@@ -2018,8 +2018,8 @@ hr('#36 守护预审三态：垃圾稳定「建议丢弃」；Tag 边界「需�
   const { readDraftStatus, draftStatusPath } = await import('../lib/drafts.js')
   const PC_CWD = join(tmpdir(), `memo-river-precheck-${process.pid}`)
   const pc = workspacePaths(PC_CWD, '预审测试')
-  rmSync(PC_CWD, { recursive: true, force: true })
-  rmSync(pc.root, { recursive: true, force: true })
+  safeRm(PC_CWD)
+  safeRm(pc.root)
   mkdirSync(PC_CWD, { recursive: true })
   const ws36 = acquireWorkspace(PC_CWD, makeConfig({ bucket: '预审测试' }))
   const byName = (n) => h.registered.tools.find((t) => (t.name ?? t.definition?.name) === n)
@@ -2173,8 +2173,8 @@ hr('#36 守护预审三态：垃圾稳定「建议丢弃」；Tag 边界「需�
       `(g) 出队联动=${moveOk && afterOk ? `✅ approved/ 同进 .md+.status.json；队列余 pending=${snapAfter?.pending}（ok=0/manual=2/discard=1）` : `❌ move=${moveOk} after=${JSON.stringify(snapAfter?.precheck)}`}；批准回报头：${appr36.split('\n')[0]?.slice(0, 60)}`,
     ],
   )
-  rmSync(PC_CWD, { recursive: true, force: true })
-  rmSync(pc.root, { recursive: true, force: true })
+  safeRm(PC_CWD)
+  safeRm(pc.root)
 }
 
 /* ══════════════════════ #37 票05（recall-quality-0916）write-nudge 场景感知文案 ══════════════════════ */
@@ -2294,3 +2294,7 @@ const pass = results.filter((r) => r.pass).length
 for (const r of results.sort((a, b) => a.id - b.id)) line(`  #${String(r.id).padStart(2)} ${r.pass ? '✅' : '❌'}  ${r.title}`)
 line(`\n  通过 ${pass}/${results.length}`)
 process.exit(pass === results.length ? 0 : 1)
+
+import { fileURLToPath } from 'node:url'
+
+import { safeRm } from './safe-rm.mjs'

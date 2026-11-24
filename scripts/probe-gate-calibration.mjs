@@ -34,8 +34,8 @@ const NEGATIVES = [
 const cwd = join(tmpdir(), `probe-gate-${process.pid}`)
 const bucket = 'gate探针'
 const paths = workspacePaths(cwd, bucket)
-rmSync(cwd, { recursive: true, force: true })
-rmSync(paths.root, { recursive: true, force: true })
+safeRm(cwd)
+safeRm(paths.root)
 mkdirSync(cwd, { recursive: true })
 const ws = acquireWorkspace(cwd, ConfigSchema({ bucket, native: { vcpRoot: '/home/h/app/VCPToolBox' } }))
 const dim = ws.resolved.dimension
@@ -157,5 +157,7 @@ console.log(`  负样本 gU 范围：${Math.min(...negStats.map((n) => n.gu)).to
 console.log('  skip 集 gA 范围：' + Math.min(...pos.map((r) => r.gA)).toFixed(3) + '~' + Math.max(...pos.map((r) => r.gA)).toFixed(3))
 
 ws.store.close?.()
-rmSync(cwd, { recursive: true, force: true })
-rmSync(paths.root, { recursive: true, force: true })
+safeRm(cwd)
+safeRm(paths.root)
+
+import { safeRm } from './safe-rm.mjs'

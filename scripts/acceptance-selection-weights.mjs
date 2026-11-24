@@ -29,7 +29,7 @@ import { estimateTokens, workspacePaths } from '../lib/runtime.js'
 import { ADAPTIVE_K_POOL_FLOOR, selectCandidates } from '../lib/recall.js'
 import { recordUsage } from '../lib/health.js'
 
-const VCP = '/home/h/app/VCPToolBox'
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const results = []
 const line = (s = '') => console.log(s)
 const hr = (t) => line('\n' + '═'.repeat(88) + `\n${t}\n` + '═'.repeat(88))
@@ -351,8 +351,8 @@ hr('票04-⑥ 集成：config→recallOptions→recall 全链路（台账曝光�
 {
   const SW_CWD = join(tmpdir(), `memo-river-sw-${process.pid}`)
   const swPaths = workspacePaths(SW_CWD, '选择权重测试')
-  rmSync(SW_CWD, { recursive: true, force: true })
-  rmSync(swPaths.root, { recursive: true, force: true })
+  safeRm(SW_CWD)
+  safeRm(swPaths.root)
   mkdirSync(SW_CWD, { recursive: true })
   const config = makeConfig({ bucket: '选择权重测试' })
   const h = createMockCtx()
@@ -441,8 +441,8 @@ hr('票04-⑥ 集成：config→recallOptions→recall 全链路（台账曝光�
 
   ws.store.close?.()
   h.dispose()
-  rmSync(SW_CWD, { recursive: true, force: true })
-  rmSync(swPaths.root, { recursive: true, force: true })
+  safeRm(SW_CWD)
+  safeRm(swPaths.root)
 }
 
 /* ═══════════ 汇总 ═══════════ */
@@ -452,3 +452,5 @@ for (const r of results.sort((a, b) => a.id - b.id)) line(`  #${String(r.id).pad
 line(`\n  通过 ${pass}/${results.length}`)
 line(`  回归（主套件 ≥36 + adaptivek 4 项）另跑：node scripts/acceptance.mjs && node scripts/acceptance-adaptivek.mjs`)
 process.exit(pass === results.length ? 0 : 1)
+
+import { safeRm } from './safe-rm.mjs'

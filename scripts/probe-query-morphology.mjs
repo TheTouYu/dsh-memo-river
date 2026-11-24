@@ -54,17 +54,17 @@ const SHAPES = [
 const round = (x, n = 4) => (typeof x === 'number' ? Math.round(x * 10 ** n) / 10 ** n : null)
 
 /* ── 只读副本 ── */
-rmSync(WORK_ROOT, { recursive: true, force: true })
+safeRm(WORK_ROOT)
 mkdirSync(WORK_ROOT, { recursive: true })
 const bucket = join(WORK_ROOT, 'bucket')
 cpSync(PROD_BUCKET, bucket, { recursive: true })
 const dbPath = join(bucket, 'knowledge_base.sqlite')
 if (!existsSync(dbPath)) throw new Error(`副本缺库：${dbPath}`)
 
-const { loadEnvFile } = await import(join(LIB, 'runtime.js'))
-const { KnowledgeStore } = await import(join(LIB, 'store.js'))
-const { EmbedClient, cosine } = await import(join(LIB, 'embed.js'))
-const { MemoEngine } = await import(join(LIB, 'native.js'))
+const { loadEnvFile } = await import(pathToFileURL(join(LIB, 'runtime.js')).href)
+const { KnowledgeStore } = await import(pathToFileURL(join(LIB, 'store.js')).href)
+const { EmbedClient, cosine } = await import(pathToFileURL(join(LIB, 'embed.js')).href)
+const { MemoEngine } = await import(pathToFileURL(join(LIB, 'native.js')).href)
 
 const env = loadEnvFile(`${VCP_ROOT}/config.env`, {})
 const EMBED_CFG = {
@@ -169,3 +169,7 @@ const md = [
 mkdirSync(dirname(OUT_MD), { recursive: true })
 writeFileSync(OUT_MD, md)
 console.log(`\n表已写入 ${OUT_MD}`)
+
+import { pathToFileURL } from 'node:url'
+
+import { safeRm } from './safe-rm.mjs'

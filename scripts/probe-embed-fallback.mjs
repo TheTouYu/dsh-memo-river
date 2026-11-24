@@ -128,5 +128,7 @@ embedHealth.reset()
 }
 
 console.log(`\n=== ${pass} pass / ${fail} fail ===`)
-try { rmSync(TMP, { recursive: true, force: true }) } catch {}
+try { safeRm(TMP) } catch {}
 process.exit(fail === 0 ? 0 : 1)
+
+import { safeRm } from './safe-rm.mjs'

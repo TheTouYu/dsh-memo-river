@@ -131,4 +131,6 @@ const f2 = out['F2_1+1+1'].mean
 if (f0 && f1) console.log(`F1(1+2) vs F0(合批3) mean: ${f1} vs ${f0} ms → ${(((f0 - f1) / f0) * 100).toFixed(1)}% ｜ F2(1+1+1) mean: ${f2}`)
 console.log(`\n服务端对时核验：journalctl --user -u dsh-embed --since "${new Date(Date.now() - ROUNDS * 3 * 900).toISOString().slice(11, 19)}" --no-pager | grep '\\[req\\]'`)
 try { await client.flushCache() } catch { /* 尽力而为 */ }
-rmSync(TMP, { recursive: true, force: true })
+safeRm(TMP)
+
+import { safeRm } from './safe-rm.mjs'

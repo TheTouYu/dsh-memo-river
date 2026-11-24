@@ -12,8 +12,8 @@ import { Config as ConfigSchema } from '../lib/index.js'
 const cwd = join(tmpdir(), `probe-dedup-${process.pid}`)
 const bucket = '探针'
 const paths = workspacePaths(cwd, bucket)
-rmSync(cwd, { recursive: true, force: true })
-rmSync(paths.root, { recursive: true, force: true })
+safeRm(cwd)
+safeRm(paths.root)
 mkdirSync(cwd, { recursive: true })
 const ws = acquireWorkspace(cwd, ConfigSchema({ bucket: '探针', native: { vcpRoot: '/home/h/app/VCPToolBox' } }))
 const dim = ws.resolved.dimension
@@ -55,5 +55,7 @@ console.log('── ③ #21 近重复对（应拦）')
 pair('排查记↔重写', P1, P2)
 
 ws.store.close?.()
-rmSync(cwd, { recursive: true, force: true })
-rmSync(paths.root, { recursive: true, force: true })
+safeRm(cwd)
+safeRm(paths.root)
+
+import { safeRm } from './safe-rm.mjs'

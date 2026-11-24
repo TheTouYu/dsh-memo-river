@@ -25,7 +25,7 @@ import { acquireWorkspace } from '../lib/workspace.js'
 import { estimateTokens, workspacePaths } from '../lib/runtime.js'
 import { ADAPTIVE_K_POOL_FLOOR } from '../lib/recall.js'
 
-const VCP = '/home/h/app/VCPToolBox'
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const results = []
 const line = (s = '') => console.log(s)
 const hr = (t) => line('\n' + '═'.repeat(88) + `\n${t}\n` + '═'.repeat(88))
@@ -98,8 +98,8 @@ const makeConfig = (overrides = {}) => ConfigSchema({ bucket: '', native: { vcpR
 /* ── 测试桶：自建自净 ── */
 const AK_CWD = join(tmpdir(), `memo-river-ak-${process.pid}`)
 const akPaths = workspacePaths(AK_CWD, '自适应K测试')
-rmSync(AK_CWD, { recursive: true, force: true })
-rmSync(akPaths.root, { recursive: true, force: true })
+safeRm(AK_CWD)
+safeRm(akPaths.root)
 mkdirSync(AK_CWD, { recursive: true })
 
 const config = makeConfig({ bucket: '自适应K测试' })
@@ -267,11 +267,13 @@ hr('票03-① 膨胀桶：27 篇（复刻 c9f838ba 2→27）→ k 自适应，dr
 /* ═══════════ 汇总 ═══════════ */
 ws.store.close?.()
 h.dispose()
-rmSync(AK_CWD, { recursive: true, force: true })
-rmSync(akPaths.root, { recursive: true, force: true })
+safeRm(AK_CWD)
+safeRm(akPaths.root)
 hr('验收汇总')
 const pass = results.filter((r) => r.pass).length
 for (const r of results.sort((a, b) => a.id - b.id)) line(`  #${String(r.id).padStart(2)} ${r.pass ? '✅' : '❌'}  ${r.title}`)
 line(`\n  通过 ${pass}/${results.length}`)
 line(`  ④ 回归（主套件 ≥36 全绿）另跑：node scripts/acceptance.mjs`)
 process.exit(pass === results.length ? 0 : 1)
+
+import { safeRm } from './safe-rm.mjs'

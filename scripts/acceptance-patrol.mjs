@@ -58,8 +58,8 @@ const execStub = (cwd) => ({ agent: { session: { id: 'patrol-acceptance', header
 
 /* ── 前置：自建自净 /tmp 工作区（嵌入离线） ── */
 const paths = workspacePaths(CWD, BUCKET)
-rmSync(CWD, { recursive: true, force: true })
-rmSync(paths.root, { recursive: true, force: true })
+safeRm(CWD)
+safeRm(paths.root)
 mkdirSync(SEED_DIR, { recursive: true })
 
 hr(`票 10 质量巡检 · acceptance-patrol（工作区 ${CWD}）`)
@@ -150,8 +150,8 @@ try {
   const t6 = /不存在|可用/.test(r6) && !r6.includes('扫描')
   check('P-6', 'folder 真路由负例：不存在的桶 → 报错列可用桶，不崩', t6, [r6.split('\n')[0]])
 } finally {
-  rmSync(CWD, { recursive: true, force: true })
-  rmSync(paths.root, { recursive: true, force: true })
+  safeRm(CWD)
+  safeRm(paths.root)
 }
 
 const failed = results.filter((r) => !r.pass)
@@ -161,3 +161,5 @@ if (failed.length) {
   process.exit(1)
 }
 process.exit(0)
+
+import { safeRm } from './safe-rm.mjs'

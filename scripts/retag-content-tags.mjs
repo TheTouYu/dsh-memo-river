@@ -41,7 +41,7 @@ import { connectedComponents } from '../lib/health.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..')
-const VCP = '/home/h/app/VCPToolBox'
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const WS = join(ROOT, '.scratch', 'retag', 'ws')
 
 const argv = process.argv.slice(2)

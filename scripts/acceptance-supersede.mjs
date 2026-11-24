@@ -39,7 +39,7 @@ function check(id, title, pass, evidence) {
   for (const e of [].concat(evidence)) line(`    ${e}`)
 }
 
-const VCP = '/home/h/app/VCPToolBox'
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const bucket = '取代测试'
 
 /* ── 最小 Cordis / Agent 替身（与 acceptance-inject-dedup.mjs 同款）── */
@@ -121,9 +121,9 @@ mkdirSync(ROOT, { recursive: true })
 
 function makeEnv(legName, injectOverrides = {}) {
   const cwd = join(ROOT, legName)
-  rmSync(cwd, { recursive: true, force: true })
+  safeRm(cwd)
   mkdirSync(cwd, { recursive: true })
-  rmSync(workspacePaths(cwd, bucket).root, { recursive: true, force: true })
+  safeRm(workspacePaths(cwd, bucket).root)
   const config = ConfigSchema({ bucket, native: { vcpRoot: VCP }, inject: injectOverrides })
   const h = createMockCtx()
   apply(h.ctx, config)
@@ -447,7 +447,7 @@ try {
     )
   }
 } finally {
-  rmSync(ROOT, { recursive: true, force: true })
+  safeRm(ROOT)
 }
 
 const passed = results.filter((r) => r.pass).length
@@ -456,3 +456,5 @@ line(`G3 语料有效性验收：${passed}/${results.length} ${passed === result
 for (const r of results) if (!r.pass) line(`  ❌ ${r.id} ${r.title}`)
 line('═'.repeat(88))
 if (passed !== results.length) process.exitCode = 1
+
+import { safeRm } from './safe-rm.mjs'

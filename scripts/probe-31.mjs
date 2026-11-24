@@ -14,7 +14,7 @@ import { apply, Config as ConfigSchema } from '../lib/index.js'
 import { acquireWorkspace, releaseAllWorkspaces } from '../lib/workspace.js'
 import { workspacePaths } from '../lib/runtime.js'
 
-const VCP = '/home/h/app/VCPToolBox'
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const N = Number(process.argv[2] ?? 1)
 
 function createMockCtx() {
@@ -65,8 +65,8 @@ let fail = 0
 for (let i = 1; i <= N; i++) {
   const CA_CWD = join(tmpdir(), `memo-river-probe31-${process.pid}-${Date.now()}`)
   const caPaths = workspacePaths(CA_CWD, '压缩锚测试')
-  rmSync(CA_CWD, { recursive: true, force: true })
-  rmSync(caPaths.root, { recursive: true, force: true })
+  safeRm(CA_CWD)
+  safeRm(caPaths.root)
   mkdirSync(CA_CWD, { recursive: true })
   acquireWorkspace(CA_CWD, makeConfig({ bucket: '压缩锚测试' }))
   const h = createMockCtx()
@@ -107,9 +107,11 @@ for (let i = 1; i <= N; i++) {
   const pass = w1ok && w2ok && pickedHot && notOld && triggerOk
   if (!pass) fail++
   console.log(`#${i} ${pass ? '✅' : '❌'} 种子写:1=${w1ok ? '✅' : '❌'} 2=${w2ok ? '✅' : '❌（尾行: ' + w2.split('\n').slice(-2).join(' ⏎ ').slice(0, 120) + '）'} 入选:[${titles31.join(' | ')}] trigger日志:${triggerOk ? '✅' : '❌'}`)
-  rmSync(CA_CWD, { recursive: true, force: true })
-  rmSync(caPaths.root, { recursive: true, force: true })
+  safeRm(CA_CWD)
+  safeRm(caPaths.root)
   try { releaseAllWorkspaces() } catch { /* 已关 */ }
 }
 console.log(fail === 0 ? `全部通过（${N} 次）` : `${fail}/${N} 失败`)
 process.exit(fail ? 1 : 0)
+
+import { safeRm } from './safe-rm.mjs'

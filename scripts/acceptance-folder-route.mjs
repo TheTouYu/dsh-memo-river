@@ -18,7 +18,7 @@ import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
 /* ── 自建自净环境：DSH_HOME 必须在 import lib 之前指好（动态 import） ── */
-const TMP = mkdtempSync(join(process.env.TMPDIR || '/var/tmp', 'memo-river-route-'))
+const TMP = mkdtempSync(join(process.env.MEMO_ACC_TMP_ROOT || process.env.TMPDIR || tmpdir(), 'memo-river-route-'))
 process.env.DSH_HOME = join(TMP, 'dsh-home')
 const { apply, Config: ConfigSchema } = await import('../lib/index.js')
 const { startEmbedStub } = await import('./embed-stub.mjs')
@@ -26,7 +26,7 @@ const { acquireWorkspace, releaseAllWorkspaces, resolveBucket } = await import('
 const { readUsageLedger, KV_USAGE } = await import('../lib/health.js')
 const { workspacePaths } = await import('../lib/runtime.js')
 
-const VCP = '/home/h/app/VCPToolBox'
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 /** 三个 cwd 工作区：x/routeA、y/routeB、z/routeB（后两个**同名桶**、不同哈希——FR-5 消歧用）。 */
 const WS_A = join(TMP, 'x', 'routeA')
 const WS_B = join(TMP, 'y', 'routeB')
@@ -231,7 +231,7 @@ try {
 } finally {
   try { releaseAllWorkspaces() } catch { /* 已关 */ }
   try { await stub?.stop() } catch { /* 已关 */ }
-  rmSync(TMP, { recursive: true, force: true })
+  safeRm(TMP)
   line(`\n（自净）已删除 ${TMP}`)
 }
 
@@ -239,3 +239,7 @@ hr('结果')
 const bad = results.filter((r) => !r.pass)
 line(`${results.length - bad.length}/${results.length} PASS${bad.length ? `；FAIL：${bad.map((f) => f.id).join(', ')}` : ''}`)
 process.exit(bad.length || failed ? 1 : 0)
+
+import { tmpdir } from 'node:os'
+
+import { safeRm } from './safe-rm.mjs'

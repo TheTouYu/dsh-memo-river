@@ -84,10 +84,12 @@ if (!APPLY) {
 let removed = 0
 for (const [name] of junk) {
   try {
-    rmSync(join(ROOT, name), { recursive: true, force: true })
+    safeRm(join(ROOT, name))
     removed++
   } catch (e) {
     console.log(`   删除失败 ${name}: ${e.message}`)
   }
 }
 console.log(`已删 ${removed}/${junk.length}；柜子剩 ${total - removed} 个桶目录`)
+
+import { safeRm } from './safe-rm.mjs'

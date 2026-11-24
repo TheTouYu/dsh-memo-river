@@ -51,7 +51,7 @@ import { coldTagSuggest } from '../lib/nudge-guide.js'
 import { memoRiverRoot } from '../lib/runtime.js'
 import { KnowledgeStore } from '../lib/store.js'
 
-const VCP = '/home/h/app/VCPToolBox'
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 /** Tag 行（`Tag: a, b` / `Tag：a、b`）；两侧都按同一规则剔除后再逐字节比对。 */
 const TAG_LINE_RE = /^[ \t]*Tag[：:][^\n]*$/gm
 

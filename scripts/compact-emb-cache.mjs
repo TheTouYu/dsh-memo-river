@@ -37,7 +37,7 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const { embCacheBinPath, loadEmbCacheEntries, HEADER_BYTES } = await import(join(HERE, '..', 'lib', 'emb-cache.js'))
+const { embCacheBinPath, loadEmbCacheEntries, HEADER_BYTES } = await import(pathToFileURL(join(HERE, '..', 'lib', 'emb-cache.js')).href)
 
 /* ── 参数 ── */
 const argv = process.argv.slice(2)
@@ -60,7 +60,7 @@ function liveKeys(bucketDir) {
   const dbPath = join(bucketDir, 'knowledge_base.sqlite')
   if (!existsSync(dbPath)) return { keys: null, reason: 'no-db' }
   const work = join(TMP, `memo-compact-${process.pid}-${basename(bucketDir)}`)
-  rmSync(work, { recursive: true, force: true })
+  safeRm(work)
   mkdirSync(work, { recursive: true })
   const copy = join(work, 'kb.sqlite')
   try {
@@ -83,7 +83,7 @@ function liveKeys(bucketDir) {
   } catch (e) {
     return { keys: null, reason: `db-${String(e?.message ?? e).slice(0, 70)}` }
   } finally {
-    rmSync(work, { recursive: true, force: true })
+    safeRm(work)
   }
 }
 
@@ -213,3 +213,7 @@ console.log(
     (DRY ? '' : '旧文件一律留 `.precompact-<ts>`（不删）。'),
 )
 if (!DRY && done > 0) console.log('提示：运行中的 dsh-web 仍持有旧内存，需重启才加载新缓存。')
+
+import { pathToFileURL } from 'node:url'
+
+import { safeRm } from './safe-rm.mjs'

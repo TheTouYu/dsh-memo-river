@@ -39,17 +39,17 @@ const WORK_ROOT = join(ROOT, '.scratch', 'anchor-probe')
 const round = (x, n = 4) => (typeof x === 'number' ? Math.round(x * 10 ** n) / 10 ** n : null)
 
 /* ── 只读副本 ── */
-rmSync(WORK_ROOT, { recursive: true, force: true })
+safeRm(WORK_ROOT)
 mkdirSync(WORK_ROOT, { recursive: true })
 const bucket = join(WORK_ROOT, 'bucket')
 cpSync(PROD_BUCKET, bucket, { recursive: true })
 const dbPath = join(bucket, 'knowledge_base.sqlite')
 if (!existsSync(dbPath)) throw new Error(`副本缺库：${dbPath}`)
 
-const { loadEnvFile } = await import(join(LIB, 'runtime.js'))
-const { KnowledgeStore } = await import(join(LIB, 'store.js'))
-const { EmbedClient, cosine } = await import(join(LIB, 'embed.js'))
-const { MemoEngine } = await import(join(LIB, 'native.js'))
+const { loadEnvFile } = await import(pathToFileURL(join(LIB, 'runtime.js')).href)
+const { KnowledgeStore } = await import(pathToFileURL(join(LIB, 'store.js')).href)
+const { EmbedClient, cosine } = await import(pathToFileURL(join(LIB, 'embed.js')).href)
+const { MemoEngine } = await import(pathToFileURL(join(LIB, 'native.js')).href)
 
 const env = loadEnvFile(`${VCP_ROOT}/config.env`, {})
 const EMBED_CFG = {
@@ -210,3 +210,7 @@ if (cands.length > 0) {
 }
 
 console.log(`\n全量 trace: ${join(WORK_ROOT, 'trace.json')}`)
+
+import { pathToFileURL } from 'node:url'
+
+import { safeRm } from './safe-rm.mjs'

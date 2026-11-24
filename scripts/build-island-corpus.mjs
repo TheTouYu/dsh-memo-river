@@ -14,13 +14,13 @@
 import { mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-const VCP = '/home/h/app/VCPToolBox'
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const SRC = join(VCP, 'dailynote', '教室建模归档')
 const BACKUP = join(VCP, 'sandbox', 'classroom-flow', 'tag-river-backup.json')
 
 const args = new Map()
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i].replace(/^--/, ''), process.argv[i + 1])
-const OUT = args.get('out') || new URL('../.selftest/island-corpus', import.meta.url).pathname
+const OUT = args.get('out') || fileURLToPath(new URL('../.selftest/island-corpus', import.meta.url))
 
 const backup = JSON.parse(readFileSync(BACKUP, 'utf8'))
 mkdirSync(OUT, { recursive: true })
@@ -44,3 +44,5 @@ console.log(`孤岛语料已物化 → ${OUT}`)
 console.log(`  篇数=${Object.keys(backup).length}  Tag 槽位=${slots}  唯一 Tag=${unique.size}`)
 console.log(`  复用检查：${slots === unique.size ? '全部只出现 1 次（孤岛）' : `有 ${slots - unique.size} 个 Tag 被复用（不是孤岛！）`}`)
 console.log(`  文件：${readdirSync(OUT).join(' ')}`)
+
+import { fileURLToPath } from 'node:url'

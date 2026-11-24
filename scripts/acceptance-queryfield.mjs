@@ -23,8 +23,10 @@
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
-const TMP = mkdtempSync(join(process.env.TMPDIR || '/var/tmp', 'memo-river-qf-'))
+// 平台可移植：Windows 没有 /var/tmp，统一走 os.tmpdir()（MEMO_ACC_TMP_ROOT 仍可覆盖）。
+const TMP = mkdtempSync(join(process.env.MEMO_ACC_TMP_ROOT || process.env.TMPDIR || tmpdir(), 'memo-river-qf-'))
 process.env.DSH_HOME = join(TMP, 'dsh-home')
 const CWD = join(TMP, 'ws')
 
@@ -323,7 +325,7 @@ hr('Q-6 自洽性：降级通知自己不会变成新的查询场污染源')
 
 /* ══════════════════════ 结果 ══════════════════════ */
 try {
-  rmSync(TMP, { recursive: true, force: true })
+  safeRm(TMP)
 } catch {
   /* 清理失败不影响判据 */
 }
@@ -331,3 +333,5 @@ hr('结果')
 const failed = results.filter((r) => !r.pass)
 line(`${results.length - failed.length}/${results.length} PASS${failed.length ? `；FAIL：${failed.map((f) => f.id).join(', ')}` : ''}`)
 process.exit(failed.length ? 1 : 0)
+
+import { safeRm } from './safe-rm.mjs'

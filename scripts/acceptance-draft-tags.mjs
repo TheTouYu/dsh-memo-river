@@ -21,7 +21,7 @@ import { join } from 'node:path'
 import { startEmbedStub } from './embed-stub.mjs'
 
 /* ── 自净环境：DSH_HOME 必须在 import lib 之前指好（动态 import） ── */
-const TMP = mkdtempSync(join(process.env.TMPDIR || '/var/tmp', 'memo-river-draft-tags-'))
+const TMP = mkdtempSync(join(process.env.MEMO_ACC_TMP_ROOT || process.env.TMPDIR || tmpdir(), 'memo-river-draft-tags-'))
 process.env.DSH_HOME = join(TMP, 'dsh-home')
 
 const { apply, Config: ConfigSchema } = await import('../lib/index.js')
@@ -446,10 +446,14 @@ try {
   try { wsB?.close() } catch { /* 静默 */ }
   try { wsC?.close() } catch { /* 静默 */ }
   await stub.stop()
-  rmSync(TMP, { recursive: true, force: true })
+  safeRm(TMP)
 }
 
 hr('结果')
 const failed = results.filter((r) => !r.pass)
 line(`${results.length - failed.length}/${results.length} PASS${failed.length ? `；FAIL：${failed.map((f) => f.id).join(', ')}` : ''}`)
 process.exit(failed.length || exitCode !== 0 ? 1 : 0)
+
+import { tmpdir } from 'node:os'
+
+import { safeRm } from './safe-rm.mjs'

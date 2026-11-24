@@ -39,7 +39,7 @@ mkdirSync(WS, { recursive: true })
 process.chdir(WS)
 
 const { apply, Config: ConfigSchema } = await import('../lib/index.js')
-const VCP = '/home/h/app/VCPToolBox'
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const makeConfig = (overrides = {}) => ConfigSchema({ bucket: '', native: { vcpRoot: VCP }, ...overrides })
 
 const results = []
@@ -162,7 +162,7 @@ if (!existsSync(HOST_WS)) {
    Node 的 ESM 缓存**按 URL 键** ⇒ 两个模块实例。池若放在模块作用域，两份池互相看不见，
    第二次挂载照样撞 webserver 的进程级路由表。故池必须挂在进程全局（Symbol.for）。
    本判据用 `?inst=1/2` 显式造出两个实例，等价复刻这两条 URL。 */
-const LIB = new URL('../lib/index.js', import.meta.url).pathname
+const LIB = fileURLToPath(new URL('../lib/index.js', import.meta.url))
 const ws5 = createWebServer()
 let instError = null
 try {
@@ -202,10 +202,14 @@ check('R-6', '路由已被别处登记 → 容忍，且不替人注销（注销�
     tolError ? `抛出：${String(tolError?.message ?? tolError)}` : '异常：无'])
 
 try {
-  rmSync(SANDBOX, { recursive: true, force: true })
+  safeRm(SANDBOX)
 } catch {
   /* 清理失败不影响判据 */
 }
 const failed = results.filter((r) => !r.pass)
 line(`\n${'─'.repeat(64)}\n${failed.length === 0 ? `✅ 全绿（${results.length}/${results.length}）` : `❌ ${failed.length}/${results.length} 失败：${failed.map((f) => f.id).join(', ')}`}`)
 process.exit(failed.length === 0 ? 0 : 1)
+
+import { fileURLToPath } from 'node:url'
+
+import { safeRm } from './safe-rm.mjs'

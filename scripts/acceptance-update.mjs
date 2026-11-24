@@ -22,8 +22,8 @@ import { startEmbedStub } from './embed-stub.mjs'
 
 await ensureSelftestFixtures() // 隔离 home 内自铺 .selftest 三夹具（真向量；每次重铺）
 
-const ROOT = new URL('..', import.meta.url).pathname
-const VCP = '/home/h/app/VCPToolBox'
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const WS = join(ROOT, '.selftest', '教室建模写入测试')
 const BUCKET = '教室建模写入测试'
 
@@ -227,3 +227,5 @@ const failed = results.filter((r) => !r.pass)
 line(`${results.length - failed.length}/${results.length} PASS${failed.length ? `；FAIL：${failed.map((f) => f.id).join(', ')}` : ''}`)
 try { await stub?.stop() } catch { /* 已关 */ }
 process.exit(failed.length ? 1 : 0)
+
+import { fileURLToPath } from 'node:url'

@@ -115,7 +115,7 @@ export function cleanupIsolatedEnv() {
     return
   }
   try {
-    rmSync(ISOLATED_ROOT, { recursive: true, force: true })
+    safeRm(ISOLATED_ROOT)
   } catch {
     /* 清理失败不影响退出码 */
   }
@@ -133,3 +133,5 @@ if (ISOLATED_ROOT) {
     process.on(sig, onSignal)
   }
 }
+
+import { safeRm } from './safe-rm.mjs'

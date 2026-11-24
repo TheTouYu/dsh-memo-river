@@ -70,8 +70,8 @@ function draft(name, bucket) {
 
 /* ── 前置：双桶自净 ── */
 for (const c of [A_CWD, B_CWD]) {
-  rmSync(workspacePaths(c).root, { recursive: true, force: true })
-  rmSync(c, { recursive: true, force: true })
+  safeRm(workspacePaths(c).root)
+  safeRm(c)
   mkdirSync(c, { recursive: true })
 }
 const rootA = workspacePaths(A_CWD).root
@@ -125,12 +125,14 @@ const exec = (args) => discard.execute(args, { agent: { session: { id: 'draft-sc
   ])
 }
 
-rmSync(rootA, { recursive: true, force: true })
-rmSync(rootB, { recursive: true, force: true })
-rmSync(A_CWD, { recursive: true, force: true })
-rmSync(B_CWD, { recursive: true, force: true })
+safeRm(rootA)
+safeRm(rootB)
+safeRm(A_CWD)
+safeRm(B_CWD)
 
 hr('结果')
 const pass = results.filter((r) => r.pass).length
 line(`${pass}/${results.length} PASS`)
 process.exit(pass === results.length ? 0 : 1)
+
+import { safeRm } from './safe-rm.mjs'

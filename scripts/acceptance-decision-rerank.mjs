@@ -45,7 +45,7 @@ function check(id, title, pass, evidence) {
   for (const e of [].concat(evidence)) line(`    ${e}`)
 }
 
-const VCP = '/home/h/app/VCPToolBox'
+const VCP = process.env.MEMO_VCP_ROOT ?? (process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river/.vcp-absent' : '/home/h/app/VCPToolBox')
 const bucket = '决策重排'
 /** 所有腿共用的会话名——inject 日志行含 session=，跨腿比对必须同名。 */
 const SESSION = 'sess-decision-fixture'
@@ -129,9 +129,9 @@ mkdirSync(ROOT, { recursive: true })
 /** 集成腿环境（同 inject-dedup 的 makeEnv，多挂一个 ws.logger 内存 sink 抓日志行）。 */
 function makeEnv(legName, injectOverrides = {}) {
   const cwd = join(ROOT, legName)
-  rmSync(cwd, { recursive: true, force: true })
+  safeRm(cwd)
   mkdirSync(cwd, { recursive: true })
-  rmSync(workspacePaths(cwd, bucket).root, { recursive: true, force: true })
+  safeRm(workspacePaths(cwd, bucket).root)
   const config = ConfigSchema({ bucket, native: { vcpRoot: VCP }, inject: injectOverrides })
   const h = createMockCtx()
   apply(h.ctx, config)
@@ -610,7 +610,7 @@ if (RECORD) {
 
       await Promise.all([goodServer, staleServer, slowServer, badShapeServer, garbageServer, http500Server, stallServer].map((s) => s.close()))
     }
-    rmSync(ROOT, { recursive: true, force: true })
+    safeRm(ROOT)
   }
 }
 
@@ -622,3 +622,5 @@ if (results.length > 0) {
   line('═'.repeat(88))
   if (passed !== results.length) process.exitCode = 1
 }
+
+import { safeRm } from './safe-rm.mjs'

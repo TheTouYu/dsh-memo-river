@@ -64,4 +64,6 @@ console.log(`连续失败段：${runs.length ? JSON.stringify(runs) : '无'}（�
 const firstFail = rows.find((r) => r.status !== 'ok')
 console.log(`首次失败出现在第 ${firstFail ? firstFail.i : '—'} 次${firstFail ? `（第 ${((firstFail.i / N) * 100).toFixed(0)}% 处）` : ''}`)
 try { await client.flushCache() } catch {}
-rmSync(TMP, { recursive: true, force: true })
+safeRm(TMP)
+
+import { safeRm } from './safe-rm.mjs'

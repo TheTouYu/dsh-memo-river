@@ -20,7 +20,7 @@ const ROOT = import.meta.dirname
 const SCRATCH = join(ROOT, '..', '.scratch', 'h7-probe')
 const DSH_HOME = join(SCRATCH, 'dsh-home')
 const WS = join(SCRATCH, 'ws')
-rmSync(SCRATCH, { recursive: true, force: true })
+safeRm(SCRATCH)
 mkdirSync(DSH_HOME, { recursive: true })
 mkdirSync(WS, { recursive: true })
 process.env.DSH_HOME = DSH_HOME // 必须在 import lib 之前
@@ -31,9 +31,9 @@ const EMBED_KEY = process.env.H7_EMBED_KEY ?? 'local'
 const EMBED_MODEL = process.env.H7_EMBED_MODEL ?? 'bge-m3'
 const DIM = 1024
 
-const { Config } = await import(join(LIB, 'config.js'))
-const { acquireWorkspace } = await import(join(LIB, 'workspace.js'))
-const { writeDiaryCore } = await import(join(LIB, 'tools.js'))
+const { Config } = await import(pathToFileURL(join(LIB, 'config.js')).href)
+const { acquireWorkspace } = await import(pathToFileURL(join(LIB, 'workspace.js')).href)
+const { writeDiaryCore } = await import(pathToFileURL(join(LIB, 'tools.js')).href)
 
 const config = Config({
   bucket: 'h7probe',
@@ -118,3 +118,7 @@ check(
 
 console.log(`\n${pass}/${pass + fail}`)
 process.exit(fail === 0 ? 0 : 1)
+
+import { pathToFileURL } from 'node:url'
+
+import { safeRm } from './safe-rm.mjs'

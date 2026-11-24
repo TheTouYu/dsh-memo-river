@@ -20,8 +20,8 @@ import { dirname, join } from 'node:path'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..')
 
-const { renderInjection, BLOCK_CLOSE, BLOCK_OPEN } = await import(join(ROOT, 'lib/render.js'))
-const { Config } = await import(join(ROOT, 'lib/config.js'))
+const { renderInjection, BLOCK_CLOSE, BLOCK_OPEN } = await import(pathToFileURL(join(ROOT, 'lib/render.js')).href)
+const { Config } = await import(pathToFileURL(join(ROOT, 'lib/config.js')).href)
 
 const CONTRACT_MARK = '[用法]'
 let pass = 0
@@ -149,3 +149,5 @@ if (fail === 0) {
 }
 console.log(`${pass}/${pass + fail}，失败 ${fail} 项`)
 process.exit(1)
+
+import { pathToFileURL } from 'node:url'
