@@ -85,6 +85,37 @@ export interface NativeVexusModule {
   VexusIndex: new (dim: number, capacity: number) => NativeVexusIndex
   NativeKnowledgeRuntime?: new (tagIndex: NativeVexusIndex) => NativeKnowledgeRuntime
   VexusWatcher?: unknown
+  /**
+   * VCP 2.0 P3 几何资产单点（reimpl 内核顶层导出；上游是 `runtime.computeMemoGeometry`，
+   * 形状见 kernel/docs/reverse-geometry-9aa1f67.md）。一次任务同时产出：
+   *   · `kv_store['epa_basis_cache']`（EPA 轴分析读它）
+   *   · `tag_intrinsic_residuals(_status)`（fact matrix 的 residual 档）
+   *   · `tagmemo_artifacts.asset_type='unified_geometry'` + 缓存命中行
+   * 缺省配置（`{}`）即上游 KBM 缺省：local{maxNeighbors48,minNeighbors3,maxBasis4,minGain0.015}、
+   * global{starNeighbors48,candidatePool512,kMax32,kSem8,priorMode:support}。
+   */
+  runMemoGeometry?(
+    dbPath: string,
+    modelSig: string,
+    configJson: string,
+    dimensions: number,
+  ): Promise<NativeGeometryResult>
+}
+
+/** runMemoGeometry 的返回（napi camelCase；字段名对齐 kernel/src/memo_geometry.rs GeometryResult）。 */
+export interface NativeGeometryResult {
+  success: boolean
+  artifactSig: string
+  configHash: string
+  algorithmVersion: string
+  tagCount: number
+  computedCount: number
+  skippedCount: number
+  vectorFallbackCount: number
+  kEff: number
+  coverage: number[]
+  elapsedMs: number
+  phaseSummary: string
 }
 
 const requireFromHere = createRequire(import.meta.url)
@@ -202,16 +233,31 @@ export interface ArtifactState {
   resident: boolean
   sourceElapsedMs?: number
   /**
-   * 除图资产外，生产链还依赖三类**派生资产**，rebuildMemoArtifact 本身不产出它们：
-   *   · EPA 基底    → computeEpaBasis + publishEpaBasisCache（kv_store.epa_basis_cache）
-   *   · 内生残差    → computeIntrinsicResiduals（tag_intrinsic_residuals / _status）
-   *   · Tag 成对距离 → computePairwiseSimilarities（tag_pair_similarity / _status）
-   * 实测（DESIGN 验收 #8）：缺这三类时读出仍能跑，但近似并列处会翻转名次。
+   * 除图资产外，生产链还依赖**派生资产**，`rebuildMemoArtifact` 本身不产出它们：
+   *   · 旧（vcp 轨）三分：EPA 基底 / 内生残差 / Tag 成对距离——上游三件独立导出；
+   *   · 新（reimpl 轨，VCP 2.0 P3）：一次 `runMemoGeometry` 的 AGS 统一几何同时产出
+   *     EPA 基底缓存与内生残差，`pairwise` 表已退役（factMatrixMode 缺省 vectors）。
+   * 实测（DESIGN 验收 #8）：缺派生资产时读出仍能跑，但近似并列处会翻转名次。
    */
   assets: {
     epaBasis: { ok: boolean; basisCount: number; error: string | null }
     residuals: { ok: boolean; computed: number; skipped: number; error: string | null }
     pairwise: { ok: boolean; stored: number; error: string | null }
+    /** 仅 reimpl 轨（内核导出 runMemoGeometry）才有的几何诊断；vcp 轨为 undefined。 */
+    geometry?: {
+      ok: boolean
+      artifactSig: string
+      algorithm: string
+      tagCount: number
+      computed: number
+      skipped: number
+      /** 有有效向量的 tag 数（向量兜底档可用量，不是失败数）。 */
+      vectorTags: number
+      kEff: number
+      elapsedMs: number
+      phaseSummary: string
+      error: string | null
+    }
   }
 }
 
@@ -412,42 +458,92 @@ export class MemoEngine {
         }
 
     if (!unchanged || force) {
-      // EPA 基底：先只读计算，再短租约发布
-      try {
-        const epa = (await this.withNative(() => ti.computeEpaBasis(dbPath, 64, 64))) as {
-          basisCount?: number
+      const mod = this.mod
+      if (mod && typeof mod.runMemoGeometry === 'function') {
+        /* ── reimpl 轨（VCP 2.0 P3）：几何资产单点 ──────────────────────────────
+         * 内核把 EPA 基底 / 内生残差 / Tag 星团几何三件合成一次 AGS 任务；上游 2.0 里
+         * `computeEpaBasis` / `computeIntrinsicResiduals` / `computePairwiseSimilarities`
+         * 三个独立导出已退役（pairwise 表也由 migrate_geometry_assets DROP），
+         * 还按旧 API 调只会拿到 "is not a function" 并把 assets 全标红。
+         * 配置取 `rag_params.json` 的 `geometry` 段（无则 `{}` = 上游 KBM 缺省）。
+         * 成本实测（1024 维）：30 tag ≈ 8ms、120 ≈ 25ms、300 ≈ 34ms、500 ≈ 51ms，
+         * 命中缓存 2–9ms——只在 artifact 换代时跑，注入热路径可承受。 */
+        try {
+          const geo = (await this.withNative(() =>
+            mod.runMemoGeometry!(
+              dbPath,
+              modelSig,
+              JSON.stringify(bag(this.kbm.geometry)),
+              this.options.dimension,
+            ),
+          )) as NativeGeometryResult
+          const ok = geo?.success !== false
+          assets.epaBasis = { ok, basisCount: geo?.kEff ?? 0, error: null }
+          assets.residuals = { ok, computed: geo?.computedCount ?? 0, skipped: geo?.skippedCount ?? 0, error: null }
+          /* P3 起 tag 成对相似度表退役（factMatrixMode 缺省 vectors，几何走星团/残差），
+           * 字段保留只为诊断形状兼容——不是「失败」，别让 assets 报红。 */
+          assets.pairwise = { ok, stored: 0, error: null }
+          assets.geometry = {
+            ok,
+            artifactSig: geo?.artifactSig ?? '',
+            algorithm: geo?.algorithmVersion ?? '',
+            tagCount: geo?.tagCount ?? 0,
+            computed: geo?.computedCount ?? 0,
+            skipped: geo?.skippedCount ?? 0,
+            vectorTags: geo?.vectorFallbackCount ?? 0,
+            kEff: geo?.kEff ?? 0,
+            elapsedMs: geo?.elapsedMs ?? 0,
+            phaseSummary: geo?.phaseSummary ?? '',
+            error: null,
+          }
+        } catch (e) {
+          const error = String((e as Error)?.message ?? e)
+          assets.epaBasis = { ok: false, basisCount: 0, error }
+          assets.residuals = { ok: false, computed: 0, skipped: 0, error }
+          assets.pairwise = { ok: false, stored: 0, error }
+          assets.geometry = {
+            ok: false, artifactSig: '', algorithm: '', tagCount: 0, computed: 0, skipped: 0,
+            vectorTags: 0, kEff: 0, elapsedMs: 0, phaseSummary: '', error,
+          }
         }
-        const published = this.tagIndex.publishEpaBasisCache(dbPath) as { success?: boolean; basisCount?: number }
-        assets.epaBasis = {
-          ok: published?.success !== false,
-          basisCount: published?.basisCount ?? epa?.basisCount ?? 0,
-          error: published?.success === false ? 'publish-failed' : null,
+      } else {
+        // EPA 基底：先只读计算，再短租约发布
+        try {
+          const epa = (await this.withNative(() => ti.computeEpaBasis(dbPath, 64, 64))) as {
+            basisCount?: number
+          }
+          const published = this.tagIndex.publishEpaBasisCache(dbPath) as { success?: boolean; basisCount?: number }
+          assets.epaBasis = {
+            ok: published?.success !== false,
+            basisCount: published?.basisCount ?? epa?.basisCount ?? 0,
+            error: published?.success === false ? 'publish-failed' : null,
+          }
+        } catch (e) {
+          assets.epaBasis = { ok: false, basisCount: 0, error: String((e as Error)?.message ?? e) }
         }
-      } catch (e) {
-        assets.epaBasis = { ok: false, basisCount: 0, error: String((e as Error)?.message ?? e) }
-      }
-      // 内生残差（V7/V9.1）
-      try {
-        const res = (await this.withNative(() =>
-          ti.computeIntrinsicResiduals(dbPath, null, null, modelSig, null),
-        )) as {
-          computedCount?: number
-          skippedCount?: number
+        // 内生残差（V7/V9.1）
+        try {
+          const res = (await this.withNative(() =>
+            ti.computeIntrinsicResiduals(dbPath, null, null, modelSig, null),
+          )) as {
+            computedCount?: number
+            skippedCount?: number
+          }
+          assets.residuals = { ok: true, computed: res?.computedCount ?? 0, skipped: res?.skippedCount ?? 0, error: null }
+        } catch (e) {
+          assets.residuals = { ok: false, computed: 0, skipped: 0, error: String((e as Error)?.message ?? e) }
         }
-        assets.residuals = { ok: true, computed: res?.computedCount ?? 0, skipped: res?.skippedCount ?? 0, error: null }
-      } catch (e) {
-        assets.residuals = { ok: false, computed: 0, skipped: 0, error: String((e as Error)?.message ?? e) }
-      }
-      // Tag 成对语义距离（V8.2，增量）
-      try {
-        const pair = (await this.withNative(() =>
-          ti.computePairwiseSimilarities(dbPath, modelSig, null, false),
-        )) as {
-          storedCount?: number
+        // Tag 成对语义距离（V8.2，增量）
+        try {
+          const pair = (await this.withNative(() =>
+            ti.computePairwiseSimilarities(dbPath, modelSig, null, false),
+          )) as {
+            storedCount?: number
+          }
+          assets.pairwise = { ok: true, stored: pair?.storedCount ?? 0, error: null }
+        } catch (e) {
+          assets.pairwise = { ok: false, stored: 0, error: String((e as Error)?.message ?? e) }
         }
-        assets.pairwise = { ok: true, stored: pair?.storedCount ?? 0, error: null }
-      } catch (e) {
-        assets.pairwise = { ok: false, stored: 0, error: String((e as Error)?.message ?? e) }
       }
     }
 
