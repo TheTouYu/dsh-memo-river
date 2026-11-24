@@ -1,7 +1,24 @@
-# 由 local/patches 之外的迁移工具生成：旧目录预设 memo-river → bundle 声明。
-# 生成源：$DSH_HOME/.agent-presets/memo-river/（preset.yml + agent.cordis.yml）
-# 依据：dsh-v0.1.7-rc.2 packages/preset/agent-preset/skills/editing-cordis-compositions/SKILL.md
-# 改这个文件等于改预设；改完需要重新 install_bundle。
+# 记忆河流（Memo River）— agent preset 声明 + 插件主体
+#
+# 这是**本仓的 bundle patch**：`package.json` 的 `dsh.bundle.patch` 指向本文件，
+# 因此 `plugin_manager install_bundle <仓库根>` 一次完成「装包 + 选 bundle + 挂预设」。
+#
+# 生成源：DSH 0.2.2-rc.5 出厂 `standard` 预设
+#   （app.asar\dsh\node_modules\@deepseek-ai\dsh-web-app\presets\standard.patch.yml）
+# 逐行复制后**只插入**一个私有分组 `memo-river`；其余行与出厂保持逐字一致——
+# 宿主升级时拿新版 standard.patch.yml 重新对齐即可，不要在这里发明新行。
+#
+# 历史：2026-09 版是照 0.1.7 的 standard 手抄的，到 0.2.x 已漂移
+# （tool-ralph / tool-subagent backgroundMode / persona {{cwd}} 等都变了），
+# 直接装会在挂载期报错。本版按 0.2.2 出厂件重写（2026-11-25）。
+#
+# 平台差异（同一份 patch 两平台通用，值用 !!js 分岔）：
+#   · 嵌入主端点：Windows = 本机 llama.cpp 8091 / Qwen3-Embedding-0.6B；
+#                 Linux   = 本机 bge-m3 8099，远端 OpenRouter 作保底泳道。
+#   · native.kernel：两平台都用 'reimpl'（本仓 kernel/ 复刻）；'vcp' 需要上游
+#     rust-vexus-lite 二进制，只在装了 VCPToolBox 的机器上可用。
+#   · 调参面板 dsh-memo-tuner 是独立的 client 包，本仓不含其构建产物；
+#     未安装该包的环境（如本机）默认 disabled，装好后把 disabled 去掉即可。
 
 - insert:
     - id: preset-memo-river
@@ -12,355 +29,185 @@
         description: "VCPToolBox TagMemo/RiverMemo 记忆算法接入：每轮被动注入相关日记片段（带 role/Ω 证据分级），写入前强制回注旧 Tag 词汇，守护循环做语料体检（连通性/枢纽度）。"
         order: 2
         plugins:
-        # The `memo-river` agent preset: the standard coding agent, plus the Memo River
-        # memory trunk (VCPToolBox TagMemo/RiverMemo).
-        #
-        # Copied from the shipped `standard` preset, then extended with ONE private row:
-        # the `memo-river` plugin below. Everything else is `standard` unchanged — this
-        # preset adds a memory capability, it does not remove or re-plane anything.
-        #
-        # The added row contributes, per session:
-        #   · a FIXED system-prompt section (`memo-river:contract`) — byte-identical on
-        #     every turn and every session, so the request prefix cache stays intact;
-        #   · a per-turn TAIL injection of recalled diary fragments, carrying role / Ω /
-        #     reward evidence grading and an explicit "not injected" note;
-        #   · four tools (memo_recall / memo_write / memo_tags / memo_stats);
-        #   · a timer-driven maintenance loop doing corpus health checks.
-        # All dynamic recall rides the message tail; nothing dynamic enters the system
-        # prompt. Session state is keyed by session id — never a global lastXxx.
-        #
-        # This file is an AGENT-PLANE composition. The roster mounts it ONCE under a
-        # standing scope; every session naming it joins by scope parentage, so the
-        # tools and prompt sections registered here cover each joined agent while a
-        # session's own state stays keyed per Session/Agent inside the plugins. The
-        # host composition (`base.cordis.yml` + `web.cordis.yml`) keeps everything a
-        # preset must not own: the registries themselves, the sandbox and approval
-        # stack, persistence, and the model route.
-        #
-        # A service row here MUST sit inside a group carrying an `isolate` realm.
-        # Without one it publishes into the root realm, where it is process-global —
-        # another preset publishing the same name collides, and a host reader would
-        # resolve one preset's instance for every session; `dsh-agent-presets` rejects
-        # that at mount. `true` means an entry-local realm: this standing mount's own
-        # private instance, apart from every other preset's. (A shared label does NOT
-        # pool instances — `provide()` throws on the second registration under the
-        # same realm symbol; labels join REALMS, and are not what this file needs.)
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: You are a coding agent powered by the {{model}} model.
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
 
-        # ── identity ────────────────────────────────────────────────────────────────
+          # ── 记忆河流（本预设的私有能力，DESIGN.md §5.1）─────────────────────────
+          # 只在 isolate 里放本插件自己的命名空间：`llm` / `systemPrompt` / `tools` /
+          # `webServer` 必须留给宿主注册表——一旦写进 isolate，本行解析不到服务，
+          # 注入与工具会静默失效（DESIGN §5.2）。
+          - id: memo-river
+            name: cordis:group
+            group: true
+            isolate:
+              memoRiver: true
+            config:
+              - id: memo-river-plugin
+                name: '@dsh-external/dsh-memo-river'
+                config:
+                  workspaceScoped: true
+                  intervalMs: 900000           # 守护循环 15 分钟
+                  # providerOrder：把 OpenRouter 的按价负载均衡钉到单一 provider。
+                  # 不定它时同一文本会被路由到 DeepInfra/Parasail 两家，逐元素差
+                  # 3.8e-4~7.3e-4（逐位不可复现，见 scripts/probe-embed-provider-routing.mjs）。
+                  # 本地端点（Windows 8091 / Linux 8099）不吃这个键。
+                  embed:
+                    apiUrl: !!js process.platform === 'win32' ? 'http://127.0.0.1:8091' : 'http://127.0.0.1:8099'
+                    apiKey: 'local'
+                    model: !!js process.platform === 'win32' ? 'Qwen3-Embedding-0.6B' : 'baai/bge-m3'
+                    dimension: 1024
+                    fallbackApiUrl: !!js process.platform === 'win32' ? '' : 'https://openrouter.ai/api'
+                    fallbackApiKey: !!js process.platform === 'win32' ? '' : (process.env.TAG_EMBED_KEY || '')
+                    fallbackModel: !!js process.platform === 'win32' ? '' : 'baai/bge-m3'
+                    fallbackProviderOrder: !!js process.platform === 'win32' ? '' : 'Parasail'
+                  inject:
+                    gate: true
+                    k: 3
+                    # 3500 让三条入选都带 240 字片段（2026-09-12 口径）；::Truncate 语义不变。
+                    tokenBudget: 3500
+                    mode: 'topology_v3'
+                    # 时间锚 7 分钟 + 汇报轮锚 2 轮（2026-09-13 口径）。
+                    writeNudgeEveryMinutes: 7
+                    writeNudgeEveryTurns: 2
+                    # 门控只看**当前这条用户消息**的向量；检索仍用 queryLookback 窗口。
+                    gateOnCurrentMessage: true
+                    # 注入路径嵌入短超时。本地端点常态 40-60ms，超时是上限不是等待量；
+                    # 远端保底泳道长尾实测 11.3s，15s 覆盖它。
+                    embedTimeoutMs: 15000
+                  native:
+                    kernel: 'reimpl'
+                    vcpRoot: !!js process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river' : '/home/h/app/VCPToolBox'
 
-        # The preset's own persona, shadowing the deployment default for this agent.
-        # `{{model}}` and `{{cwd}}` resolve from the agent's own route and workspace.
-        - id: persona
-          name: '@deepseek-ai/dsh-persona'
-          config:
-            # 2026-10-17 上游 0.2.1 注销内置 {{cwd}} 变量：保留该句会让 prompt 组装直接失败
-            # （unknown prompt variable in section deployment:persona-suffix）。suffix 置空即省略。
-            suffix: ''
-            # 2026-10-14 用户裁决：删 persona 身份句——宿主 harness:identity 已给身份，
-            # 同义第二句属冗余（river-acp 家族同批清理）。prefix 留空 = 只保留平台身份行。
-            prefix: ''
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              applyPatch: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: tool-schedule
+            name: '@deepseek-ai/dsh-tool-schedule'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+            config:
+              customSkillDirs:
+                - !!js process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('@deepseek-ai/dsh-agent-preset/package.json')), 'skills')
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                    You are in plan mode. Stay in plan mode until the user approves your plan through exit_plan_mode or switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
 
-        - id: agent-instructions
-          name: '@deepseek-ai/dsh-agent-instructions'
-          config:
-            maxBytes: 65536
+                    Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
 
-        # ── 记忆河流（本预设的私有能力，DESIGN.md §5.1）────────────────────────────
-        #
-        # 本地 `.mjs` 引用是本部署的既有模式（见 `router-standard-v34` 的
-        # `./router-bootstrap-v34.mjs?v=88`）：`?v=N` 由 `dev_reload_preset` 自增，
-        # 组合文件指纹一变、新会话即挂载新一代，不必改文件名、不必重启。
-        #
-        # 隔离组（DESIGN §5.2）：本插件只 `inject`（llm / systemPrompt / tools）不
-        # `provide`，理论上无需 realm；但 §5.2 明确要求「仍应放进隔离组以防万一」，
-        # 故此处照办。isolate 的键是本插件自己的私有命名空间，不遮挡它要消费的三个
-        # host 服务——这正是关键：一旦把 `llm`/`systemPrompt`/`tools` 写进 isolate，
-        # 本行就再也解析不到 host 的注册表，工具与注入会静默失效。
-        - id: memo-river
-          name: cordis:group
-          group: true
-          isolate:
-            memoRiver: true
-          config:
-            - id: memo-river-plugin
-              name: '@dsh-external/dsh-memo-river'
-              config:
-                workspaceScoped: true
-                intervalMs: 900000          # 守护循环 15 分钟
-                # providerOrder：把 OpenRouter 的按价负载均衡钉到单一 provider。不定它时同一文本会被
-                # 路由到 DeepInfra/Parasail 两家，逐元素差 3.8e-4~7.3e-4（逐位不可复现，见
-                # scripts/probe-embed-provider-routing.mjs）；钉住后连打 3 次逐元素差 0.00e+0。
-                # 2026-10-15 切换：主端点 = 本地 bge-m3（RTX 3060 fp16，单条 p50 25ms vs 远端 1.9s）；
-                # 保底 = OpenRouter（主端点失败自动回退，见 src/embed.ts 端点泳道 + src/embed-health.ts 台账）。
-                # 回退无需重启即可演练：systemctl --user stop dsh-embed → 自动走保底。
-                embed:
-                  apiUrl: 'http://127.0.0.1:8099'
-                  apiKey: 'local'
-                  model: 'baai/bge-m3'
-                  dimension: 1024
-                  fallbackApiUrl: 'https://openrouter.ai/api'
-                  fallbackApiKey: !!js process.env.TAG_EMBED_KEY || ''
-                  fallbackModel: 'baai/bge-m3'
-                  fallbackProviderOrder: 'Parasail'
-                inject:
-                  gate: true
-                  k: 3
-                  # 600 时「表头 + 3 行条目」就把预算吃光，注入块只剩标题+标签、
-                  # 一行正文都没有（实测 genshin 会话 5 次注入，缩进正文行数全是 0）。
-                  # 1500（按全文 token 计费）实测只有第一条带完整片段、其余仅首句
-                  # （每篇全文 802–1111 token）。3500 让三条入选都带 240 字片段，
-                  # 注入块 ~780→~1200 字；::Truncate 语义不变（2026-09-12 用户拍板）。
-                  tokenBudget: 3500
-                  mode: 'topology_v3'
-                  # 时间锚口径：只量「模型实际思考时间」（llm/stream 流时长累计，activeMs），
-                  # 工具执行与空闲不计入——空闲回来第一条消息不触发欠账（2026-09-13 用户拍板）。
-                  # 写入节律提醒双锚（2026-09-13 用户拍板）：
-                  # · 时间锚 7 分钟（30→15→7：提醒只有两行，成本极低收益可观；防噪靠三重闸+去重闸门）
-                  # · 汇报轮锚 2 轮（小轮=用户一条消息→内部多步→实质性汇报收尾；两轮汇报未写即提醒，
-                  #   兜住快节奏会话——7 分钟内连出两轮汇报也该催）
-                  writeNudgeEveryMinutes: 7
-                  writeNudgeEveryTurns: 2
-                  # 门控只看**当前这条用户消息**的向量；检索仍用 queryLookback 条窗口。
-                  # 解耦的理由（实测，scripts/exp-queryfield.mjs 4 可复跑）：
-                  # 窗口拼接越长越靠近语料质心，任何查询的 maxKnn 都被抬高，
-                  # 阈值 0.55 只在 w1 有判别力——w≥2 时三条无关负例全部误通过（0.57~0.78）。
-                  gateOnCurrentMessage: true
-                  # 票 01 的默认 3000 是按「端点单条 RTT 1.19-1.45s（connect 0.4 +
-                  # TLS 0.8）」定的标；2026-09-25 实测同一端点已是 2.69/4.69/4.74s，
-                  # 且多出来的时间在服务端首字节（connect+TLS 仍 ~1.16s，未变）——
-                  # 不带嵌入的 /v1/models 同样慢、2 字与 720 字输入耗时几乎相同，
-                  # 即网关固定开销而非计算量。3s 于是每次都撞上限：
-                  # inject-skip reason=embed-timeout，被动召回整条丢掉（写侧与主动
-                  # memo_recall 走 60s 宽松默认，不受影响，故只有注入静默失效）。
-                  # 8000 给离群（实测见过 9.2s / 12.6s）留出余量，同时仍有硬顶，
-                  # 不退回「吞掉整轮交互预算」的老问题。
-                  # **2026-10-18：8000 → 15000。** 游戏运行期间 dsh-embed 按设计停服
-                  # （dsh-game-mode.sh + ExecCondition），主端点 8099 连接被拒仅 4ms，
-                  # 由保底泳道 OpenRouter 接手；但保底实测长尾远超本地（连测 5 次单文本
-                  # 2.62/2.67/2.72/3.61/**11.31** s），11.3s 超 8s 预算 → 游戏期间间歇
-                  # embed-timeout（用户当天实报）。15s 覆盖该长尾；超时是上限不是等待量，
-                  # 主泳道 1-2s 的常态不受影响。
-                  # ⚠️ 这个字面值才是生产生效的那份——config.ts 的 default 只是 schema
-                  # 缺省，本行显式给了值就盖住它。改预算要改这里（两处都改为最稳）。
-                  embedTimeoutMs: 15000
-                native: { vcpRoot: '/home/h/app/VCPToolBox' }
+                    The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
 
-        # ── shell ───────────────────────────────────────────────────────────────────
+                    Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
 
-        # `shell-env` stays in the HOST composition: `apps/cli/src/web.ts` injects it to
-        # publish `DSH_WEB_URL`/`DSH_WEB_MODE`, and a host row that injects a service is
-        # the criterion for host-plane ownership — injection resolves before any session
-        # exists, so there is no agent to key by. Behind a preset realm those variables
-        # never reached the model's shell at all. Both shell tools consume the host
-        # registry from here; their executors (`bash-sandbox`/`pwsh-sandbox`) are
-        # host-plane too.
-        - id: tool-bash
-          name: '@deepseek-ai/dsh-tool-bash'
-          disabled: !!js process.platform === 'win32'
+                    Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
 
-        - id: tool-pwsh
-          name: '@deepseek-ai/dsh-tool-pwsh'
-          disabled: !!js process.platform !== 'win32'
+                    When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+                config:
+                  interrupt: false
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelection: true
+                  modelDiscovery: true
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+          - id: tool-office
+            name: '@deepseek-ai/dsh-tool-office'
+          - id: tool-plugin-manager
+            name: '@deepseek-ai/dsh-plugin-manager/tools'
+            disabled: !!js "!ctx.get('profileContext')"
+          - id: tool-plugin-market
+            name: '@deepseek-ai/dsh-plugin-market/tools'
+            disabled: true
 
-        # ── filesystem ──────────────────────────────────────────────────────────────
-
-        # Both register into the host `tools` registry and provide nothing, so
-        # they need no realm. The `fs` service and its policy stay in the host.
-        - id: tool-fs
-          name: '@deepseek-ai/dsh-tool-fs'
-
-        - id: tool-fs-search
-          name: '@deepseek-ai/dsh-tool-fs-search'
-          config:
-            sampleOverCapGlobResults: false
-
-        # ── background jobs ────────────────────────────────────────────────────────
-
-        # Only the model-facing controls. The task REGISTRY stays on the host plane:
-        # its producers sit outside any realm this file could put it in — `tool-bash`
-        # above resolves it with `ctx.get`, and an entry-local realm here is invisible
-        # to every sibling row, so `run_in_background` would answer "background jobs
-        # unavailable" while these controls sat in the catalog. The registry is keyed by
-        # owning agent anyway, so one host instance serves every session. What a preset
-        # chooses is whether its agent can collect and stop background work at all.
-        - id: tool-jobs
-          name: '@deepseek-ai/dsh-tool-jobs'
-
-        # ── skills ──────────────────────────────────────────────────────────────────
-
-        # The skill REGISTRY lives in the host composition and is layered per scope:
-        # these rows register into THIS preset's layer of it, so they need no realm.
-        # `skill-filesystem` contributes local-root discovery for agents on this preset, and
-        # `tool-skill` gives them the catalog and loader; the merged catalog also
-        # carries whatever the deployment registered globally (repository plugins).
-        - id: skill-filesystem
-          name: '@deepseek-ai/dsh-skill-filesystem'
-
-        - id: tool-skill
-          name: '@deepseek-ai/dsh-tool-skill'
-
-        # ── goals ───────────────────────────────────────────────────────────────────
-
-        # The goal service and session driver stay on the host plane, where the Gateway
-        # can resolve them. The human command and model-facing tool register into this
-        # preset's scoped layers.
-        - id: command-goal
-          name: '@deepseek-ai/dsh-command-goal'
-
-        - id: tool-goal
-          name: '@deepseek-ai/dsh-tool-goal'
-
-        # ── plan mode ───────────────────────────────────────────────────────────────
-
-        # Plan state is per-agent by nature, so an entry-local realm is not a
-        # workaround here — it is the correct lifetime.
-        - id: planning
-          name: cordis:group
-          group: true
-          isolate:
-            planMode: true
-          config:
-            - id: plan-mode
-              name: '@deepseek-ai/dsh-plan-mode'
-              config:
-                section: |
-                      You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
-
-                      Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
-
-                      The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
-
-                      Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
-
-                      Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
-
-                      When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
-
-        # ── compaction ──────────────────────────────────────────────────────────────
-
-        # `compaction-basic` reads `toolResultPrune` through `ctx.get`, so the pruner must
-        # share this realm rather than sit outside it.
-        #
-        # `tokenMeter` is deliberately NOT in this realm: the meter stays on the HOST
-        # plane, and the rows here resolve that one instance. It takes no configuration,
-        # keys every fold by Session, and owns the context-meter projection units the
-        # browser reads for every session — behind a realm those units would come and go
-        # with whichever presets happen to be mounted. What a preset chooses is whether
-        # its agent compacts at all, which is `compaction-basic` below.
-        - id: compaction
-          name: cordis:group
-          group: true
-          isolate:
-            compaction: true
-            toolResultPruner: true
-          config:
-            - id: compaction-basic
-              name: '@deepseek-ai/dsh-compaction-basic'
-
-            - id: command-compact
-              name: '@deepseek-ai/dsh-command-compact'
-
-            - id: tool-result-pruner
-              name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
-              config:
-                thresholdChars: 8192
-                headChars: 4096
-                tailChars: 1024
-
-        # ── delegation and workflows ────────────────────────────────────────────────
-
-        # The `subagents` registry and its spawn/fork backends live in the HOST
-        # composition: the registry is a process singleton whose cross-session queries
-        # the api-proxy serves to the browser, and a provider name may only be
-        # registered once. This preset contributes the delegation TOOLS, which resolve
-        # that host registry.
-        #
-        # `workflows` is different — nothing outside an agent reads it — so every row
-        # that reaches it shares one entry-local realm here, and a consumer left
-        # outside would resolve a host registry this preset does not populate.
-        - id: delegation
-          name: cordis:group
-          group: true
-          isolate:
-            workflowEngine: true
-          config:
-            - id: tool-subagent-control
-              name: '@deepseek-ai/dsh-tool-subagent-control'
-
-            - id: tool-subagent-list-agents
-              name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
-
-            - id: tool-subagent
-              name: '@deepseek-ai/dsh-tool-subagent'
-              config:
-                provider: spawn
-                toolName: subagent
-                modelSelectionSettings: true
-            # Fork omits model selection so provider/model stay equal to the parent and
-            # the inherited history remains eligible for KV Cache reuse. This preset
-            # keeps fork continuable; parent and child inherit the same messaging tool,
-            # while the parent id and return guidance follow the inherited history.
-            - id: tool-subagent-fork
-              name: '@deepseek-ai/dsh-tool-subagent'
-              config:
-                provider: fork
-                toolName: subagent_fork
-            # Production dsh does not install these optional providers. Install the
-            # matching Bundle in this Profile and restart the Host, then copy this
-            # preset and remove `disabled` from the matching tool row. Host availability
-            # alone grants no tool.
-            - id: tool-subagent-codex
-              name: '@deepseek-ai/dsh-tool-subagent'
-              disabled: true
-              config:
-                provider: codex
-                toolName: subagent_codex
-                maxDepth: provider-managed
-
-            - id: tool-subagent-claude-code
-              name: '@deepseek-ai/dsh-tool-subagent'
-              disabled: true
-              config:
-                provider: claude-code
-                toolName: subagent_claude_code
-                maxDepth: provider-managed
-
-            - id: workflow-ptc
-              name: '@deepseek-ai/dsh-workflow-ptc'
-              config:
-                provider: spawn
-
-            - id: tool-workflow
-              name: '@deepseek-ai/dsh-tool-workflow'
-
-            - id: tool-ralph
-              name: '@deepseek-ai/dsh-tool-ralph'
-              config:
-                subagentProvider: spawn
-                maxRounds: 64
-
-        # ── remaining model-facing rows ─────────────────────────────────────────────
-
-        - id: tool-ask-user
-          name: '@deepseek-ai/dsh-tool-ask-user'
-
-        - id: tool-todo
-          name: '@deepseek-ai/dsh-tool-todo'
-          config:
-            allowParallelInProgress: true
-
-        # The `web` service and its search provider stay in the host composition; only
-        # the model-facing tool is per-session.
-        - id: tool-web
-          name: '@deepseek-ai/dsh-tool-web'
-          config:
-            fetch: true
-            searchTimeoutMs: 60000
-
-        - id: present
-          name: '@deepseek-ai/dsh-tool-present'
-
-# ── GUI 调参面板（client 半面，常驻 entry）──────────────────────────────
+# ── GUI 调参面板（client 半面，常驻 entry）──────────────────────────────────
+# 面板本体由插件自己的 webServer 路由提供（/memo-river/tuning[/panel]）；
+# 本行只负责让 client-modules 扫到一个 entry 去挂 client 半面。
+# 未安装 @dsh-external/dsh-memo-tuner 包的环境请保持 disabled。
 - insert:
     - id: dsh-memo-tuner
       name: '@dsh-external/dsh-memo-tuner'
+      disabled: true

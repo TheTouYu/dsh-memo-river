@@ -7,8 +7,17 @@
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
   "files": [
-    "lib"
+    "lib",
+    "kernel",
+    "bundle"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": [
+        "./bundle/cordis.patch.yml"
+      ]
+    }
+  },
   "license": "BSD-3-Clause",
   "dependencies": {
     "undici": "^8.10.2"
