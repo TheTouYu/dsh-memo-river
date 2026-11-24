@@ -17,7 +17,7 @@ node scripts/doctor.mjs     # ② 体检（全绿再往下）
 
 | 需要 | 为什么 | 怎么装 |
 |---|---|---|
-| **DSH**（Desktop ≥0.2.2，或源码 checkout） | 这是 DSH 插件，不是独立服务 | Desktop 装好并**至少启动过一次**（`scripts/setup.mjs` 会从 `app.asar` 抽类型）；源码路线设 `DSH_CHECKOUT` |
+| **DSH**（Desktop ≥0.2.2，或源码 checkout） | 这是 DSH 插件，不是独立服务 | Desktop 装好并**至少启动过一次**（`scripts/setup.mjs` 会读 asar 里的运行期版本、从 npm 装同版本类型包）；源码路线设 `DSH_CHECKOUT` |
 | **Node ≥ 22.5**（建议 24 LTS） | 知识库用 `node:sqlite` | https://nodejs.org |
 | **一个 OpenAI 兼容的嵌入端点** | 写入/召回要向量 | 任意外部端点，或本机 llama.cpp，见 [LOCAL-EMBED.md](./LOCAL-EMBED.md)。维度必须等于模型真实输出（缺省 1024） |
 | Rust（可选） | 原生内核 `kernel/` | 有 cargo 就源码编译；**Windows x64 没 Rust 也能跑**（仓库带预编译 `.node`） |
@@ -35,8 +35,8 @@ node scripts/setup.mjs
 
 1. 校验 Node；缺 `typescript` 就 `npm install`；
 2. 找**与运行期同一份**的 DSH 类型源并 link 进 `node_modules`：
-   - Desktop：用 Electron-as-node 把 `app.asar` 里的 dsh-tools / dsh-llm / dsh-system-prompt /
-     cordis / cosmokit / schemastery / undici / @types/node 抽到 `.deps/` 再链接；
+   - Desktop：`app.asar` **不含 `.d.ts`**（被剥掉了）——先从 asar 读出运行期版本，
+     `npm install --prefix .deps/types` 装**同版本**类型包，再抽运行期包到 `.deps/` 兜底；
    - npm 全局 dsh：直接链 `<prefix>/node_modules`；
    - 源码 checkout：链 `packages/` + `vendor/`。
 3. `tsc` 编译 `src/ → lib/`，并校验产物不是 0 字节假成功；
@@ -106,7 +106,7 @@ plugin_manager  action=install_bundle  target=<仓库绝对路径>
 |---|---|
 | `setup` 报「找不到 DSH」 | 先启动一次 Desktop；或设 `DSH_CHECKOUT` / `DSH_INSTALL_DIR` |
 | `npm install` 失败 | registry 不可达：`npm config set registry https://registry.npmmirror.com`，或挂代理；也可 `npm install` 后重跑 |
-| `tsc: Cannot find module 'cordis'` | 类型链接没建：`node scripts/setup.mjs --force-types` |
+| `tsc: Cannot find module 'cordis'` | 类型链接没建：`node scripts/setup.mjs --force-types` |`n| Desktop 离线、npm 装不了类型包 | Desktop 的 asar 没有 `.d.ts`；改用源码：`DSH_CHECKOUT=<dsh 源码> node scripts/setup.mjs` |
 | `kernel` 装载失败 | `node scripts/setup.mjs --kernel-only`；Windows 需 VS Build Tools 的 C++ 负载 |
 | `doctor` 嵌入端点 FAIL | 起服务见 [LOCAL-EMBED.md](./LOCAL-EMBED.md)，或设 `MEMO_EMBED_*` 指向外部端点 |
 | 维度不对（如 3072 vs 1024） | 插件**不发** `dimensions` 参数：`MEMO_EMBED_DIM` 必须等于模型真实输出 |

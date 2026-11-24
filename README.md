@@ -7,7 +7,7 @@
 
 ```bash
 git clone <repo> && cd dsh-memo-river
-node scripts/setup.mjs      # 备类型（Desktop 从 app.asar 抽）→ 编译 lib → 备内核（Windows 有预编译）
+node scripts/setup.mjs      # 备类型（Desktop 按 asar 里的运行期版本装同版本 .d.ts）→ 编译 lib → 备内核（Windows 有预编译）
 node scripts/doctor.mjs     # 体检：内核可装载 / 嵌入端点维度 / profile 是否已装
 ```
 

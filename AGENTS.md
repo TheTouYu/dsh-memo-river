@@ -18,7 +18,7 @@
 
 ## 构建红线
 
-- **外人路径（新克隆先跑这个）**：`node scripts/setup.mjs` → `node scripts/doctor.mjs` → 装 bundle（详见 `docs/GETTING-STARTED.md`）。setup 幂等处理三件事：① 缺 typescript 就 `npm install`；② 取**与运行期同源**的 DSH 类型（Desktop 从 `app.asar` 抽到 `.deps/` 再 junction、npm 全局装直接链 `node_modules`、源码 checkout 链 `packages/`+`vendor/`）；③ 内核（有 cargo 源码编、没有用 `kernel/prebuilt/<platform>-<arch>/`，Windows x64 随仓带一份）。`scripts/build.sh` 是 Linux 手工路径，保留作排障对照。`scripts/doctor.mjs` 是「装完为什么没生效」的读数入口（lib 新鲜度/kernel 装载/嵌入维度/profile 安装）。
+- **外人路径（新克隆先跑这个）**：`node scripts/setup.mjs` → `node scripts/doctor.mjs` → 装 bundle（详见 `docs/GETTING-STARTED.md`）。setup 幂等处理三件事：① 缺 typescript 就 `npm install`；② 取**与运行期同源**的 DSH 类型（Desktop：asar 不含 `.d.ts`，先读运行期版本、npm 装同版本类型包到 `.deps/types`；npm 全局装直接链 `node_modules`；源码 checkout 链 `packages/`+`vendor/`）；③ 内核（有 cargo 源码编、没有用 `kernel/prebuilt/<platform>-<arch>/`，Windows x64 随仓带一份）。`scripts/build.sh` 是 Linux 手工路径，保留作排障对照。`scripts/doctor.mjs` 是「装完为什么没生效」的读数入口（lib 新鲜度/kernel 装载/嵌入维度/profile 安装）。
 - **勿信 `.bin/tsc`**（兄弟仓 billion-context-dsh 的是 0 字节坏壳——退出码 0 零输出假成功）。编译：`node ../billion-context-dsh/node_modules/typescript/lib/tsc.js -p .`，编完 `grep -c <新标记> lib/<文件>.js` 必须非零。
 - 内核改动：`cd kernel && cargo build --release && ./install-kernel.sh`。**严禁 `cp` 原地覆盖 `.node`**（2026-10-22 四连崩事故：cp=O_TRUNC 同 inode，dsh-web 已 mmap 的代码页被替换 → SIGSEGV/SIGILL，NRestarts=3；install-kernel.sh 走临时文件+rename 换新 inode）。dsh-web 在跑时新内核需重启才生效，重启时机先与用户确认（全局守则 2）。同族红线：`cmd | tail && next` 会吃掉 cmd 的失败退出码——判据读输出内容或 `set -o pipefail`。
 

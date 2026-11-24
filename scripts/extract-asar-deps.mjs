@@ -70,5 +70,6 @@ while (queue.length) {
   for (const dep of Object.keys(pkg.dependencies ?? {})) if (!seen.has(dep)) queue.push(dep)
 }
 
+try { writeFileSync(join(dest, 'runtime.json'), readFileSync(join(asarRoot, 'package.json'))) } catch (e) { console.log('[extract] runtime.json 写入失败:', e.message) }
 console.log(`[extract] copied ${copied.length} packages, ${stats.files} files, ${(stats.bytes / 1048576).toFixed(1)} MB`)
 if (missing.length) console.log(`[extract] skipped ${missing.length}: ${missing.join(', ')}`)

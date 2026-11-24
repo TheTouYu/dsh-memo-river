@@ -156,10 +156,10 @@ async function checkProfile() {
   const recorded = String(dep).replace(/^(link|file):/, '')
   const resolved = recorded.startsWith('/') || /^[A-Za-z]:/.test(recorded) ? recorded : resolve(profileDir, recorded)
   if (resolve(resolved) !== ROOT) {
-    warn('profile 指向别的 checkout', `记录=${dep} 解析=${resolved}（本仓=${ROOT}）`)
+    return warn('profile 装的是另一个 checkout', `记录=${dep} 解析=${resolved}（本仓=${ROOT}）\n    若要用本仓：重装 bundle（remove → install）后再重启 DSH`)
   }
-  if (!inBundles) warn('bundle 未选中', `dsh.profile.bundles 里没有它 —— 重装：plugin_manager remove_bundle → install_bundle`)
-  else pass('profile 已装', `${profileDir}`)
+  if (!inBundles) return warn('bundle 未选中', 'dsh.profile.bundles 里没有它 —— 重装：plugin_manager remove_bundle → install_bundle')
+  pass('profile 已装', profileDir)
 }
 
 async function main() {

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /**
  * scripts/setup.mjs — 一条命令把仓库准备到可运行（Windows / macOS / Linux，零第三方依赖）。
  *
@@ -176,6 +176,47 @@ function extractAsarDeps(dsh) {
   if (res.status !== 0) fail('asar 抽取失败：确认 DeepSeek Harness 安装完整（Electron-as-node 可运行）')
 }
 
+const ASAR_TYPE_PKGS = [
+  '@deepseek-ai/dsh-tools',
+  '@deepseek-ai/dsh-llm',
+  '@deepseek-ai/dsh-system-prompt',
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/cosmokit',
+  '@deepseek-ai/schemastery',
+]
+
+/**
+ * Desktop 的 app.asar **剥掉了 .d.ts**，光抽包无法编译。
+ * 对策：从 asar 的 package.json 读出运行期版本，用 npm 装**同版本**的类型包到 .deps/types。
+ * （这就是「类型必须与运行期同一份」红线的落地方式；离线环境只能改用 DSH 源码 checkout。）
+ */
+function installAsarTypes() {
+  const typesDir = join(DEPS, 'types')
+  const marker = join(typesDir, 'node_modules', '@deepseek-ai', 'dsh-tools', 'package.json')
+  if (!FLAG('force-types') && existsSync(marker)) { log('.deps/types 类型包已就绪'); return true }
+  const runtimeFile = join(DEPS, 'runtime.json')
+  if (!existsSync(runtimeFile)) { warn('缺 .deps/runtime.json，无法确定运行期版本'); return false }
+  let deps = {}
+  try { deps = JSON.parse(readFileSync(runtimeFile, 'utf8')).dependencies ?? {} } catch { /* 下面按空处理 */ }
+  const specs = ASAR_TYPE_PKGS.map((n) => (deps[n] ? `${n}@${deps[n]}` : null)).filter(Boolean)
+  if (specs.length < ASAR_TYPE_PKGS.length) {
+    warn(`runtime.json 只给出 ${specs.length}/${ASAR_TYPE_PKGS.length} 个包版本`)
+  }
+  if (!specs.length) return false
+  log(`Desktop asar 不含 .d.ts；从 npm 装同版本类型包（${specs.length} 个）…`)
+  rmSync(typesDir, { recursive: true, force: true })
+  mkdirSync(typesDir, { recursive: true })
+  const npm = IS_WIN ? 'npm.cmd' : 'npm'
+  const res = spawnSync(npm, ['install', '--prefix', typesDir, '--no-save', '--no-package-lock', '--no-audit', '--no-fund', ...specs], {
+    cwd: typesDir, stdio: 'inherit', shell: IS_WIN,
+  })
+  if (res.status !== 0) {
+    warn('类型包 npm 安装失败（离线/registry 不可达）：改用 .deps 的 asar 运行期包，tsc 可能报缺声明')
+    return false
+  }
+  return true
+}
+
 function ensureTypes(dsh) {
   if (FLAG('force-types')) {
     for (const [name] of LINK_PLAN) rmSync(join(NM, name), { recursive: true, force: true })
@@ -183,12 +224,19 @@ function ensureTypes(dsh) {
   const missing = LINK_PLAN.filter(([name]) => !existsSync(join(NM, name, 'package.json')))
   if (missing.length === 0) { log('类型/运行期包链接齐全'); return }
 
-  if (dsh.kind === 'asar') extractAsarDeps(dsh)
+  if (dsh.kind === 'asar') {
+    // 抽包拿到运行期包 + runtime.json；类型声明必须另从 npm 装同版本（asar 里被剥掉了）
+    extractAsarDeps(dsh)
+    installAsarTypes()
+  }
 
   for (const [name, pkg] of missing) {
     const candidates = []
     if (dsh.kind === 'nm') candidates.push(join(dsh.nodeModules, ...pkg.split('/')))
-    if (dsh.kind === 'asar') candidates.push(join(DEPS, 'node_modules', ...pkg.split('/')))
+    if (dsh.kind === 'asar') {
+      candidates.push(join(DEPS, 'types', 'node_modules', ...pkg.split('/')))
+      candidates.push(join(DEPS, 'node_modules', ...pkg.split('/')))
+    }
     if (dsh.kind === 'checkout' && CHECKOUT_PLAN[name]) candidates.push(join(dsh.checkout, ...CHECKOUT_PLAN[name]))
     if (name === '@standard-schema/spec' && dsh.kind === 'checkout') {
       // pnpm checkout：在 .pnpm 里找
@@ -249,7 +297,7 @@ function verifyKernel() {
 
 function buildKernel() {
   const kernelDir = join(ROOT, 'kernel')
-  const triple = `${platform()}-${arch()}-${KERNEL_EXT}`
+  const triple = `${platform()}-${arch()}`
   const cargo = spawnSync('cargo', ['--version'], { encoding: 'utf8' })
   const hasCargo = cargo.status === 0
 
