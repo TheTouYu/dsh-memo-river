@@ -127,6 +127,21 @@ try {
     `正文保留：${String(chunk3?.content ?? '').includes(BODY3) ? '✅' : '❌'}`,
   ])
 
+  /* ── T-3b 显式 title + 正文首行同一 `# ` 行 → 标题仍只拼一次（2026-11-25 实测缺陷回归） ── */
+  const TITLE3B = '显式与正文标题并存'
+  const r3b = String(await exec(writeTool, {
+    title: TITLE3B,
+    content: `# ${TITLE3B}\n\n显式 title 与正文标题行同时给出时，旧逻辑会让标题行出现两次。\n\nTag: ${TAGS}`,
+  }))
+  const f3b = ws.store.files(BUCKET).find((f) => f.path.includes('显式与正文标题并存'))
+  const chunk3b = f3b ? chunkOf(f3b.id) : null
+  const occ3b = chunk3b ? String(chunk3b.content).split('\n').filter((l) => l === `# ${TITLE3B}`).length : 0
+  const t3b = r3b.includes('✅ 已写入') && occ3b === 1
+  check('T-3b', '显式 title + 正文同一 `# ` 行 → 标题行恰好一次（双标题回归）', t3b, [
+    `标题行出现次数：${occ3b}（旧缺陷=2，应为 1）`,
+    `正文保留：${String(chunk3b?.content ?? '').includes('旧逻辑会让标题行出现两次') ? '✅' : '❌'}`,
+  ])
+
   /* ── T-4 memo_update 新正文无 `# ` 行 → 保留目标原标题 ── */
   const BODY4 = '改写后的正文没有标题行，应当保留改写目标的原标题，而不是降级成未命名。'
   const pathBefore = f2.path

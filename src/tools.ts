@@ -582,7 +582,8 @@ async function writeDiaryCoreLocked(
    * 「未命名」残次品不算保底）。三级皆无 → missing-title 拒绝——库内标题是强检索信号
    * （召回展示、memo_update/memo_merge 定位都吃它），宁拒不猜，不再自动落 `${date} 未命名`
    * （genshin-ts 存量实锤 + 2026-09-16 memo_update 活体复现，修复指引 docs/GUIDE-未命名存量修复.md）。
-   * 附带修复：标题取自正文 `# ` 行时该行从 body 剥掉——旧版 full 里标题行出现两次。 */
+   * 附带修复：正文 `# ` 标题行一律从 body 剥掉——旧版 full 里标题行出现两次；
+   * 2026-11-25 又实测到显式 title 分支漏剥（显式 title + 正文同一 `# 标题` 行 → 双标题）。 */
   const explicitTitle = input.title.trim()
   const heading = splitHeading(content)
   const fallbackTitle = (input.fallbackTitle ?? '').trim()
@@ -590,7 +591,10 @@ async function writeDiaryCoreLocked(
     explicitTitle ||
     heading?.title ||
     (fallbackTitle && !isUntitledArtifact(fallbackTitle) ? fallbackTitle : '')
-  const body = stripTagLine(explicitTitle ? content : (heading?.body ?? content))
+  // 标题行一律从 body 剥掉：无论标题源是显式参数还是正文 `# ` 行，模板都会再拼一次标题。
+  // 旧式 `explicitTitle ? content : ...` 在「显式 title + 正文首行 `# 标题`」时保留标题行 →
+  // full 里出现两个 `# 标题`（2026-11-25 实测，memo_read 照读两次）。heading 为空时 body 原样。
+  const body = stripTagLine(heading ? heading.body : content)
   // heading 剥行后 body 以空行开头（原标题行后的空行），拼模板会得到双空行——压掉一个
   const bodyText = body.replace(/^[ \t]*\r?\n/, '')
   const full = title ? `# ${title}\n\n${bodyText}\n\nTag: ${tags.join(', ')}\n` : ''

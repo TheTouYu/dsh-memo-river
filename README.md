@@ -3,60 +3,30 @@
 把 **VCPToolBox 的 TagMemo / RiverMemo 记忆算法**接进 DSH，做成 agent preset `memo-river`：
 **被动注入为主干、工具补证、守护维护**。
 
-**上手先读：[`docs/QUICKSTART.md`](./docs/QUICKSTART.md)**（基础安装 → 自研内核 → 本地嵌入+远端回退，每步带期望输出）。
-设计依据：[`DESIGN.md`](./DESIGN.md)；工程约定与红线：[`AGENTS.md`](./AGENTS.md)。
+**三条命令跑起来**（完整版：[`docs/GETTING-STARTED.md`](./docs/GETTING-STARTED.md)）：
+
+```bash
+git clone <repo> && cd dsh-memo-river
+node scripts/setup.mjs      # 备类型（Desktop 从 app.asar 抽）→ 编译 lib → 备内核（Windows 有预编译）
+node scripts/doctor.mjs     # 体检：内核可装载 / 嵌入端点维度 / profile 是否已装
+```
+
+然后把本目录装进 DSH（GUI「插件 → 添加插件」，或 agent 里
+`plugin_manager install_bundle target=<仓库绝对路径>`），重启 DSH，新会话选「记忆河流（Memo River）」。
+
+设计依据：[`DESIGN.md`](./DESIGN.md)；工程约定与红线：[`AGENTS.md`](./AGENTS.md)；
+嵌入端点怎么起：[`docs/LOCAL-EMBED.md`](./docs/LOCAL-EMBED.md)。
 
 ## 前置条件
 
 | 依赖 | 必需？ | 说明 |
 |---|---|---|
-| Node.js **≥ 22.5** | 必需 | 知识库用 `node:sqlite`（`DatabaseSync`）；本仓在 Node 26 上验证 |
-| DSH（DeepSeek Harness） | 必需 | 这是 dsh 插件，不是独立服务 |
-| OpenAI 兼容嵌入端点 | 建议 | 不配也能跑：写路径明确拒绝、注入跳过并通知，读取路径照常 |
-| cargo / VCPToolBox / NVIDIA GPU | 可选 | 分别是自研内核、上游内核、本地嵌入（§QUICKSTART 2/3） |
+| Node.js **≥ 22.5**（建议 24） | 必需 | 知识库用 `node:sqlite` |
+| DSH（DeepSeek Harness）≥0.2.2 | 必需 | 这是 dsh 插件，不是独立服务 |
+| OpenAI 兼容嵌入端点 | 强烈建议 | 不配也能跑：写路径明确拒绝、注入跳过并通知；但召回等于没有 |
+| Rust + C++ 工具链 | Windows x64 可选 | 没 Rust 用仓库自带预编译内核；其它平台需要它来编 `kernel/` |
 
 ---
-
-## 一句话
-
-每轮对话**自动**把相关历史日记片段注入到消息尾部（带 `role` / `Ω` / 奖励等证据分级）；
-`memo_write` 写入前**强制**回注旧 Tag 词汇与语义相关旧日记；守护循环定期做**四项语料体检**。
-
----
-
-## 三通道架构
-
-```
-① 主干（被动注入）
-   agent/pre-step  ──► recall() ──► 门控 ──► 渲染 ──► 消息尾部追加
-   固定的 system 段（零动态，保前缀缓存）
-
-② 工具（主动补证）
-   memo_recall / memo_write / memo_tags / memo_stats
-
-③ 守护（后台维护）
-   timer ──► 资产重建 + 四项体检 → health.log
-         └─► 回合草稿 → pending/（等确认，不自动入库）
-```
-
----
-
-## 安装 / 构建
-
-```bash
-npm install                    # 先装依赖（typescript / @types/node / undici）
-bash scripts/build.sh          # 链接构建依赖 + tsc：src/ → lib/
-node -e "import('./lib/index.js').then(m=>console.log(Object.keys(m)))"   # 验证产物可加载
-```
-
-> ⚠️ `npm install` 若报 `Cannot read properties of null (reading 'children')`：npm 12 解析本仓
-> **宿主提供的 peerDependencies**（`@deepseek-ai/dsh-*` / `cordis` / `schemastery`）时空指针崩溃。
-> 本仓已内置修法（`peerDependenciesMeta.*.optional` + 仓根 `.npmrc` 的 `legacy-peer-deps=true`）；
-> 仍崩就 `npm install --legacy-peer-deps`。详见 `docs/QUICKSTART.md` §5。
-
-依赖解析策略：**优先已安装的 npm 布局**（本插件实际运行的那个 dsh），源码 checkout 仅作兜底。
-理由见 `scripts/build.sh` 顶部注释——类型的来源必须与运行期的来源同一份。
-
 ## 接入 DSH
 
 插件包**自己就是 bundle**（`package.json` 的 `dsh.bundle.patch` → `bundle/cordis.patch.yml`），
@@ -71,14 +41,13 @@ plugin_manager  action=install_bundle  target=<仓库绝对路径>
 「**记忆河流（Memo River）**」即可（旧会话保持原预设）。
 
 `bundle/cordis.patch.yml` 的组合体 = **出厂 `standard` 预设逐行复制 + 一个私有分组**
-（0.2.2-rc.5 对齐）。平台差异用 `!!js` 分岔，同一份 patch 两平台通用：
+（0.2.2-rc.5 对齐）。**不用改文件也能覆盖配置**（环境变量，见 GETTING-STARTED §5）：
 
-| 键 | Windows | Linux |
-|---|---|---|
-| `embed.apiUrl` / `model` | `127.0.0.1:8091` / `Qwen3-Embedding-0.6B` | `127.0.0.1:8099` / `baai/bge-m3` |
-| `embed.fallbackApiUrl` | 空（无回退） | OpenRouter |
-| `native.vcpRoot` | 本仓 checkout | `/home/h/app/VCPToolBox` |
-| `native.kernel` | `reimpl` | `reimpl` |
+| 环境变量 | 缺省（Windows / 其它） |
+|---|---|
+| `MEMO_EMBED_URL` / `_API_KEY` / `_MODEL` / `_DIM` | `127.0.0.1:8091` / `local` / `Qwen3-Embedding-0.6B` / `1024`；Linux 缺省 8099 + bge-m3 |
+| `MEMO_EMBED_FALLBACK_*` | Windows 关；Linux 缺省 OpenRouter 回退 |
+| `native.vcpRoot` | 从插件包自身位置解析（跨机器免改，只用于读 rag_params.json） |
 
 > 宿主升级后重对齐：拿新版的
 > `app.asar/dsh/node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml`

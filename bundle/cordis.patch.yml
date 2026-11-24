@@ -59,15 +59,19 @@
                   # 不定它时同一文本会被路由到 DeepInfra/Parasail 两家，逐元素差
                   # 3.8e-4~7.3e-4（逐位不可复现，见 scripts/probe-embed-provider-routing.mjs）。
                   # 本地端点（Windows 8091 / Linux 8099）不吃这个键。
+                  # 嵌入端点：全部可用环境变量覆盖，免改 YAML（同一份 patch 谁都能用）：
+                  #   MEMO_EMBED_URL / MEMO_EMBED_API_KEY / MEMO_EMBED_MODEL / MEMO_EMBED_DIM
+                  #   MEMO_EMBED_FALLBACK_URL / _KEY / _MODEL / _PROVIDER
+                  # 维度必须等于模型真实输出维度（插件不发 dimensions 参数）。
                   embed:
-                    apiUrl: !!js "process.platform === 'win32' ? 'http://127.0.0.1:8091' : 'http://127.0.0.1:8099'"
-                    apiKey: 'local'
-                    model: !!js "process.platform === 'win32' ? 'Qwen3-Embedding-0.6B' : 'baai/bge-m3'"
-                    dimension: 1024
-                    fallbackApiUrl: !!js "process.platform === 'win32' ? '' : 'https://openrouter.ai/api'"
-                    fallbackApiKey: !!js "process.platform === 'win32' ? '' : (process.env.TAG_EMBED_KEY || '')"
-                    fallbackModel: !!js "process.platform === 'win32' ? '' : 'baai/bge-m3'"
-                    fallbackProviderOrder: !!js "process.platform === 'win32' ? '' : 'Parasail'"
+                    apiUrl: !!js "process.env.MEMO_EMBED_URL || (process.platform === 'win32' ? 'http://127.0.0.1:8091' : 'http://127.0.0.1:8099')"
+                    apiKey: !!js "process.env.MEMO_EMBED_API_KEY || 'local'"
+                    model: !!js "process.env.MEMO_EMBED_MODEL || (process.platform === 'win32' ? 'Qwen3-Embedding-0.6B' : 'baai/bge-m3')"
+                    dimension: !!js "Number(process.env.MEMO_EMBED_DIM || 1024)"
+                    fallbackApiUrl: !!js "process.env.MEMO_EMBED_FALLBACK_URL || (process.platform === 'win32' ? '' : 'https://openrouter.ai/api')"
+                    fallbackApiKey: !!js "process.env.MEMO_EMBED_FALLBACK_KEY || (process.platform === 'win32' ? '' : (process.env.TAG_EMBED_KEY || ''))"
+                    fallbackModel: !!js "process.env.MEMO_EMBED_FALLBACK_MODEL || (process.platform === 'win32' ? '' : 'baai/bge-m3')"
+                    fallbackProviderOrder: !!js "process.env.MEMO_EMBED_FALLBACK_PROVIDER || (process.platform === 'win32' ? '' : 'Parasail')"
                   inject:
                     gate: true
                     k: 3
@@ -84,7 +88,8 @@
                     embedTimeoutMs: 15000
                   native:
                     kernel: 'reimpl'
-                    vcpRoot: !!js "process.platform === 'win32' ? 'E:/h/plugins/dsh-memo-river' : '/home/h/app/VCPToolBox'"
+                    # vcpRoot 只用来读 rag_params.json；从「插件包自身位置」解析，跨机器免改。
+                    vcpRoot: !!js "(function(){try{return process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('@dsh-external/dsh-memo-river/package.json'))}catch(e){return process.cwd()}})()"
 
           - id: tool-bash
             name: '@deepseek-ai/dsh-tool-bash'

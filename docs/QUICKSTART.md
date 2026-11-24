@@ -1,5 +1,10 @@
 # QUICKSTART — 从零把它跑起来
 
+> **先看最短路径：[`GETTING-STARTED.md`](./GETTING-STARTED.md)**（`node scripts/setup.mjs` →
+> `node scripts/doctor.mjs` → 装 bundle，跨平台、Desktop 也适用）。
+> 本文是 **Linux 深度版**：自研内核五腿差分、VCPToolBox 对照夹具、本地嵌入部署细节、
+> 手工 junction 布局——排查/改内核时再回来读。
+>
 > 读者：拿到这个仓、没读过任何内部文档的人（也包括三个月后的自己）。
 > 本文三条路径各自独立可验证：**基础安装（必做）** → **自研内核（可选）** → **本地嵌入 + 远端回退（可选）**。
 > 每一步都给了**期望输出**；输出不对就跳到 §5 故障排查表。

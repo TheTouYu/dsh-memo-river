@@ -47,7 +47,10 @@
     "typescript": "^5.9.0"
   },
   "scripts": {
-    "build": "bash scripts/build.sh",
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "build": "node scripts/setup.mjs",
+    "build:kernel": "node scripts/setup.mjs --kernel-only",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }
