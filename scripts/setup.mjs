@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /**
  * scripts/setup.mjs — 一条命令把仓库准备到可运行（Windows / macOS / Linux，零第三方依赖）。
  *
@@ -169,7 +169,7 @@ function extractAsarDeps(dsh) {
   log('从 Desktop app.asar 抽取类型/运行期包到 .deps …')
   rmSync(DEPS, { recursive: true, force: true })
   mkdirSync(DEPS, { recursive: true })
-  const helper = join(ROOT, 'scripts', 'lib', 'extract-asar-deps.mjs')
+  const helper = join(ROOT, 'scripts', 'extract-asar-deps.mjs')
   const res = spawnSync(dsh.electron, [helper, dsh.asarRoot, DEPS], {
     cwd: ROOT, stdio: 'inherit', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
   })
@@ -318,3 +318,4 @@ function main() {
 }
 
 main()
+
