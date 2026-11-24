@@ -6,6 +6,15 @@
 
 - `src/` → 编译 `lib/`（**构建产物，.gitignore 不入库**）；`kernel/` 是 rust 复刻内核（cdylib → `kernel/memo-kernel.linux-x64-gnu.node`，同样不入库，`cargo build --release` 后 cp）；上游对照真件在 `/home/h/app/VCPToolBox/rust-vexus-lite`（有 `ensure_sqlite_keepalive`，行为基准）。
 - `zcode-adapter/` 是 ZCode 侧分支形态；`scripts/` 含验收/差分/运维件。
+- **安装面 = 插件包自己就是 bundle**：`package.json` 的 `dsh.bundle.patch` 指向 `bundle/cordis.patch.yml`，
+  `plugin_manager install_bundle <仓库根>` 一步完成「装包 + 选 bundle + 挂 preset-memo-river 预设」。
+  patch 的组合体是**出厂 `standard` 预设逐行复制 + 一个私有分组**（0.2.2-rc.5 对齐，2026-11-25 重写）；
+  平台差异（嵌入端点 / vcpRoot）用 `!!js` 分岔，别在 patch 里发明出厂没有的行。
+- **reimpl 派生资产走顶层 `runMemoGeometry(db, modelSig, config, dim)`**：VCP 2.0 起上游
+  `computeEpaBasis` / `computeIntrinsicResiduals` / `computePairwiseSimilarities` 退役
+  （pairwise 表被 migrate_geometry_assets DROP）。`src/native.ts` 检测到内核导出就调
+  geometry 并把 `epaBasis/residuals/pairwise` 映射过去（`assets.geometry` 带完整诊断）；
+  vcp 轨仍走旧三件。**别把这段改回「三件套」**——reimpl 上只会拿到 `is not a function`。
 
 ## 构建红线
 
@@ -18,6 +27,8 @@
 - **内核/写路径改动**（kernel/、store.ts、workspace.ts、daemon.ts、tools.ts）：`node kernel/tools/diff-runner.mjs` 五腿 PASS（判据分数差 ≤1e-6，健康史 1.11e-16）+ `node scripts/acceptance.mjs` 38/38（2026-10-28 新增 #38：注入行不算新用户输入；reimpl 轨跑法：`MEMO_NATIVE_KERNEL=reimpl node scripts/acceptance.mjs`）。#8 已改为**读出链名次快照**（2026-10-15 v2 基准，bge-m3@OpenRouter·钉 Parasail、查询向量现场嵌）：换嵌入模型/端点后名次会变属预期——用 `MEMO_ACC_RERECORD_SNAPSHOT=1` 重录、人工核对 generated.json 后贴回 SNAPSHOT 常量，**不许静默自愈**；「与上游一致」由 diff-runner 专责，不再比 native-result.json.bak（跨模型旧档，已死档）。tools.ts（写路径工具面）改动另加 `node scripts/probe-h7.mjs` 6/6（H7 写入闸门行为探针，真嵌入 8099；只锚「H7·推翻信号」标记词与 cos 值，**不锚建议行文案**——文案迭代不用改探针，2026-10-16 起）。
 - **注入/查询场/降级路径改动**（injector.ts、render.ts、session.ts）：`node scripts/acceptance-queryfield.mjs` 6/6（**无端点依赖**，含 source.kind 白名单逐条 + 同日志新旧实现负对照 + 失败通知集成）+ `node scripts/acceptance.mjs`。⚠️ 主套件跑真嵌入端点，**端点劣化时整套会随机红 6-8 条**（2026-10-14 实测：同一份代码两次跑红集不相交 #1/#4/#5/#31 ↔ #17/#32/#37）——红一条先复跑、再看桶日志里的 `inject-skip reason=embed-*` 占比，别急着归因代码。复跑仍红且端点健康时，用**负对照定罪**：`git stash` 掉自己的改动跑基线，红集相同=预存抖动，放行并另案登记（2026-10-15 实证：{#8,#10,#25} 与 logger 补线零关联，正是此法洗清）。
 - 生产内核轨切换：双轨 acceptance 全绿才允许改 `~/.config/systemd/user/dsh-web.service.d/kernel-reimpl.conf` 的 `Environment=MEMO_NATIVE_KERNEL`，改后 daemon-reload + restart dsh-web。
+- **Windows（Desktop 版，2026-11-25 起）**：构建/运行件在仓库外 `E:\h\plugins\.setup\`（`build-win.ps1`、`build-kernel.ps1`、`integration-inject.mjs`、`perf-recall.mjs`）。本机可跑套件与实测基线见 `docs/WINDOWS-2026-11-25.md` §4；**主套件 38/38 与 diff-runner 五腿在本机跑不了**（缺 VCPToolBox 夹具与上游 oracle），别把它们当红。跑本仓套件要 `MEMO_NATIVE_KERNEL=reimpl`（缺省 vcp 会去找不存在的 rust-vexus-lite，表现为「全轮零注入」而不是报错）。
+- **Linux 路径假设已清掉**：`scripts/` 统一 `fileURLToPath(new URL(...))` 取路径、`pathToFileURL(...).href` 喂动态 `import()`、临时根 `MEMO_ACC_TMP_ROOT > TMPDIR > os.tmpdir()`、VCP 根 `MEMO_VCP_ROOT`。收尾清理一律用 `scripts/safe-rm.mjs` 的 `safeRm`（内核 WAL keepalive 在 Windows 上让 `rmSync` 抛 EPERM，会把全绿套件变成假红）。
 
 ## 测量与断言纪律（2026-10-14/15 复盘提炼，每条都有血）
 

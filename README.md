@@ -59,26 +59,32 @@ node -e "import('./lib/index.js').then(m=>console.log(Object.keys(m)))"   # 验�
 
 ## 接入 DSH
 
-```bash
-# 方式一：运行时注入（免重启，开发/验证用）
-dev_build_plugin  /home/h/app/dsh-memo-river
-dev_inject_plugin /home/h/app/dsh-memo-river
+插件包**自己就是 bundle**（`package.json` 的 `dsh.bundle.patch` → `bundle/cordis.patch.yml`），
+所以安装只有一步：
 
-# 方式二：装进 profile（重启后仍在）
-dev_install_package /home/h/app/dsh-memo-river
+```
+plugin_manager  action=install_bundle  target=<仓库绝对路径>
 ```
 
-## 预设
+它会做三件事：把仓库 `link:` 进 `$DSH_PROFILE_DIR/node_modules`、把包名加进
+`dsh.profile.bundles`、挂上 `preset-memo-river`。装完在 GUI 新会话里选
+「**记忆河流（Memo River）**」即可（旧会话保持原预设）。
 
-`~/.dsh/.agent-presets/memo-river/`：
+`bundle/cordis.patch.yml` 的组合体 = **出厂 `standard` 预设逐行复制 + 一个私有分组**
+（0.2.2-rc.5 对齐）。平台差异用 `!!js` 分岔，同一份 patch 两平台通用：
 
-| 文件 | 作用 |
-|---|---|
-| `preset.yml` | 展示元数据（name / description / order） |
-| `agent.cordis.yml` | 组装：从 shipped `standard` 复制，只多一行 `memo-river` 私有插件 |
-| `memo-river.mjs` | 本地 wrapper：`export { … } from 'file:///home/h/app/dsh-memo-river/lib/index.js'` |
+| 键 | Windows | Linux |
+|---|---|---|
+| `embed.apiUrl` / `model` | `127.0.0.1:8091` / `Qwen3-Embedding-0.6B` | `127.0.0.1:8099` / `baai/bge-m3` |
+| `embed.fallbackApiUrl` | 空（无回退） | OpenRouter |
+| `native.vcpRoot` | 本仓 checkout | `/home/h/app/VCPToolBox` |
+| `native.kernel` | `reimpl` | `reimpl` |
 
-安装后，在 GUI 的新会话里选「**记忆河流（Memo River）**」预设即可。
+> 宿主升级后重对齐：拿新版的
+> `app.asar/dsh/node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml`
+> 逐行替换，只在里面插入 `memo-river` 分组——0.1.7 时代手抄的旧版在 0.2.x 上会挂载失败。
+
+Windows（Desktop 版）的构建、验证与性能基线见 **[`docs/WINDOWS-2026-11-25.md`](./docs/WINDOWS-2026-11-25.md)**。
 
 ---
 

@@ -12,6 +12,7 @@
 | 文件 | 一句话 | 状态 | 最后更新 |
 |---|---|---|---|
 | `QUICKSTART.md` | 从零跑通的三条独立路径：基础安装（npm 装坑/build.sh/挂 DSH/最小配置/三条成功判据）→ 自研内核（cargo 构建+五腿验证）→ 本地嵌入+远端回退（精简版，详见 local-embed）；§5 故障排查表、§6 目录与读文档顺序 | 权威/现行 | 2026-10-15 |
+| `WINDOWS-2026-11-25.md` | Windows + DSH Desktop 0.2.2 的本地化交接：main 快进到 kernel-reimpl、插件包自带 bundle、预设置按出厂 standard 重写、reimpl 接 `runMemoGeometry`；含构建命令、真链路集成/性能基线（召回 p50 32ms）、可跑套件清单与「本机跑不了的」（主套件 38/38 缺 VCP 夹具、diff-runner 缺上游 oracle）、平台移植（fileURLToPath / pathToFileURL / safeRm） | 权威/现行 | 2026-11-25 |
 
 ### 我要理解系统设计/架构决策
 | 文件 | 一句话 | 状态 | 最后更新 |
