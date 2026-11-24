@@ -41,6 +41,21 @@ const warn = (msg) => console.warn(`[setup] WARN ${msg}`)
 const fail = (msg) => { console.error(`[setup] FAIL ${msg}`); process.exit(1) }
 const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { cwd: ROOT, stdio: 'inherit', ...opts })
 
+/**
+ * 调 npm 的稳妥方式：优先用 `node <npm-cli.js>`（无 shell、无参数拼接、无 DEP0190），
+ * 找不到再退回 `npm(.cmd) + shell`（Node 不允许 shell:false 直接跑 .cmd）。
+ */
+function npmCommand(args) {
+  const candidates = [
+    join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ]
+  const cli = candidates.find((p) => existsSync(p))
+  if (cli) return { cmd: process.execPath, args: [cli, ...args], shell: false }
+  return IS_WIN ? { cmd: 'npm.cmd', args, shell: true } : { cmd: 'npm', args, shell: false }
+}
+
+
 /* ─────────────────────────── 1. Node 版本 ─────────────────────────── */
 function checkNode() {
   const [major, minor] = process.versions.node.split('.').map(Number)
@@ -124,8 +139,8 @@ function ensureNpmDeps() {
   }
   if (FLAG('no-npm')) fail('缺 typescript 且指定了 --no-npm：请先 `npm install`，或用 TSC=<tsc 路径> 指一个现成编译器')
   log('未找到 typescript，执行 npm install（只装 devDependencies 需要的包）…')
-  const npm = IS_WIN ? 'npm.cmd' : 'npm'
-  const res = run(npm, ['install', '--no-audit', '--no-fund'], { shell: IS_WIN })
+  const npm = npmCommand(['install', '--no-audit', '--no-fund'])
+  const res = run(npm.cmd, npm.args, { shell: npm.shell })
   if (res.status !== 0) {
     fail('npm install 失败。常见原因：registry 不可达/需代理。可设 `npm config set registry https://registry.npmmirror.com`，或手动 `npm install` 后重跑本脚本')
   }
@@ -206,10 +221,8 @@ function installAsarTypes() {
   log(`Desktop asar 不含 .d.ts；从 npm 装同版本类型包（${specs.length} 个）…`)
   rmSync(typesDir, { recursive: true, force: true })
   mkdirSync(typesDir, { recursive: true })
-  const npm = IS_WIN ? 'npm.cmd' : 'npm'
-  const res = spawnSync(npm, ['install', '--prefix', typesDir, '--no-save', '--no-package-lock', '--no-audit', '--no-fund', ...specs], {
-    cwd: typesDir, stdio: 'inherit', shell: IS_WIN,
-  })
+  const npm = npmCommand(['install', '--prefix', typesDir, '--no-save', '--no-package-lock', '--no-audit', '--no-fund', ...specs])
+  const res = spawnSync(npm.cmd, npm.args, { cwd: typesDir, stdio: 'inherit', shell: npm.shell })
   if (res.status !== 0) {
     warn('类型包 npm 安装失败（离线/registry 不可达）：改用 .deps 的 asar 运行期包，tsc 可能报缺声明')
     return false
