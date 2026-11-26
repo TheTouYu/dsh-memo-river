@@ -156,6 +156,9 @@ node scripts/acceptance.mjs              # 主套件 37 项（真嵌入端点）
 
 ## 3. 本地嵌入（可选；带远端回退）
 
+> 本节是**可跑通的最短路径**。装机四坑、systemd 限额、四级验证判据、运维与故障表见
+> [`EMBED-DEPLOY-bge-m3.md`](./EMBED-DEPLOY-bge-m3.md)。
+
 ### 3.1 为什么值得做
 
 实测（同一探针、同一方法学，见 `docs/local-embed-2026-10-15.md`）：
