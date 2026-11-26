@@ -302,7 +302,7 @@ systemctl --user start dsh-embed
 | 症状 | 先查 | 常见真因 |
 |---|---|---|
 | 注入被跳过，日志 `inject-skip reason=embed-failed: ...402` | `ss -tnp \| grep 8099`；bundle 是否带 embed 段 | 预设缺 embed 段 → 回落 VCP `config.env` 的 OpenRouter → 余额耗尽 |
-| `memo_recall` 报 `native-failed: ...geometry facts are stale` | 见下条 | 与嵌入无关：原生几何资产代际与 `memo_tag_facts` 不一致（2026-11-18 起的已知死锁，`kernel/src/memo_artifact_builder.rs:171`） |
+| `memo_recall` 报 `native-failed: ...geometry facts are stale` | `memo_selfcheck` 的「原生资产」行 | 与嵌入无关：原生几何资产代际与 `memo_tag_facts` 不一致。**2026-11-26 已修**：`ensureArtifact` 自愈（先 `computeMemoGeometry` 追平世代，再重建；回归探针 `scripts/probe-artifact-stale-recovery.mjs`），`memo_selfcheck` 会标「几何事实陈旧→已先刷几何再重建」 |
 | `ss` 里没有到 8099 的连接 | `systemctl --user status dsh-embed`；`/health` | 服务没起、端口被占、或配置指向别处 |
 | `/health` 200 但请求耗时 >1s | `/health` 的 `wait_ms_p95` vs `encode_ms_p95` | 排队（单锁串行，并发打满）而非编码慢；减少并发或拆批 |
 | 服务反复重启 | `journalctl --user -u dsh-embed -n 50` | 显存不足（OOM）、快照不完整（`HF_HUB_OFFLINE=1` 拒绝加载）、`[::1]` 代理坑 |

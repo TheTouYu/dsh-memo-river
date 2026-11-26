@@ -1417,7 +1417,8 @@ export function installTools(
             const state = await workspace.engine.ensureArtifact(args.rebuild === true)
             lines.push(
               `· 原生资产：artifactSig=${state.artifactSig.slice(0, 24)}… 节点=${state.nodeCount} 边=${state.edgeCount} ` +
-                `persisted=${state.persisted} resident=${state.resident} 本次重建耗时=${state.elapsedMs}ms`,
+                `persisted=${state.persisted} resident=${state.resident} 本次重建耗时=${state.elapsedMs}ms` +
+                (state.geometryRecovered ? '（几何事实陈旧→已先刷几何再重建）' : ''),
             )
           } else {
             lines.push('· 原生资产：未载入（native-unavailable）')

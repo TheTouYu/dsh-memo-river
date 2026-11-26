@@ -200,6 +200,8 @@ export interface ArtifactState {
   persisted: boolean
   resident: boolean
   sourceElapsedMs?: number
+  /** 2026-11-26：本轮是否走「几何事实陈旧 → 先刷几何再重建」的自愈通道（生产取证位）。 */
+  geometryRecovered?: boolean
   /**
    * 派生资产台账（V5 起全部由 computeMemoGeometry 一件产出：EPA 基底缓存 +
    * 内生残差 + 锥诊断；pairwise 档已退役，字段保留兼容健康面展示）。
@@ -412,62 +414,101 @@ export class MemoEngine {
     const ti = this.tagIndex
     const input = JSON.stringify({ modelSig: this.options.modelSig, effectiveConfig: this.kbm })
     const t0 = Date.now()
-    const result = (await this.withNative(() =>
-      ti.rebuildMemoArtifact(this.options.store.dbPath, input),
-    )) as NativeMemoArtifactBuildResult
-    const unchanged = !force && this.artifact?.artifactSig === result.artifactSig
     const dbPath = this.options.store.dbPath
     const modelSig = this.options.modelSig
+    // P4/V5：统一几何任务一体产出（EPA 基底缓存 + 内生残差 + 锥诊断）。
+    // 旧三连 computeEpaBasis/publishEpaBasisCache/computeIntrinsicResiduals 与
+    // computePairwiseSimilarities 已随上游 e22aede 退役（VexusIndex 原型面不再导出）。
+    // 配置形态照抄上游 TagMemoEngine.js:240（kb.geometry 优先，缺省回退 intrinsicResidual）。
+    const kb = this.kbm as { geometry?: unknown; intrinsicResidual?: unknown }
+    const geometryConfig = JSON.stringify(kb.geometry ?? kb.intrinsicResidual ?? {})
+    const assets: ArtifactState['assets'] = {
+      epaBasis: { ok: false, basisCount: 0, error: null },
+      residuals: { ok: false, computed: 0, skipped: 0, error: null },
+      pairwise: { ok: false, stored: 0, error: null },
+    }
+    const build = async (): Promise<NativeMemoArtifactBuildResult> =>
+      (await this.withNative(() =>
+        ti.rebuildMemoArtifact(dbPath, input),
+      )) as NativeMemoArtifactBuildResult
 
-    const assets: ArtifactState['assets'] = unchanged && this.artifact
-      ? this.artifact.assets
-      : {
-          epaBasis: { ok: false, basisCount: 0, error: null },
-          residuals: { ok: false, computed: 0, skipped: 0, error: null },
-          pairwise: { ok: false, stored: 0, error: null },
-        }
+    /**
+     * 2026-11-26 死锁修复（TDD 探针 scripts/probe-artifact-stale-recovery.mjs）：
+     * Tag 写把 `memo_tag_facts` 推进后，最近一次 `unified_geometry` 行的
+     * `graph_generation` 仍是旧世代 → 内核 build 路径
+     * （kernel/src/memo_artifact_builder.rs:171 load_anchor_gains）直接 Err
+     * `KNOWLEDGE_STORE_DERIVED_DEPENDENCY_CONFLICT: geometry facts are stale`。
+     * 而刷新几何的 `computeMemoGeometry` 在本函数里原本排在 build **之后** ⇒ 重建被自己的
+     * 陈旧检查否决，几何永不刷新、facts 继续前进 ⇒ 生产死锁（本桶 2026-11-18 起召回全断 8 天）。
+     *
+     * 上游契约（kernel/src/memo_workspace_build_tests.rs:51「A Tag write requires fresh
+     * geometry under the existing upstream contract」）要求调用方先刷几何再 build——
+     * 所以这里在检测到陈旧错误时**先** computeMemoGeometry（publish 会把 graph_generation
+     * 追平当前 facts），**再**重试一次 build；内核语义与上游一致性不动。
+     */
+    let result: NativeMemoArtifactBuildResult
+    let geometryRefreshed = false
+    try {
+      result = await build()
+    } catch (e) {
+      if (!/geometry facts are stale/.test(String((e as Error)?.message ?? e))) throw e
+      geometryRefreshed = true
+      await this.refreshGeometry(ti, dbPath, modelSig, geometryConfig, assets)
+      result = await build()
+    }
 
-    if (!unchanged || force) {
-      // P4/V5：统一几何任务一体产出（EPA 基底缓存 + 内生残差 + 锥诊断）。
-      // 旧三连 computeEpaBasis/publishEpaBasisCache/computeIntrinsicResiduals 与
-      // computePairwiseSimilarities 已随上游 e22aede 退役（VexusIndex 原型面不再导出）。
-      // 配置形态照抄上游 TagMemoEngine.js:240（kb.geometry 优先，缺省回退 intrinsicResidual）。
-      const kb = this.kbm as { geometry?: unknown; intrinsicResidual?: unknown }
-      const geometryConfig = JSON.stringify(kb.geometry ?? kb.intrinsicResidual ?? {})
-      try {
-        const geo = await this.withNative(() =>
-          ti.computeMemoGeometry(dbPath, modelSig, geometryConfig),
-        )
-        const ok = geo?.success !== false
-        assets.epaBasis = { ok, basisCount: geo?.kEff ?? 0, error: ok ? null : 'geometry-failed' }
-        assets.residuals = {
-          ok,
-          computed: geo?.computedCount ?? 0,
-          skipped: geo?.skippedCount ?? 0,
-          error: ok ? null : 'geometry-failed',
-        }
-        assets.pairwise = { ok: true, stored: 0, error: null } // V5 退役（vectors 档唯一路径）
-      } catch (e) {
-        const message = String((e as Error)?.message ?? e)
-        assets.epaBasis = { ok: false, basisCount: 0, error: message }
-        assets.residuals = { ok: false, computed: 0, skipped: 0, error: message }
-        assets.pairwise = { ok: true, stored: 0, error: null }
-      }
+    const unchanged = !force && this.artifact?.artifactSig === result.artifactSig
+    if (geometryRefreshed) {
+      // 几何已被上面追平，assets 即本轮结果
+    } else if (!unchanged || force) {
+      await this.refreshGeometry(ti, dbPath, modelSig, geometryConfig, assets)
+    } else if (this.artifact) {
+      Object.assign(assets, this.artifact.assets)
     }
 
     const state: ArtifactState = {
       artifactSig: result.artifactSig,
       builtAt: Date.now(),
-      elapsedMs: unchanged ? 0 : Date.now() - t0,
+      elapsedMs: geometryRefreshed || !unchanged ? Date.now() - t0 : 0,
       nodeCount: result.nodeCount,
       edgeCount: result.edgeCount,
       persisted: result.persisted,
       resident: result.resident,
       sourceElapsedMs: result.elapsedMs,
+      geometryRecovered: geometryRefreshed,
       assets,
     }
     this.artifact = state
     return state
+  }
+
+  /** 统一几何刷新（EPA 基底缓存 + 内生残差 + 锥诊断），结果就地写入 `assets`。 */
+  private async refreshGeometry(
+    ti: NativeVexusIndex,
+    dbPath: string,
+    modelSig: string,
+    geometryConfig: string,
+    assets: ArtifactState['assets'],
+  ): Promise<void> {
+    try {
+      const geo = await this.withNative(() =>
+        ti.computeMemoGeometry(dbPath, modelSig, geometryConfig),
+      )
+      const ok = geo?.success !== false
+      assets.epaBasis = { ok, basisCount: geo?.kEff ?? 0, error: ok ? null : 'geometry-failed' }
+      assets.residuals = {
+        ok,
+        computed: geo?.computedCount ?? 0,
+        skipped: geo?.skippedCount ?? 0,
+        error: ok ? null : 'geometry-failed',
+      }
+      assets.pairwise = { ok: true, stored: 0, error: null } // V5 退役（vectors 档唯一路径）
+    } catch (e) {
+      const message = String((e as Error)?.message ?? e)
+      assets.epaBasis = { ok: false, basisCount: 0, error: message }
+      assets.residuals = { ok: false, computed: 0, skipped: 0, error: message }
+      assets.pairwise = { ok: true, stored: 0, error: null }
+    }
   }
 
   /** ② runMemoPipeline：一次 N-API 提交拿观测包（enhancedVector + observationHandle）。 */
