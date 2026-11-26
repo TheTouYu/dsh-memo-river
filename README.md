@@ -112,6 +112,30 @@ dev_install_package /home/h/app/dsh-memo-river
 
 ---
 
+## 嵌入服务（本地 bge-m3）
+
+生产用**本地自托管 `BAAI/bge-m3`**（568M，dense 1024 维）做主端点，远端同模型做保底：
+
+| 泳道 | 端点 | 模型 | 说明 |
+|---|---|---|---|
+| primary | `http://127.0.0.1:8099` | `baai/bge-m3` | `dsh-embed.service`（systemd 用户级，`Restart=always`），显存 ~1.3GB，单条 p50 23ms |
+| fallback | `https://openrouter.ai/api` | `baai/bge-m3`（钉 `Parasail`） | 主端点超时/拒绝/5xx 才打；两端点 cos≈0.99997，向量入同一缓存 |
+
+选型与部署（为什么是它、装机四坑、systemd 限额、四级验证、故障表）见
+**[`docs/EMBED-DEPLOY-bge-m3.md`](./docs/EMBED-DEPLOY-bge-m3.md)**。三条常查判据：
+
+```bash
+ss -tnp | grep 8099                          # 有 ESTAB 才算生产真在用（keep-alive 常挂）
+curl -s http://127.0.0.1:8099/health         # stats.errors=0，可看到 wait/encode 分位
+grep -c 'reason=embed-' <桶>/memo-river.log  # 注入被跳过里不应出现 embed-*
+```
+
+⚠️ `embed:` 段在**每个预设 bundle 各有一份**（共 9 份），实际挂载哪份由
+`agent-preset-registry.selectedDefault` 决定（2026-11-26 实测 = `river-acp`）。
+只改仓内 `bundle/cordis.patch.yml` 会改到没人在用的那份——判据用上面第一条。
+
+---
+
 ## 存储
 
 ```
